@@ -1,13 +1,22 @@
-import argparse
-import io
+import argparse, io, os, sys
 from types import SimpleNamespace as SN
 from concurrent import futures
+
 import numpy as np
 import cv2 as cv
 import PIL
 
 import grpc
-import generation_pb2, generation_pb2_grpc
+from flask import Flask, send_from_directory
+from sonora.wsgi import grpcWSGI
+from wsgicors import CORS
+
+# Google protoc compiler is dumb about imports (https://github.com/protocolbuffers/protobuf/issues/1491)
+# TODO: Move to https://github.com/danielgtaylor/python-betterproto
+generatedPath = os.path.join(os.path.dirname(__file__), "generated")
+sys.path.append(generatedPath)
+
+from generated import generation_pb2, generation_pb2_grpc, dashboard_pb2, dashboard_pb2_grpc
 
 import torch
 from diffusers import StableDiffusionPipeline
@@ -89,14 +98,53 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
         except Exception as e:
             print(e)
 
+class DashboardServiceServicer(dashboard_pb2_grpc.DashboardServiceServicer):
+    def __init__(self):
+        pass
+
+    def GetMe(self, request, context):
+        user = dashboard_pb2.User()
+        user.id="0000-0000-0000-0001"
+        return user
+
+class DartGRPCCompatibility(object):
+    """Fixes a couple of compatibility issues between Dart GRPC-WEB and Sonora
+
+    - Dart GRPC-WEB doesn't set HTTP_ACCEPT header, but Sonora needs it to build Content-Type header on response
+    - Sonora sets Access-Control-Allow-Origin to HTTP_HOST, and we need to strip it out so CORSWSGI can set the correct value
+    """
+    def __init__(self, app):
+        self.app = app
+
+    def __call__(self, environ, start_response):
+        def wrapped_start_response(status, headers):
+            headers = [header for header in headers if header[0] != 'Access-Control-Allow-Origin']
+            return start_response(status, headers)
+        
+        if environ.get("HTTP_ACCEPT") == "*/*":
+            environ["HTTP_ACCEPT"] = "application/grpc-web+proto"
+
+        return self.app(environ, wrapped_start_response)
 
 def serve(pipe):
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(pipe), server)
+    dashboard_pb2_grpc.add_DashboardServiceServicer_to_server(DashboardServiceServicer(), server)
+
     server.add_insecure_port('[::]:50051')
     server.start()
-    print("Ready")
-    server.wait_for_termination()
+
+    app = Flask(__name__)
+    grpcapp = app.wsgi_app = grpcWSGI(app.wsgi_app)
+    app.wsgi_app = DartGRPCCompatibility(app.wsgi_app)
+    app.wsgi_app = CORS(app.wsgi_app, headers="*", methods="*", origin="*")
+
+    generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(pipe), grpcapp)
+    dashboard_pb2_grpc.add_DashboardServiceServicer_to_server(DashboardServiceServicer(), grpcapp)
+
+    print("Ready, listening on port 50051")
+    app.run(host='0.0.0.0')
+    #server.wait_for_termination()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -105,8 +153,10 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    pipe = None
     pipe = StableDiffusionPipeline.from_pretrained(args.ckpt, revision="fp16", torch_dtype=torch.float16) 
     pipe = pipe.to("cuda")
     print("Loaded pipe onto ", str(pipe.device))
 
     serve(pipe)
+
