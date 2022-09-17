@@ -16,7 +16,7 @@ from wsgicors import CORS
 generatedPath = os.path.join(os.path.dirname(__file__), "generated")
 sys.path.append(generatedPath)
 
-from generated import generation_pb2, generation_pb2_grpc, dashboard_pb2, dashboard_pb2_grpc
+from generated import generation_pb2, generation_pb2_grpc, dashboard_pb2, dashboard_pb2_grpc, engines_pb2, engines_pb2_grpc
 
 import torch
 from diffusers import StableDiffusionPipeline
@@ -107,6 +107,25 @@ class DashboardServiceServicer(dashboard_pb2_grpc.DashboardServiceServicer):
         user.id="0000-0000-0000-0001"
         return user
 
+class EnginesServiceServicer(engines_pb2_grpc.EnginesServiceServicer):
+    def __init__(self):
+        pass
+
+    def ListEngines(self, request, context):
+        engine = engines_pb2.EngineInfo()
+        engine.id="stable-diffusion-v1"
+        engine.name="Stable Diffusion v1.4"
+        engine.description="Stable Diffusion v1.4"
+        engine.owner="stable-diffusion-grpcserver"
+        engine.ready=True
+        engine.type=engines_pb2.EngineType.PICTURE
+
+        engines = engines_pb2.Engines()
+        engines.engine.append(engine)
+
+        return engines
+
+
 class DartGRPCCompatibility(object):
     """Fixes a couple of compatibility issues between Dart GRPC-WEB and Sonora
 
@@ -130,6 +149,7 @@ def serve(pipe):
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(pipe), server)
     dashboard_pb2_grpc.add_DashboardServiceServicer_to_server(DashboardServiceServicer(), server)
+    engines_pb2_grpc.add_EnginesServiceServicer_to_server(EnginesServiceServicer(), server)
 
     server.add_insecure_port('[::]:50051')
     server.start()
@@ -141,6 +161,7 @@ def serve(pipe):
 
     generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(pipe), grpcapp)
     dashboard_pb2_grpc.add_DashboardServiceServicer_to_server(DashboardServiceServicer(), grpcapp)
+    engines_pb2_grpc.add_EnginesServiceServicer_to_server(EnginesServiceServicer(), grpcapp)
 
     print("Ready, listening on port 50051")
     app.run(host='0.0.0.0')
