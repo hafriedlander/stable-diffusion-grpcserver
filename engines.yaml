@@ -1,0 +1,23 @@
+- id: "stable-diffusion-v1-4-standard"
+  enabled: True
+  visible: True
+  name: "Stable Diffusion V1.4 standard"
+  description: "Stable Diffusion using the original Stability.AI model and Diffusers pipeline"
+  class: "StableDiffusionPipeline"
+  model: "CompVis/stable-diffusion-v1-4"
+  local_model: "./weights/stable-diffusion-v1-4"
+  use_auth_token: True
+  fp16: True
+  default: True
+- id: "waifu-diffusion-v1-2-standard"
+  enabled: True
+  visible: True
+  name: "Waifu Diffusion V1.2 standard"
+  description: "Stable Diffusion using Hakurei Waitfu Diffusion model and the original Diffusers pipeline"
+  class: "StableDiffusionPipeline"
+  model: "hakurei/waifu-diffusion"
+  local_model: "./weights/waifu-diffusion"
+  use_auth_token: False
+  fp16: True
+
+

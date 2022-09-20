@@ -1,5 +1,8 @@
 # Initially taken from Github's Python gitignore file
 
+weights/*
+src/*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -164,3 +167,6 @@ tags
 
 # DS_Store (MacOS)
 .DS_Store
+
+# Always include .gitkeep files
+!.gitkeep
