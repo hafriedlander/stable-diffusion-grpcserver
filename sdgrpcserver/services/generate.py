@@ -4,7 +4,7 @@ from types import SimpleNamespace as SN
 import grpc
 from generated import generation_pb2, generation_pb2_grpc
 
-from sdgrpcserver.utils import image_to_artifact
+from sdgrpcserver.utils import image_to_artifact, artifact_to_image
 
 class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
     def __init__(self, manager):
@@ -17,6 +17,7 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
         try:
             # Assume that "None" actually means "Image" (stability-sdk/client.py doesn't set it)
             if request.requested_type != generation_pb2.ARTIFACT_NONE and request.requested_type != generation_pb2.ARTIFACT_IMAGE:
+                print(request.requested_type)
                 context.set_code(grpc.StatusCode.UNIMPLEMENTED)
                 context.set_details('Generation of anything except images not implemented')
                 raise NotImplementedError('Generation of anything except images not implemented')
@@ -28,24 +29,29 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                 which = prompt.WhichOneof("prompt")
                 if which == "text": text += prompt.text
                 elif which == "sequence": self.unimp()
-                else: self.unimp()
+                else:
+                  if prompt.artifact.type == generation_pb2.ARTIFACT_IMAGE:
+                    image=artifact_to_image(prompt.artifact)
+                  else:
+                    self.unimp()
 
-            image=SN(
+
+            params=SN(
                 height=512,
                 width=512,
                 samples=1,
                 steps=50
             )
 
-            for field in vars(image):
+            for field in vars(params):
                 if request.image.HasField(field):
-                    setattr(image, field, getattr(request.image, field))
+                    setattr(params, field, getattr(request.image, field))
             
-            image.seed = -1
-            for seed in request.image.seed: image.seed = seed
+            params.seed = -1
+            for seed in request.image.seed: params.seed = seed
 
             pipe = self._manager.getPipe(request.engine_id)
-            images = pipe.generate(text, image)
+            images = pipe.generate(text=text, image=image, params=params)
 
             answer = generation_pb2.Answer()
             answer.request_id="x" # TODO - not this, copy from request

@@ -1,6 +1,7 @@
 
 import os, gc
 from diffusers import StableDiffusionPipeline
+from sdgrpcserver.unified_pipeline import UnifiedPipeline
 import torch
 
 class PipelineWrapper(object):
@@ -17,22 +18,28 @@ class PipelineWrapper(object):
     def device(self): return self._device
 
     def activate(self):
+        self._pipeline.enable_attention_slicing(1)
+
         # Pipeline.to is in-place, so we move to the device on activate, and out again on deactivate
+        #if self._device == "cuda": self._pipeline.unet.to(torch.device("cuda"))
+        #else: 
+            
         self._pipeline.to(self._device)
         
     def deactivate(self):
         self._pipeline.to("cpu")
         if self._device == "cuda": torch.cuda.empty_cache()
 
-    def generate(self, prompt, image):
-        generator = torch.Generator(self._device).manual_seed(image.seed) if image.seed != -1 else None
+    def generate(self, text, params, image=None):
+        generator = torch.Generator(self._device).manual_seed(params.seed) if params.seed != -1 else None
 
         with torch.autocast(self._device):
             images = self._pipeline(
-                prompt=prompt,
-                width=image.width,
-                height=image.height,
-                num_inference_steps=image.steps,
+                prompt=text,
+                init_image=image,
+                width=params.width,
+                height=params.height,
+                num_inference_steps=params.steps,
                 guidance_scale=7.5, # TODO: read from sampler parameters
                 generator=generator,
                 return_dict=False
@@ -73,6 +80,14 @@ class EngineManager(object):
                 torch_dtype=dtype, 
                 use_auth_token=self._token if engine.get("use_auth_token", False) else False
             ), self._device)
+        elif engine["class"] == "UnifiedPipeline":
+            return PipelineWrapper(engine["id"], UnifiedPipeline.from_pretrained(
+                self._getWeightPath(engine["model"], engine["local_model"]), 
+                revision=revision, 
+                torch_dtype=dtype, 
+                use_auth_token=self._token if engine.get("use_auth_token", False) else False
+            ), self._device)
+
     
     def loadPipelines(self):
         for engine in self.engines:
