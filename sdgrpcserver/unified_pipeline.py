@@ -394,10 +394,15 @@ class UnifiedPipeline(DiffusionPipeline):
             # compute the previous noisy sample x_t -> x_t-1
             if mode == "inpaint":
                 # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+                if isinstance(self.scheduler, LMSDiscreteScheduler):
+                    latents = self.scheduler.step(noise_pred, t_index, latents, **extra_step_kwargs).prev_sample
+                    # masking
+                    init_latents_proper = self.scheduler.add_noise(init_latents_orig, noise, torch.tensor(t_index))
+                else:
+                    latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+                    # masking
+                    init_latents_proper = self.scheduler.add_noise(init_latents_orig, noise, t)
 
-                # masking
-                init_latents_proper = self.scheduler.add_noise(init_latents_orig, noise, t)
                 latents = (init_latents_proper * mask) + (latents * (1 - mask))
             else:
                 if isinstance(self.scheduler, LMSDiscreteScheduler):

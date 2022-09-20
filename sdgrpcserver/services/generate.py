@@ -1,4 +1,5 @@
 
+import traceback
 from types import SimpleNamespace as SN
 
 import grpc
@@ -60,4 +61,4 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
 
             yield answer
         except Exception as e:
-            print(e)
+            traceback.print_exc()

@@ -43,7 +43,7 @@ class DartGRPCCompatibility(object):
 
         return self.app(environ, wrapped_start_response)
 
-def start(manager):
+def start(manager, listen):
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
     generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(manager), server)
     dashboard_pb2_grpc.add_DashboardServiceServicer_to_server(DashboardServiceServicer(), server)
@@ -61,7 +61,7 @@ def start(manager):
     engines_pb2_grpc.add_EnginesServiceServicer_to_server(EnginesServiceServicer(manager), grpcapp)
 
     print("Ready, GRPC listening on port 50051, GRPC-Web listening on port 5000")
-    serve(wsgi_app, listen="*:5000")
+    serve(wsgi_app, listen=listen)
 
     #This does same thing as app.run
     #server.wait_for_termination()
@@ -69,9 +69,9 @@ def start(manager):
 def main(args):
     with open(os.path.normpath(args.enginecfg), 'r') as cfg:
         engines = yaml.load(cfg, Loader=Loader)
-        manager = EngineManager(engines)
+        manager = EngineManager(engines, enable_mps=args.enable_mps, vram_optimisation_level=args.vram_optimisation_level)
 
-        start(manager)
+        start(manager, "*:5000" if args.listen_to_all else "localhost:5000")
 
     sys.exit(-1)
 
@@ -82,6 +82,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--listen_to_all", "-L", type=bool, default=False, help="Accept requests from the local network, not just localhost" 
+    )
+    parser.add_argument(
+        "--enable_mps", type=bool, default=False, help="Use MPS on MacOS where available"
+    )
+    parser.add_argument(
+        "--vram_optimisation_level", "-V", type=int, default=2, help="How much to trade off performance to reduce VRAM usage (0 = none, 2 = max)"
     )
     args = parser.parse_args()
     main(args)
