@@ -14,7 +14,7 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
 
     def unimp(self, what):
         raise NotImplementedError(f"{what} not implemented")
-        
+
     def Generate(self, request, context):
         try:
             # Assume that "None" actually means "Image" (stability-sdk/client.py doesn't set it)
@@ -45,7 +45,8 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                 sampler=None,
                 steps=50,
                 seed=-1,
-                samples=1
+                samples=1,
+                strength=0.8
             )
 
             for field in vars(params):
@@ -55,23 +56,36 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                 except Exception as e:
                     pass
             
-            params.seed = -1
-            for seed in request.image.seed: params.seed = seed
+            seeds = list(request.image.seed)
 
-            print(f"Generating {repr(params)}")
+            for extras in request.image.parameters:
+                if extras.HasField("sampler") and extras.sampler.HasField("cfg_scale"): params.cfg_scale = extras.sampler.cfg_scale
+                if extras.HasField("schedule") and extras.schedule.HasField("start"): params.strength = extras.schedule.start            
 
             pipe = self._manager.getPipe(request.engine_id)
             ctr = 0
+            last_seed = -1
 
             for _ in range(params.samples):
-                images = pipe.generate(text=text, image=image, params=params)
+                if seeds:
+                    seed = seeds.pop(0)
+                elif last_seed != -1:
+                    seed = last_seed + 1
+                else:
+                    seed = -1
 
-                for image in images[0]: 
+                params.seed = last_seed = seed
+                print(f"Generating {repr(params)}")
+                results = pipe.generate(text=text, image=image, params=params)
+
+                for result_image, nsfw in zip(results[0], results[1]):
                     answer = generation_pb2.Answer()
                     answer.request_id=request.request_id
                     answer.answer_id=f"{request.request_id}-{ctr}"
-                    answer.artifacts.append(image_to_artifact(image))
-
+                    artifact=image_to_artifact(result_image)
+                    artifact.finish_reason=generation_pb2.FILTER if nsfw else generation_pb2.NULL
+                    answer.artifacts.append(artifact)
+ 
                     yield answer
                     ctr += 1
             

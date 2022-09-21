@@ -6,9 +6,8 @@
   class: "StableDiffusionPipeline"
   model: "CompVis/stable-diffusion-v1-4"
   local_model: "./weights/stable-diffusion-v1-4"
+  has_fp16: True
   use_auth_token: True
-  fp16: True
-  default: True
 - id: "waifu-diffusion-v1-2-standard"
   enabled: False
   visible: True
@@ -17,19 +16,19 @@
   class: "StableDiffusionPipeline"
   model: "hakurei/waifu-diffusion"
   local_model: "./weights/waifu-diffusion"
+  has_fp16: True
   use_auth_token: False
-  fp16: True
 - id: "stable-diffusion-v1-4"
+  default: True
   enabled: True
   visible: True
   name: "Stable Diffusion V1.4"
   description: "Stable Diffusion using the CompVis model and our Unified pipeline"
   class: "UnifiedPipeline"
   model: "CompVis/stable-diffusion-v1-4"
-  local_model: "./weights/stable-diffusion-v1-4"
+  #local_model: "./weights/stable-diffusion-v1-4"
+  has_fp16: True
   use_auth_token: True
-  fp16: True
-  default: True
 - id: "waifu-diffusion-v1-2"
   enabled: False
   visible: True
@@ -37,9 +36,9 @@
   description: "Stable Diffusion using the Hakurei Waitfu Diffusion model and our Unified pipeline"
   class: "UnifiedPipeline"
   model: "hakurei/waifu-diffusion"
-  local_model: "./weights/waifu-diffusion"
+  #local_model: "./weights/waifu-diffusion"
+  has_fp16: True
   use_auth_token: False
-  fp16: True
 
 
 

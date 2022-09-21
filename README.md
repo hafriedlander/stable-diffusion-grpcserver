@@ -7,16 +7,13 @@ Working:
 
 Core API functions not working yet:
 
-- Most parameters not yet passed through to pipeline
 - Inpainting included but not exposed over API
 - Most samplers (like euler_a) are not currently supported in Diffusers
 
 Extensions not done yet:
 
 - Negative prompting included but not exposed over API
-- Very low VRAM mode (unet only in CUDA) not working yet
 - Embedding params in png
-- Enable / disable NSFW filter
 - Extra APIs: Image resizing, aspect ratio shifting, asset management
 - CLIP guided generation https://github.com/huggingface/diffusers/pull/561
 - Community features: 

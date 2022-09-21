@@ -69,7 +69,7 @@ def start(manager, listen):
 def main(args):
     with open(os.path.normpath(args.enginecfg), 'r') as cfg:
         engines = yaml.load(cfg, Loader=Loader)
-        manager = EngineManager(engines, enable_mps=args.enable_mps, vram_optimisation_level=args.vram_optimisation_level)
+        manager = EngineManager(engines, enable_mps=args.enable_mps, vram_optimisation_level=args.vram_optimisation_level, nsfw_behaviour=args.nsfw_behaviour)
 
         start(manager, "*:5000" if args.listen_to_all else "localhost:5000")
 
@@ -81,13 +81,16 @@ if __name__ == "__main__":
         "--enginecfg", "-E", type=str, default="./engines.yaml", help="Path to the engines.yaml file"
     )
     parser.add_argument(
-        "--listen_to_all", "-L", type=bool, default=False, help="Accept requests from the local network, not just localhost" 
+        "--listen_to_all", "-L", action='store_true', help="Accept requests from the local network, not just localhost" 
     )
     parser.add_argument(
         "--enable_mps", type=bool, default=False, help="Use MPS on MacOS where available"
     )
     parser.add_argument(
         "--vram_optimisation_level", "-V", type=int, default=2, help="How much to trade off performance to reduce VRAM usage (0 = none, 2 = max)"
+    )
+    parser.add_argument(
+        "--nsfw_behaviour", "-N", type=str, default="block", choices=["block", "flag"], help="What to do with images detected as NSFW"
     )
     args = parser.parse_args()
     main(args)

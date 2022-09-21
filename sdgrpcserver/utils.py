@@ -12,8 +12,7 @@ def artifact_to_image(artifact):
         return img
 
 def image_to_artifact(im):
-    print(type(im), isinstance(im, PIL.Image.Image), isinstance(im, np.ndarray))
-
+    #print(type(im), isinstance(im, PIL.Image.Image), isinstance(im, np.ndarray))
     binary=None
 
     if isinstance(im, PIL.Image.Image):

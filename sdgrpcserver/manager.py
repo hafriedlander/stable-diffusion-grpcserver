@@ -7,6 +7,8 @@ from diffusers.configuration_utils import FrozenDict
 
 from generated import generation_pb2
 from sdgrpcserver.unified_pipeline import UnifiedPipeline
+from sdgrpcserver.safety_checkers import FlagOnlySafetyChecker
+
 
 class WithNoop(object):
     def __enter__(self):
@@ -16,11 +18,15 @@ class WithNoop(object):
 
 class PipelineWrapper(object):
 
-    def __init__(self, id, pipeline, device, vramO=0):
+    def __init__(self, id, device, pipeline, fp16_pipeline=None, vramO=0):
         self._id = id
-        self._pipeline = pipeline
         self._device = device
         self._vramO = vramO
+
+        self._pipeline = fp16_pipeline if self.fp16 and fp16_pipeline else pipeline
+        if self.cuda_only_unet: self._pipeline.unet = fp16_pipeline.unet if fp16_pipeline else self._pipeline.to(torch.float16)
+
+        print(self.fp16, self.attention_slice, self.cuda_only_unet)
 
         self._plms = pipeline.scheduler
         self._klms = self._prepScheduler(LMSDiscreteScheduler(
@@ -62,11 +68,23 @@ class PipelineWrapper(object):
     @property
     def device(self): return self._device
 
+    # -- A few different adjustments we make based on vramO
+
+    @property
+    def attention_slice(self): return self.device == "cuda" and self._vramO > 0
+
+    @property
+    def fp16(self): return self.device == "cuda" and self._vramO > 1 and not self.cuda_only_unet
+
+    @property
+    def cuda_only_unet(self): return self.device == "cuda" and self._vramO > 2
+
+
     def activate(self):
-        if self._vramO > 0: self._pipeline.enable_attention_slicing(1)
+        if self.attention_slice: self._pipeline.enable_attention_slicing(1)
 
         # Pipeline.to is in-place, so we move to the device on activate, and out again on deactivate
-        if self._vramO > 1 and self._device == "cuda": self._pipeline.unet.to(torch.device("cuda"))
+        if self.cuda_only_unet: self._pipeline.unet.to(torch.device("cuda"))
         else: self._pipeline.to(self._device)
         
     def deactivate(self):
@@ -83,7 +101,6 @@ class PipelineWrapper(object):
         if params.seed > 0:
             latents_device = "cpu" if self._pipeline.device.type == "mps" else self._pipeline.device
             generator = torch.Generator(latents_device).manual_seed(params.seed)
-
 
         if not params.sampler or params.sampler == generation_pb2.SAMPLER_DDPM:
             scheduler=self._plms
@@ -104,10 +121,11 @@ class PipelineWrapper(object):
             images = self._pipeline(
                 prompt=text,
                 init_image=image,
+                strength=params.strength,
                 width=params.width,
                 height=params.height,
                 num_inference_steps=params.steps,
-                guidance_scale=params.cfg_scale, # TODO: read from sampler parameters
+                guidance_scale=params.cfg_scale,
                 generator=generator,
                 return_dict=False
             )
@@ -116,7 +134,7 @@ class PipelineWrapper(object):
 
 class EngineManager(object):
 
-    def __init__(self, engines, enable_mps=False, vram_optimisation_level=0):
+    def __init__(self, engines, enable_mps=False, vram_optimisation_level=0, nsfw_behaviour="block"):
         self.engines = engines
         self._default = None
         self._pipelines = {}
@@ -124,6 +142,7 @@ class EngineManager(object):
         self._active = None
 
         self._vramO = vram_optimisation_level
+        self._nsfw = nsfw_behaviour
 
         self._hasCuda = getattr(torch, 'cuda', False) and torch.cuda.is_available()
         self._hasMps = enable_mps and getattr(torch.backends, 'mps', False) and torch.backends.mps.is_available()
@@ -134,30 +153,55 @@ class EngineManager(object):
         self.loadPipelines()
     
     def _getWeightPath(self, remote_path, local_path):
-        if os.path.isdir(os.path.normpath(local_path)): return local_path
+        if local_path and os.path.isdir(os.path.normpath(local_path)): return local_path
         return remote_path
 
     def buildPipeline(self, engine):
-        fp16 = engine.get('fp16', False) if self._device == "cuda" else False
-        revision = "fp16" if fp16 else "main"
-        dtype = torch.float16 if fp16 else None
+        weight_path=self._getWeightPath(engine["model"], engine.get("local_model", None))
+        fp16_weight_path=self._getWeightPath(engine["model"], engine.get("local_fp16_model", None))
+        use_auth_token=self._token if engine.get("use_auth_token", False) else False
 
-        print(f"Using device {self._device}, revision {revision}, dtype {dtype}")
+        extra_kwargs={}
+
+        if self._nsfw == "flag":
+            extra_kwargs["safety_checker"]=FlagOnlySafetyChecker.from_pretrained(weight_path, subfolder="safety_checker", use_auth_token=use_auth_token)
 
         if engine["class"] == "StableDiffusionPipeline":
-            return PipelineWrapper(id=engine["id"], device=self._device, vramO=self._vramO, pipeline=StableDiffusionPipeline.from_pretrained(
-                self._getWeightPath(engine["model"], engine["local_model"]), 
-                revision=revision, 
-                torch_dtype=dtype, 
-                use_auth_token=self._token if engine.get("use_auth_token", False) else False
-            ))
+            return PipelineWrapper(
+                id=engine["id"], 
+                device=self._device, 
+                vramO=self._vramO, 
+                pipeline=StableDiffusionPipeline.from_pretrained(
+                    weight_path,
+                    use_auth_token=use_auth_token,
+                    **extra_kwargs                        
+                ),
+                fp16_pipeline=StableDiffusionPipeline.from_pretrained(
+                    fp16_weight_path, 
+                    revision="fp16", 
+                    torch_dtype=torch.float16, 
+                    use_auth_token=use_auth_token,
+                    **extra_kwargs                        
+                ) if self._hasCuda and engine.get("has_fp16", False) else None
+            )
         elif engine["class"] == "UnifiedPipeline":
-            return PipelineWrapper(id=engine["id"], device=self._device, vramO=self._vramO, pipeline=UnifiedPipeline.from_pretrained(
-                self._getWeightPath(engine["model"], engine["local_model"]), 
-                revision=revision, 
-                torch_dtype=dtype, 
-                use_auth_token=self._token if engine.get("use_auth_token", False) else False
-            ))
+            return PipelineWrapper(
+                id=engine["id"], 
+                device=self._device, 
+                vramO=self._vramO, 
+                pipeline=UnifiedPipeline.from_pretrained(
+                    weight_path, 
+                    use_auth_token=use_auth_token,
+                    **extra_kwargs                        
+                ),
+                fp16_pipeline=UnifiedPipeline.from_pretrained(
+                    fp16_weight_path, 
+                    revision="fp16", 
+                    torch_dtype=torch.float16, 
+                    use_auth_token=use_auth_token,
+                    **extra_kwargs                        
+                ) if self._hasCuda and engine.get("has_fp16", False) else None
+            )
     
     def loadPipelines(self):
         for engine in self.engines:
