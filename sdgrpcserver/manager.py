@@ -1,8 +1,12 @@
 
-import os, gc
-from diffusers import StableDiffusionPipeline
-from sdgrpcserver.unified_pipeline import UnifiedPipeline
+import os, gc, warnings
 import torch
+
+from diffusers import StableDiffusionPipeline, DDIMScheduler, LMSDiscreteScheduler
+from diffusers.configuration_utils import FrozenDict
+
+from generated import generation_pb2
+from sdgrpcserver.unified_pipeline import UnifiedPipeline
 
 class WithNoop(object):
     def __enter__(self):
@@ -18,6 +22,40 @@ class PipelineWrapper(object):
         self._device = device
         self._vramO = vramO
 
+        self._plms = pipeline.scheduler
+        self._klms = self._prepScheduler(LMSDiscreteScheduler(
+                beta_start=0.00085, 
+                beta_end=0.012, 
+                beta_schedule="scaled_linear",
+                num_train_timesteps=1000
+            ))
+        self._ddim = self._prepScheduler(DDIMScheduler(
+                beta_start=0.00085, 
+                beta_end=0.012, 
+                beta_schedule="scaled_linear", 
+                clip_sample=False, 
+                set_alpha_to_one=False
+            ))
+
+    def _prepScheduler(self, scheduler):
+        scheduler = scheduler.set_format("pt")
+
+        if hasattr(scheduler.config, "steps_offset") and scheduler.config.steps_offset != 1:
+            warnings.warn(
+                f"The configuration file of this scheduler: {scheduler} is outdated. `steps_offset`"
+                f" should be set to 1 instead of {scheduler.config.steps_offset}. Please make sure "
+                "to update the config accordingly as leaving `steps_offset` might led to incorrect results"
+                " in future versions. If you have downloaded this checkpoint from the Hugging Face Hub,"
+                " it would be very nice if you could open a Pull request for the `scheduler/scheduler_config.json`"
+                " file",
+                DeprecationWarning,
+            )
+            new_config = dict(scheduler.config)
+            new_config["steps_offset"] = 1
+            scheduler._internal_dict = FrozenDict(new_config)
+
+        return scheduler
+
     @property
     def id(self): return self._id
 
@@ -29,8 +67,7 @@ class PipelineWrapper(object):
 
         # Pipeline.to is in-place, so we move to the device on activate, and out again on deactivate
         if self._vramO > 1 and self._device == "cuda": self._pipeline.unet.to(torch.device("cuda"))
-            
-        self._pipeline.to(self._device)
+        else: self._pipeline.to(self._device)
         
     def deactivate(self):
         self._pipeline.to("cpu")
@@ -47,6 +84,22 @@ class PipelineWrapper(object):
             latents_device = "cpu" if self._pipeline.device.type == "mps" else self._pipeline.device
             generator = torch.Generator(latents_device).manual_seed(params.seed)
 
+
+        if not params.sampler or params.sampler == generation_pb2.SAMPLER_DDPM:
+            scheduler=self._plms
+        elif params.sampler == generation_pb2.SAMPLER_K_LMS:
+            scheduler=self._klms
+        elif params.sampler == generation_pb2.SAMPLER_DDIM:
+            scheduler=self._ddim
+        else:
+            raise NotImplementedError("Scheduler not implemented")
+
+        scheduler_device = self._device
+        if self._vramO > 1 and scheduler_device == "cuda": scheduler_device = "cpu"
+
+        self._pipeline.scheduler = scheduler
+        #self._pipeline.scheduler.to(scheduler_device)
+
         with self._autocast():
             images = self._pipeline(
                 prompt=text,
@@ -54,7 +107,7 @@ class PipelineWrapper(object):
                 width=params.width,
                 height=params.height,
                 num_inference_steps=params.steps,
-                guidance_scale=7.5, # TODO: read from sampler parameters
+                guidance_scale=params.cfg_scale, # TODO: read from sampler parameters
                 generator=generator,
                 return_dict=False
             )

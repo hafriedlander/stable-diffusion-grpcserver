@@ -1,4 +1,5 @@
 
+from tkinter import E
 import traceback
 from types import SimpleNamespace as SN
 
@@ -11,54 +12,74 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
     def __init__(self, manager):
         self._manager = manager
 
-    def unimp(self):
-        raise NotImplementedError('Generation of anything except images not implemented')
+    def unimp(self, what):
+        raise NotImplementedError(f"{what} not implemented")
         
     def Generate(self, request, context):
         try:
             # Assume that "None" actually means "Image" (stability-sdk/client.py doesn't set it)
             if request.requested_type != generation_pb2.ARTIFACT_NONE and request.requested_type != generation_pb2.ARTIFACT_IMAGE:
-                print(request.requested_type)
-                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-                context.set_details('Generation of anything except images not implemented')
-                raise NotImplementedError('Generation of anything except images not implemented')
+                self.unimp('Generation of anything except images')
 
+            # Extract prompt inputs
             image=None
             mask=None
             text=""
+
             for prompt in request.prompt:
                 which = prompt.WhichOneof("prompt")
                 if which == "text": text += prompt.text
-                elif which == "sequence": self.unimp()
+                elif which == "sequence": self.unimp("Sequence prompts")
                 else:
-                  if prompt.artifact.type == generation_pb2.ARTIFACT_IMAGE:
-                    image=artifact_to_image(prompt.artifact)
-                  else:
-                    self.unimp()
-
+                    if prompt.artifact.type == generation_pb2.ARTIFACT_IMAGE:
+                        image=artifact_to_image(prompt.artifact)
+                    elif prompt.artifact.type == generation_pb2.ARTIFACT_MASK:
+                        mask=artifact_to_image(prompt.artifact)
+                    else:
+                        self.unimp(f"Artifact prompts of type {prompt.artifact.type}")
 
             params=SN(
                 height=512,
                 width=512,
-                samples=1,
-                steps=50
+                cfg_scale=7.5,
+                sampler=None,
+                steps=50,
+                seed=-1,
+                samples=1
             )
 
             for field in vars(params):
-                if request.image.HasField(field):
-                    setattr(params, field, getattr(request.image, field))
+                try:
+                    if request.image.HasField(field):
+                        setattr(params, field, getattr(request.image, field))
+                except Exception as e:
+                    pass
             
             params.seed = -1
             for seed in request.image.seed: params.seed = seed
 
+            print(f"Generating {repr(params)}")
+
             pipe = self._manager.getPipe(request.engine_id)
-            images = pipe.generate(text=text, image=image, params=params)
+            ctr = 0
 
-            answer = generation_pb2.Answer()
-            answer.request_id="x" # TODO - not this, copy from request
-            answer.answer_id="y"
-            for image in images[0]: answer.artifacts.append(image_to_artifact(image))
+            for _ in range(params.samples):
+                images = pipe.generate(text=text, image=image, params=params)
 
-            yield answer
+                for image in images[0]: 
+                    answer = generation_pb2.Answer()
+                    answer.request_id=request.request_id
+                    answer.answer_id=f"{request.request_id}-{ctr}"
+                    answer.artifacts.append(image_to_artifact(image))
+
+                    yield answer
+                    ctr += 1
+            
+        except NotImplementedError as e:
+            context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+            context.set_details(str(e))
+            print(f"Unsupported request parameters: {e}")
         except Exception as e:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("Something went wrong")
             traceback.print_exc()
