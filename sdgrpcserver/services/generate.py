@@ -61,6 +61,8 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
             for extras in request.image.parameters:
                 if extras.HasField("sampler") and extras.sampler.HasField("cfg_scale"): params.cfg_scale = extras.sampler.cfg_scale
                 if extras.HasField("schedule") and extras.schedule.HasField("start"): params.strength = extras.schedule.start            
+            
+            if request.image.HasField("transform") and request.image.transform.WhichOneof("type") == "diffusion": params.sampler = request.image.transform.diffusion
 
             pipe = self._manager.getPipe(request.engine_id)
             ctr = 0

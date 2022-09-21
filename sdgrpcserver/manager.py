@@ -102,7 +102,7 @@ class PipelineWrapper(object):
             latents_device = "cpu" if self._pipeline.device.type == "mps" else self._pipeline.device
             generator = torch.Generator(latents_device).manual_seed(params.seed)
 
-        if not params.sampler or params.sampler == generation_pb2.SAMPLER_DDPM:
+        if params.sampler is None or params.sampler == generation_pb2.SAMPLER_DDPM:
             scheduler=self._plms
         elif params.sampler == generation_pb2.SAMPLER_K_LMS:
             scheduler=self._klms
