@@ -10,7 +10,7 @@ from diffusers import StableDiffusionPipeline, DDIMScheduler, LMSDiscreteSchedul
 from diffusers.configuration_utils import FrozenDict
 
 from generated import generation_pb2
-from sdgrpcserver.unified_pipeline import UnifiedPipeline
+from sdgrpcserver.unified_op_pipeline import UnifiedPipeline
 from sdgrpcserver.safety_checkers import FlagOnlySafetyChecker
 
 from sdgrpcserver.pipeline import g_diffuser_lib
@@ -118,15 +118,15 @@ class PipelineWrapper(object):
 
         self._pipeline.scheduler = scheduler
 
-        if image and mask and params.strength >= 1:
+        if False and image and mask and params.strength >= 1:
             mask = PIL.ImageOps.invert(mask.convert("RGB"))
             np_init = (np.asarray(image.convert("RGB"))/255.).astype(np.float64)
             np_mask = (np.asarray(mask.convert("RGB"))/255.).astype(np.float64)
 
-            final_blend_mask = g_diffuser_lib.get_blend_mask(np_mask, SN(strength=1, debug=False))
+            final_blend_mask = g_diffuser_lib.get_blend_mask(np_mask, SN(strength=1, debug=True))
             mask = PIL.Image.fromarray(np.clip(final_blend_mask*255., 0., 255.).astype(np.uint8), mode="RGB")
             
-            shaped_noise = g_diffuser_lib.get_matched_noise(np_init, final_blend_mask, SN(noise_q=1, debug=False))
+            shaped_noise = g_diffuser_lib.get_matched_noise(np_init, final_blend_mask, SN(noise_q=1, debug=True))
             image = PIL.Image.fromarray(np.clip(shaped_noise*255., 0., 255.).astype(np.uint8), mode="RGB")
 
             params.strength=1
