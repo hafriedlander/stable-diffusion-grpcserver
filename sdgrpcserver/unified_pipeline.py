@@ -241,6 +241,8 @@ class UnifiedPipeline(DiffusionPipeline):
         elif init_image: mode = "img2img"
         else: mode = "txt2img"
 
+        print(f"Mode {mode}")
+
         if mode == "txt2img":
             if height % 8 != 0 or width % 8 != 0:
                 raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")

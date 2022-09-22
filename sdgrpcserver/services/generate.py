@@ -77,8 +77,8 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                     seed = -1
 
                 params.seed = last_seed = seed
-                print(f"Generating {repr(params)}")
-                results = pipe.generate(text=text, image=image, params=params)
+                print(f'Generating {repr(params)}, {"with Image" if image else ""}, {"with Mask" if mask else ""}')
+                results = pipe.generate(text=text, image=image, mask=mask, params=params)
 
                 for result_image, nsfw in zip(results[0], results[1]):
                     answer = generation_pb2.Answer()

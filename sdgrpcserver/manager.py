@@ -2,6 +2,10 @@
 import os, gc, warnings
 import torch
 
+import numpy as np
+import PIL
+from types import SimpleNamespace as SN
+
 from diffusers import StableDiffusionPipeline, DDIMScheduler, LMSDiscreteScheduler
 from diffusers.configuration_utils import FrozenDict
 
@@ -9,6 +13,7 @@ from generated import generation_pb2
 from sdgrpcserver.unified_pipeline import UnifiedPipeline
 from sdgrpcserver.safety_checkers import FlagOnlySafetyChecker
 
+from sdgrpcserver.pipeline import g_diffuser_lib
 
 class WithNoop(object):
     def __enter__(self):
@@ -95,7 +100,7 @@ class PipelineWrapper(object):
         if self._device == "cuda": return torch.autocast(self._device)
         return WithNoop()
 
-    def generate(self, text, params, image=None):
+    def generate(self, text, params, image=None, mask=None):
         generator=None
 
         if params.seed > 0:
@@ -111,16 +116,26 @@ class PipelineWrapper(object):
         else:
             raise NotImplementedError("Scheduler not implemented")
 
-        scheduler_device = self._device
-        if self._vramO > 1 and scheduler_device == "cuda": scheduler_device = "cpu"
-
         self._pipeline.scheduler = scheduler
-        #self._pipeline.scheduler.to(scheduler_device)
+
+        if image and mask and params.strength >= 1:
+            mask = PIL.ImageOps.invert(mask.convert("RGB"))
+            np_init = (np.asarray(image.convert("RGB"))/255.).astype(np.float64)
+            np_mask = (np.asarray(mask.convert("RGB"))/255.).astype(np.float64)
+
+            final_blend_mask = g_diffuser_lib.get_blend_mask(np_mask, SN(strength=1, debug=False))
+            mask = PIL.Image.fromarray(np.clip(final_blend_mask*255., 0., 255.).astype(np.uint8), mode="RGB")
+            
+            shaped_noise = g_diffuser_lib.get_matched_noise(np_init, final_blend_mask, SN(noise_q=1, debug=False))
+            image = PIL.Image.fromarray(np.clip(shaped_noise*255., 0., 255.).astype(np.uint8), mode="RGB")
+
+            params.strength=1
 
         with self._autocast():
             images = self._pipeline(
                 prompt=text,
                 init_image=image,
+                mask_image=mask,
                 strength=params.strength,
                 width=params.width,
                 height=params.height,
