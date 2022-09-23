@@ -51,7 +51,19 @@ from diffusers import StableDiffusionInpaintPipeline # we don't need the img2img
 #from diffusers import LMSDiscreteScheduler          # broken at the moment I believe
 
 def save_debug_img(np_image, name):
-    pass
+    image_path = "_debug_" + name + ".png"
+    if type(np_image) == np.ndarray:
+        if np_image.ndim == 2:
+            mode = "L"
+        elif np_image.shape[2] == 4:
+            mode = "RGBA"
+        else:
+            mode = "RGB"
+        pil_image = PIL.Image.fromarray(np.clip(np.absolute(np_image)*255., 0., 255.).astype(np.uint8), mode=mode)
+        pil_image.save(image_path)
+    else:
+        np_image.save(image_path)
+    return image_path
 
 # ************* in/out-painting code begins here *************
 

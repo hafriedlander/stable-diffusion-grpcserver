@@ -6,6 +6,7 @@ from typing import List, Optional, Union
 import numpy as np
 import torch
 import PIL
+import torchvision.transforms as T
 
 from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
 
@@ -15,6 +16,9 @@ from diffusers.pipeline_utils import DiffusionPipeline
 from diffusers.schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
+
+from sdgrpcserver.scheduling_euler_discrete import EulerDiscreteScheduler
+from sdgrpcserver.scheduling_euler_ancestral_discrete import EulerAncestralDiscreteScheduler
 
 def preprocess(image):
     w, h = image.size
@@ -81,7 +85,7 @@ class UnifiedPipeline(DiffusionPipeline):
         text_encoder: CLIPTextModel,
         tokenizer: CLIPTokenizer,
         unet: UNet2DConditionModel,
-        scheduler: Union[DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler],
+        scheduler: Union[DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler, EulerDiscreteScheduler, EulerAncestralDiscreteScheduler,],
         safety_checker: StableDiffusionSafetyChecker,
         feature_extractor: CLIPFeatureExtractor,
     ):
@@ -146,6 +150,16 @@ class UnifiedPipeline(DiffusionPipeline):
 
         torch.cuda.empty_cache()
         gc.collect()
+
+    def match_norm(self, tensor, like, cf=1):
+        # Normalise tensor to 0..1
+        tensor=tensor-tensor.min()
+        tensor=tensor.div(tensor.max())
+
+        # Then match range to like
+        norm_range = (like.max() - like.min()) * cf
+        norm_min = like.min() * cf
+        return tensor * norm_range + norm_min
 
     @torch.no_grad()
     def __call__(
@@ -273,7 +287,7 @@ class UnifiedPipeline(DiffusionPipeline):
             latents = latents.to(self.device)
 
             # if we use LMSDiscreteScheduler, let's make sure latents are mulitplied by sigmas
-            if isinstance(self.scheduler, LMSDiscreteScheduler):
+            if not isinstance(self.scheduler, DDIMScheduler) and not isinstance(self.scheduler, PNDMScheduler):
                 latents = latents * self.scheduler.sigmas[0]
 
             t_start = 0
@@ -304,38 +318,53 @@ class UnifiedPipeline(DiffusionPipeline):
                 if not mask.shape == init_latents.shape:
                     raise ValueError("The mask and init_image should be the same size!")
 
+                init_latents_orig = init_latents
+
                 if strength >= 1:
-                    noise_cf=8 # Coefficient to multiply noise FFT by before convolving with image FFT - higher = less colored noise                
-                    noise_q=2 # Multiple post-convolved noise by this to balance vector size in latent space
+                    # HERE ARE ALL THE THINGS THAT GIVE BETTER OR WORSE RESULTS DEPENDING ON THE IMAGE:
+                    noise_mask_factor=strength-1#1 # (1) How much to reduce noise during mask transition
+
+                    lmask_mode=2 # 2 (high_mask) seems consistently good
+                    nmask_mode=2 # 0 or 2 seem good
+                    fft_norm_mode="ortho" # forward, backward or ortho
+
+                    # Reset strength to just be 1 (we currently overload it so "component over 1" can be used to control a parameter above during testing)
                     strength=1
 
-                    print(f"Filling mask at noise_cf {noise_cf} noise_q {noise_q}")
-
                     # Create a mask which is either 1 (for any pixels that aren't pure black) or 0 (for pure black)
-                    # This will be used to only fill in the noise where the mask is pure black
-                    fill_mask = (mask * 100000).clamp(0, 1)
+                    high_mask = (mask * 100000).clamp(0, 1).round()
+                    # Create a mask which is either 1 (or any pixels that are pure white) or 0 (for any pixels that aren't pure white)
+                    low_mask = 1-((1-mask)*100000).clamp(0, 1).round()
 
-                    # Only consider the portion of the init image that isn't masked
-                    masked_latents = init_latents * mask
+                    # Only consider the portion of the init image that aren't completely masked
+                    latent_mask = low_mask if lmask_mode == 0 else mask if lmask_mode == 1 else high_mask
+                    init_latents = init_latents * latent_mask
 
+                    # Generate some noise TODO: This might affect the seed?
                     noise = torch.randn(init_latents.shape, generator=generator, device=self.device)
 
-                    noise_fft=torch.fft.fftn(noise).mul(noise_cf)
-                    latent_fft=torch.fft.fftn(masked_latents)
-                    convolve=noise_fft.mul(latent_fft)
-                    noise=torch.fft.ifftn(convolve).real
+                    # Make the noise less of a component of the convolution compared to the latent in the unmasked portion
+                    noise_mask = low_mask if nmask_mode == 0 else mask if nmask_mode == 1 else high_mask
+                    noise = noise.mul(1-(noise_mask * noise_mask_factor))
 
-                    noise=noise.div(torch.max(noise)).mul(torch.tensor(noise_q))
+                    # Color the noise by the latent
+                    noise_fft = torch.fft.fftn(noise, norm=fft_norm_mode)
+                    latent_fft = torch.fft.fftn(init_latents, norm=fft_norm_mode)
+                    convolve = noise_fft.mul(latent_fft)
+                    noise = torch.fft.ifftn(convolve, norm=fft_norm_mode).real
 
-                    init_latents = (init_latents * fill_mask) + (noise * (1 - fill_mask))
+                    # Stretch colored noise to match the image latent
+                    noise = self.match_norm(noise, init_latents, cf=1)
 
-                init_latents_orig = init_latents
- 
+                    # And mix resulting noise into the black areas of the mask
+                    init_latents = (init_latents_orig * mask) + (noise * (1 - mask))
+
+
             # get the original timestep using init_timestep
             offset = self.scheduler.config.get("steps_offset", 0)
             init_timestep = int(num_inference_steps * strength) + offset
             init_timestep = min(init_timestep, num_inference_steps)
-            if isinstance(self.scheduler, LMSDiscreteScheduler):
+            if not isinstance(self.scheduler, DDIMScheduler) and not isinstance(self.scheduler, PNDMScheduler):
                 timesteps = torch.tensor(
                     [num_inference_steps - init_timestep] * batch_size, dtype=torch.long, device=self.device
                 )
@@ -403,7 +432,7 @@ class UnifiedPipeline(DiffusionPipeline):
 
             # expand the latents if we are doing classifier free guidance
             latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-            if isinstance(self.scheduler, LMSDiscreteScheduler):
+            if not isinstance(self.scheduler, DDIMScheduler) and not isinstance(self.scheduler, PNDMScheduler):            
                 sigma = self.scheduler.sigmas[t_index]
                 # the model input needs to be scaled to match the continuous ODE formulation in K-LMS
                 latent_model_input = latent_model_input / ((sigma**2 + 1) ** 0.5)
@@ -421,7 +450,7 @@ class UnifiedPipeline(DiffusionPipeline):
             # compute the previous noisy sample x_t -> x_t-1
             if mode == "inpaint":
                 # compute the previous noisy sample x_t -> x_t-1
-                if isinstance(self.scheduler, LMSDiscreteScheduler):
+                if not isinstance(self.scheduler, DDIMScheduler) and not isinstance(self.scheduler, PNDMScheduler):
                     latents = self.scheduler.step(noise_pred, t_index, latents, **extra_step_kwargs).prev_sample
                     # masking
                     init_latents_proper = self.scheduler.add_noise(init_latents_orig, noise, torch.tensor(t_index))
@@ -432,7 +461,7 @@ class UnifiedPipeline(DiffusionPipeline):
 
                 latents = (init_latents_proper * mask) + (latents * (1 - mask))
             else:
-                if isinstance(self.scheduler, LMSDiscreteScheduler):
+                if not isinstance(self.scheduler, DDIMScheduler) and not isinstance(self.scheduler, PNDMScheduler):
                     latents = self.scheduler.step(noise_pred, t_index, latents.to(self.unet.device), **extra_step_kwargs).prev_sample
                 else:
                     latents = self.scheduler.step(noise_pred, t.to(self.unet.device), latents.to(self.unet.device), **extra_step_kwargs).prev_sample

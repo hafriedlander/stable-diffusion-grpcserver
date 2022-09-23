@@ -15,6 +15,9 @@ from sdgrpcserver.safety_checkers import FlagOnlySafetyChecker
 
 from sdgrpcserver.pipeline import g_diffuser_lib
 
+from sdgrpcserver.scheduling_euler_discrete import EulerDiscreteScheduler
+from sdgrpcserver.scheduling_euler_ancestral_discrete import EulerAncestralDiscreteScheduler
+
 class WithNoop(object):
     def __enter__(self):
         pass
@@ -46,6 +49,18 @@ class PipelineWrapper(object):
                 beta_schedule="scaled_linear", 
                 clip_sample=False, 
                 set_alpha_to_one=False
+            ))
+        self._euler = self._prepScheduler(EulerDiscreteScheduler(
+                beta_start=0.00085, 
+                beta_end=0.012, 
+                beta_schedule="scaled_linear",
+                num_train_timesteps=1000
+            ))
+        self._eulera = self._prepScheduler(EulerAncestralDiscreteScheduler(
+                beta_start=0.00085, 
+                beta_end=0.012, 
+                beta_schedule="scaled_linear",
+                num_train_timesteps=1000
             ))
 
     def _prepScheduler(self, scheduler):
@@ -113,6 +128,10 @@ class PipelineWrapper(object):
             scheduler=self._klms
         elif params.sampler == generation_pb2.SAMPLER_DDIM:
             scheduler=self._ddim
+        elif params.sampler == generation_pb2.SAMPLER_K_EULER:
+            scheduler=self._euler
+        elif params.sampler == generation_pb2.SAMPLER_K_EULER_ANCESTRAL:
+            scheduler=self._eulera
         else:
             raise NotImplementedError("Scheduler not implemented")
 
