@@ -110,6 +110,7 @@ class EulerAncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
         model_output: Union[torch.FloatTensor, np.ndarray],
         timestep: int,
         sample: Union[torch.FloatTensor, np.ndarray],
+        generator=None,
         return_dict: bool = True,
     ) -> Union[SchedulerOutput, Tuple]:
         """
@@ -145,7 +146,8 @@ class EulerAncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
         prev_sample = sample + derivative * dt
 
-        prev_sample = prev_sample + torch.randn_like(prev_sample) * sigma_up
+        noise = torch.randn(prev_sample.size(), dtype=prev_sample.dtype, layout=prev_sample.layout, device=prev_sample.device, generator=generator) 
+        prev_sample = prev_sample + noise * sigma_up
 
         if not return_dict:
             return (prev_sample,)

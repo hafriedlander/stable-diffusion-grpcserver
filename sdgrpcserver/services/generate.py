@@ -1,6 +1,5 @@
 
-from tkinter import E
-import traceback
+import traceback, threading
 from types import SimpleNamespace as SN
 
 import grpc
@@ -42,6 +41,7 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                 height=512,
                 width=512,
                 cfg_scale=7.5,
+                eta=0,
                 sampler=None,
                 steps=50,
                 seed=-1,
@@ -59,14 +59,20 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
             seeds = list(request.image.seed)
 
             for extras in request.image.parameters:
-                if extras.HasField("sampler") and extras.sampler.HasField("cfg_scale"): params.cfg_scale = extras.sampler.cfg_scale
-                if extras.HasField("schedule") and extras.schedule.HasField("start"): params.strength = extras.schedule.start            
+                if extras.HasField("sampler"):
+                    if extras.sampler.HasField("cfg_scale"): params.cfg_scale = extras.sampler.cfg_scale
+                    if extras.sampler.HasField("eta"): params.eta = extras.sampler.eta
+                if extras.HasField("schedule"):
+                    if extras.schedule.HasField("start"): params.strength = extras.schedule.start            
             
             if request.image.HasField("transform") and request.image.transform.WhichOneof("type") == "diffusion": params.sampler = request.image.transform.diffusion
 
             pipe = self._manager.getPipe(request.engine_id)
             ctr = 0
             last_seed = -1
+
+            stop_event = threading.Event()
+            context.add_callback(lambda: stop_event.set())
 
             for _ in range(params.samples):
                 if seeds:
@@ -78,7 +84,7 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
 
                 params.seed = last_seed = seed
                 print(f'Generating {repr(params)}, {"with Image" if image else ""}, {"with Mask" if mask else ""}')
-                results = pipe.generate(text=text, image=image, mask=mask, params=params)
+                results = pipe.generate(text=text, image=image, mask=mask, params=params, stop_event=stop_event)
 
                 for result_image, nsfw in zip(results[0], results[1]):
                     answer = generation_pb2.Answer()

@@ -6,23 +6,53 @@ import numpy as np
 import PIL
 from types import SimpleNamespace as SN
 
-from diffusers import StableDiffusionPipeline, DDIMScheduler, LMSDiscreteScheduler
+from tqdm.auto import tqdm
+
+from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler
 from diffusers.configuration_utils import FrozenDict
 
 from generated import generation_pb2
-from sdgrpcserver.unified_op_pipeline import UnifiedPipeline
-from sdgrpcserver.safety_checkers import FlagOnlySafetyChecker
 
-from sdgrpcserver.pipeline import g_diffuser_lib
+from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipeline
+from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 
-from sdgrpcserver.scheduling_euler_discrete import EulerDiscreteScheduler
-from sdgrpcserver.scheduling_euler_ancestral_discrete import EulerAncestralDiscreteScheduler
+from sdgrpcserver.pipeline.scheduling_ddim import DDIMScheduler
+from sdgrpcserver.pipeline.scheduling_euler_discrete import EulerDiscreteScheduler
+from sdgrpcserver.pipeline.scheduling_euler_ancestral_discrete import EulerAncestralDiscreteScheduler
 
 class WithNoop(object):
     def __enter__(self):
         pass
     def __exit__(self, exc_type, exc_value, exc_tb):
         pass
+
+class ProgressBarWrapper(object):
+
+    class InternalTqdm(tqdm):
+        def __init__(self, progress_callback, stop_event, iterable):
+            self._progress_callback = progress_callback
+            self._stop_event = stop_event
+            super().__init__(iterable)
+
+        def update(self, n=1):
+            displayed = super().update(n)
+            if displayed and self._progress_callback: self._progress_callback(**self.format_dict)
+            return displayed
+
+        def __iter__(self):
+            for x in super().__iter__():
+                if self._stop_event and self._stop_event.is_set(): 
+                    self.set_description("ABORTED")
+                    break
+                yield x
+
+    def __init__(self, progress_callback, stop_event):
+        self._progress_callback = progress_callback
+        self._stop_event = stop_event
+
+    def __call__(self, iterable):
+        return ProgressBarWrapper.InternalTqdm(self._progress_callback, self._stop_event, iterable)
+    
 
 class PipelineWrapper(object):
 
@@ -62,6 +92,9 @@ class PipelineWrapper(object):
                 beta_schedule="scaled_linear",
                 num_train_timesteps=1000
             ))
+
+    def progress(self, **kwargs):
+        print(repr(kwargs))
 
     def _prepScheduler(self, scheduler):
         scheduler = scheduler.set_format("pt")
@@ -115,7 +148,7 @@ class PipelineWrapper(object):
         if self._device == "cuda": return torch.autocast(self._device)
         return WithNoop()
 
-    def generate(self, text, params, image=None, mask=None):
+    def generate(self, text, params, image=None, mask=None, progress_callback=None, stop_event=None):
         generator=None
 
         if params.seed > 0:
@@ -136,19 +169,7 @@ class PipelineWrapper(object):
             raise NotImplementedError("Scheduler not implemented")
 
         self._pipeline.scheduler = scheduler
-
-        if False and image and mask and params.strength >= 1:
-            mask = PIL.ImageOps.invert(mask.convert("RGB"))
-            np_init = (np.asarray(image.convert("RGB"))/255.).astype(np.float64)
-            np_mask = (np.asarray(mask.convert("RGB"))/255.).astype(np.float64)
-
-            final_blend_mask = g_diffuser_lib.get_blend_mask(np_mask, SN(strength=1, debug=True))
-            mask = PIL.Image.fromarray(np.clip(final_blend_mask*255., 0., 255.).astype(np.uint8), mode="RGB")
-            
-            shaped_noise = g_diffuser_lib.get_matched_noise(np_init, final_blend_mask, SN(noise_q=1, debug=True))
-            image = PIL.Image.fromarray(np.clip(shaped_noise*255., 0., 255.).astype(np.uint8), mode="RGB")
-
-            params.strength=1
+        self._pipeline.progress_bar = ProgressBarWrapper(progress_callback, stop_event)
 
         with self._autocast():
             images = self._pipeline(
@@ -160,6 +181,7 @@ class PipelineWrapper(object):
                 height=params.height,
                 num_inference_steps=params.steps,
                 guidance_scale=params.cfg_scale,
+                eta=params.eta,
                 generator=generator,
                 return_dict=False
             )
