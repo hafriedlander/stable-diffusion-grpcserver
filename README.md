@@ -6,11 +6,16 @@ Working:
 - Can load multiple pipelines, such as Stable and Waifu Diffusion, and swap between them as needed
 - Mid and Low VRAM modes for larger generated images at the expense of some performance
 - Adjustable NSFW behaviour
-- Masked painting uses diffusers inpainting when strength < 1, and Parlance's seamless outpainting when strength >= 1
+- Significantly enhanced masked painting:
+  - When Strength < 1, uses normal diffusers inpainting (with improved mask gradient handling)
+  - When Strength >= 1 and <= 2, uses seamless outpainting algorithm. 
+    Strength above 1 acts as a boost - the higher the value, the more even areas protected by a mask are allowed to change
+- Euler, Euler_A samplers are currently integrated, and DDIM accepts an ETA parameter
+- Cancel over API (using GRPC cancel will abort the currently in progress generation)
 
 Core API functions not working yet:
 
-- Most samplers (like euler_a) are not currently supported in Diffusers
+- Some samplers (like dpm2) are not currently supported in Diffusers
 
 Thanks to / Credits:
 
@@ -18,7 +23,7 @@ Thanks to / Credits:
 
 Extensions not done yet:
 
-- Cancel and progress over API
+- Progress reporting over the API is included but not exposed yet
 - Negative prompting included but not exposed over API
 - Embedding params in png
 - Extra APIs

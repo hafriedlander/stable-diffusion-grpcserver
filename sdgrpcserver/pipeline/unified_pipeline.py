@@ -252,19 +252,19 @@ class UnifiedPipeline(DiffusionPipeline):
             raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
 
         # Calculate operating mode based on arguments
-        if mask_image: 
-            if strength < 1: mode = "inpaint"
-            else: mode="outpaint"
+        if mask_image: mode = "inpaint"
         elif init_image: mode = "img2img"
         else: mode = "txt2img"
 
-        print(f"Mode {mode}")
+        max_strength = 2.0 if mode == "inpaint" else 1.0
 
         if mode == "txt2img":
             if height % 8 != 0 or width % 8 != 0:
                 raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
-        #elif strength < 0 or strength > 1:
-        #    raise ValueError(f"The value of strength should in [0.0, 1.0] but is {strength}")
+        elif strength < 0 or strength > max_strength:
+            raise ValueError(f"The value of strength should in [0.0, {max_strength}] but is {strength}")
+
+        print(f"Mode {mode} with strength {strength}")
 
         # set timesteps
         self.scheduler.set_timesteps(num_inference_steps)
@@ -298,7 +298,7 @@ class UnifiedPipeline(DiffusionPipeline):
             if isinstance(init_image, PIL.Image.Image):
                 init_image = preprocess(init_image)
 
-            if mode == "inpaint" or mode == "outpaint": init_image = init_image.to(self.device)
+            if mode == "inpaint": init_image = init_image.to(self.device)
 
             # encode the init image into latents and scale the latents
             init_latent_dist = self.vae.encode(init_image.to(self.device)).latent_dist
@@ -308,7 +308,7 @@ class UnifiedPipeline(DiffusionPipeline):
             # expand init_latents for batch_size
             init_latents = torch.cat([init_latents] * batch_size)
 
-            if mode == "inpaint" or mode == "outpaint":
+            if mode == "inpaint":
                 init_latents_orig = init_latents
 
                 # preprocess mask
@@ -326,7 +326,7 @@ class UnifiedPipeline(DiffusionPipeline):
                 if not mask.shape == init_latents.shape:
                     raise ValueError("The mask and init_image should be the same size!")
 
-                if mode == "outpaint":
+                if strength >= 1:
                     # HERE ARE ALL THE THINGS THAT GIVE BETTER OR WORSE RESULTS DEPENDING ON THE IMAGE:
                     noise_mask_factor=1 # (1) How much to reduce noise during mask transition
                     lmask_mode=3 # 3 (high_mask) seems consistently good. Options are 0 = none, 1 = low mask, 2 = mask as passed, 3 = high mask
@@ -336,8 +336,8 @@ class UnifiedPipeline(DiffusionPipeline):
                     # 0 == normal, matched to latent, 1 == cauchy, matched to latent, 2 == log_normal, 3 == standard normal, mean=0, std=1
                     # 0 sometimes gives the best result, but sometimes it gives artifacts
                     noise_mode=0
-                    mask_scale=strength-1
 
+                    mask_scale=2-strength # How much to scale the mask down by (limits mask to allow changes even in protected area)
 
                     # Current theory: if we can match the noise to the image latents, we get a nice well scaled color blend between the two.
                     # The nmask mostly adjusts for incorrect scale. With correct scale, nmask hurts more than it helps
@@ -482,7 +482,7 @@ class UnifiedPipeline(DiffusionPipeline):
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
             # compute the previous noisy sample x_t -> x_t-1
-            if mode == "inpaint" or mode == "outpaint":
+            if mode == "inpaint":
                 # compute the previous noisy sample x_t -> x_t-1
                 if not isinstance(self.scheduler, DDIMScheduler) and not isinstance(self.scheduler, PNDMScheduler):
                     latents = self.scheduler.step(noise_pred, t_index, latents, **extra_step_kwargs).prev_sample
@@ -512,19 +512,6 @@ class UnifiedPipeline(DiffusionPipeline):
         image = self.vae.decode(latents.to(self.vae.device)).sample
 
         image = (image / 2 + 0.5).clamp(0, 1)
-
-        if False and (mode == "inpaint" or mode == "outpaint"):
-            mask = preprocess(mask_image)
-            mask = (mask / 2 + 0.5).clamp(0, 1)
-            mask = torch.cat([mask] * batch_size)
-
-            mask = mask.to(self.device)
-            init_image = init_image.to(self.device)
-
-            init_image = (init_image / 2 + 0.5).clamp(0, 1)
-            image = init_image * (1-mask) + image * mask
-            
-
         image = image.to(self.vae.device).cpu().permute(0, 2, 3, 1).numpy()
 
         # run safety checker

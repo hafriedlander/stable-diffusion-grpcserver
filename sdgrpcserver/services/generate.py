@@ -24,11 +24,18 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
             image=None
             mask=None
             text=""
+            negative=""
 
             for prompt in request.prompt:
                 which = prompt.WhichOneof("prompt")
-                if which == "text": text += prompt.text
-                elif which == "sequence": self.unimp("Sequence prompts")
+                if which == "text": 
+                    print(prompt, prompt.HasField("parameters"), prompt.parameters.HasField("weight") if prompt.HasField("parameters") else "")
+                    if prompt.HasField("parameters") and prompt.parameters.HasField("weight") and prompt.parameters.weight < 0:
+                        negative += prompt.text
+                    else:
+                        text += prompt.text
+                elif which == "sequence": 
+                    self.unimp("Sequence prompts")
                 else:
                     if prompt.artifact.type == generation_pb2.ARTIFACT_IMAGE:
                         image=artifact_to_image(prompt.artifact)
@@ -84,7 +91,7 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
 
                 params.seed = last_seed = seed
                 print(f'Generating {repr(params)}, {"with Image" if image else ""}, {"with Mask" if mask else ""}')
-                results = pipe.generate(text=text, image=image, mask=mask, params=params, stop_event=stop_event)
+                results = pipe.generate(text=text, negative_text=negative, image=image, mask=mask, params=params, stop_event=stop_event)
 
                 for result_image, nsfw in zip(results[0], results[1]):
                     answer = generation_pb2.Answer()
