@@ -5,7 +5,7 @@
   description: "Stable Diffusion using the original Stability.AI model and Diffusers pipeline"
   class: "StableDiffusionPipeline"
   model: "CompVis/stable-diffusion-v1-4"
-  local_model: "./weights/stable-diffusion-v1-4"
+  local_model: "./stable-diffusion-v1-4"
   has_fp16: True
   use_auth_token: True
 - id: "waifu-diffusion-v1-2-standard"
@@ -15,7 +15,7 @@
   description: "Stable Diffusion using Hakurei Waitfu Diffusion model and the original Diffusers pipeline"
   class: "StableDiffusionPipeline"
   model: "hakurei/waifu-diffusion"
-  local_model: "./weights/waifu-diffusion"
+  local_model: "./waifu-diffusion"
   has_fp16: True
   use_auth_token: False
 - id: "stable-diffusion-v1-4"
@@ -26,7 +26,7 @@
   description: "Stable Diffusion using the CompVis model and our Unified pipeline"
   class: "UnifiedPipeline"
   model: "CompVis/stable-diffusion-v1-4"
-  #local_model: "./weights/stable-diffusion-v1-4"
+  local_model: "./stable-diffusion-v1-4"
   has_fp16: True
   use_auth_token: True
 - id: "waifu-diffusion-v1-2"
@@ -36,7 +36,7 @@
   description: "Stable Diffusion using the Hakurei Waitfu Diffusion model and our Unified pipeline"
   class: "UnifiedPipeline"
   model: "hakurei/waifu-diffusion"
-  #local_model: "./weights/waifu-diffusion"
+  local_model: "./waifu-diffusion"
   has_fp16: True
   use_auth_token: False
 

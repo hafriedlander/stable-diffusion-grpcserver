@@ -17,6 +17,8 @@ python ./server.py
 
 Option 2:
 
+Create a directory and download https://raw.githubusercontent.com/hafriedlander/stable-diffusion-grpcserver/main/engines.yaml into it, then
+
 ```
 PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu116 pip install stable-diffusion-grpcserver
 set HF_API_TOKEN={your huggingface token} 

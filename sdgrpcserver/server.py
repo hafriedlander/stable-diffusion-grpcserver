@@ -88,6 +88,9 @@ def main():
     parser.add_argument(
         "--reload", action="store_true", help="Auto-reload on source change"
     )
+    parser.add_argument(
+        "--weight_root", "-W", type=str, default="./weights", help="Path that local weight in engine.yaml are relative to"
+    )
     args = parser.parse_args()
 
     if args.reload:
@@ -96,7 +99,7 @@ def main():
 
     with open(os.path.normpath(args.enginecfg), 'r') as cfg:
         engines = yaml.load(cfg, Loader=Loader)
-        manager = EngineManager(engines, enable_mps=args.enable_mps, vram_optimisation_level=args.vram_optimisation_level, nsfw_behaviour=args.nsfw_behaviour)
+        manager = EngineManager(engines, weight_root=args.weight_root, enable_mps=args.enable_mps, vram_optimisation_level=args.vram_optimisation_level, nsfw_behaviour=args.nsfw_behaviour)
 
         start(manager, "*:5000" if args.listen_to_all else "localhost:5000")
 

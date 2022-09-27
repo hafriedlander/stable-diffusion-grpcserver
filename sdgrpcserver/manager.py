@@ -191,13 +191,14 @@ class PipelineWrapper(object):
 
 class EngineManager(object):
 
-    def __init__(self, engines, enable_mps=False, vram_optimisation_level=0, nsfw_behaviour="block"):
+    def __init__(self, engines, weight_root="./weights", enable_mps=False, vram_optimisation_level=0, nsfw_behaviour="block"):
         self.engines = engines
         self._default = None
         self._pipelines = {}
         self._activeId = None
         self._active = None
 
+        self._weight_root = weight_root
         self._vramO = vram_optimisation_level
         self._nsfw = nsfw_behaviour
 
@@ -210,12 +211,16 @@ class EngineManager(object):
         self.loadPipelines()
     
     def _getWeightPath(self, remote_path, local_path):
-        if local_path and os.path.isdir(os.path.normpath(local_path)): return local_path
+        if local_path:
+            test_path = local_path if os.path.isabs(local_path) else os.path.join(self._weight_root, local_path)
+            test_path = os.path.normpath(test_path)
+            if os.path.isdir(test_path): return test_path
         return remote_path
 
     def buildPipeline(self, engine):
         weight_path=self._getWeightPath(engine["model"], engine.get("local_model", None))
         fp16_weight_path=self._getWeightPath(engine["model"], engine.get("local_fp16_model", None))
+
         use_auth_token=self._token if engine.get("use_auth_token", False) else False
 
         extra_kwargs={}
