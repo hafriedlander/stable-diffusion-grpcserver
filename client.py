@@ -2,6 +2,7 @@
 
 # Modified version of Stability-AI SDK client.py. Changes:
 #   - Calls cancel on ctrl-c to allow server to abort
+#   - Supports setting ETA parameter
 #   - Supports negative prompt by setting a prompt with negative weight
 
 import pathlib
