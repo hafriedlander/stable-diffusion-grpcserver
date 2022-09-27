@@ -10,12 +10,12 @@ except ImportError:
 import grpc
 import hupper
 from waitress import serve
-from sonora.wsgi import grpcWSGI
+from sdgrpcserver.sonora.wsgi import grpcWSGI
 from wsgicors import CORS
 
 # Google protoc compiler is dumb about imports (https://github.com/protocolbuffers/protobuf/issues/1491)
 # TODO: Move to https://github.com/danielgtaylor/python-betterproto
-generatedPath = os.path.join(os.path.dirname(os.path.dirname(__file__)), "generated")
+generatedPath = os.path.join(os.path.dirname(__file__), "generated")
 sys.path.append(generatedPath)
 
 import generation_pb2_grpc, dashboard_pb2_grpc, engines_pb2_grpc

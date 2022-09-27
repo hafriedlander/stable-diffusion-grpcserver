@@ -5,7 +5,7 @@ from urllib.parse import quote
 
 import grpc
 
-from sonora import protocol
+from sdgrpcserver.sonora import protocol
 
 
 _HandlerCallDetails = namedtuple(

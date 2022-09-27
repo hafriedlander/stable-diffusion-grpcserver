@@ -8,7 +8,7 @@ from urllib.parse import quote
 from async_timeout import timeout
 import grpc
 
-from sonora import protocol
+from sdgrpcserver.sonora import protocol
 
 _HandlerCallDetails = namedtuple(
     "_HandlerCallDetails", ("method", "invocation_metadata")

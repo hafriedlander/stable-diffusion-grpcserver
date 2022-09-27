@@ -26,11 +26,11 @@ from PIL import Image
 load_dotenv()
 
 thisPath = pathlib.Path(__file__).parent.resolve()
-genPath = thisPath / "generated"
+genPath = thisPath / "sdgrpcserver/generated"
 sys.path.append(str(genPath))
 
-import generated.generation_pb2 as generation
-import generated.generation_pb2_grpc as generation_grpc
+import generation_pb2 as generation
+import generation_pb2_grpc as generation_grpc
 
 logger = logging.getLogger(__name__)
 logger.setLevel(level=logging.INFO)

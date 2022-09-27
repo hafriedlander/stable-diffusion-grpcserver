@@ -8,7 +8,7 @@ import grpc
 import urllib3
 import urllib3.exceptions
 
-from sonora import protocol
+from sdgrpcserver.sonora import protocol
 
 
 def insecure_web_channel(url):

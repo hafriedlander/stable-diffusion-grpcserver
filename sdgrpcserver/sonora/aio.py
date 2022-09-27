@@ -4,9 +4,8 @@ import io
 import aiohttp
 import grpc.experimental.aio
 
-from sonora import protocol
-import sonora.client
-
+from sdgrpcserver.sonora import client
+from sdgrpcserver.sonora import protocol
 
 def insecure_web_channel(url):
     return WebChannel(url)
@@ -41,13 +40,13 @@ class WebChannel:
         )
 
     def stream_unary(self, path, request_serializer, response_deserializer):
-        return sonora.client.NotImplementedMulticallable()
+        return client.NotImplementedMulticallable()
 
     def stream_stream(self, path, request_serializer, response_deserializer):
-        return sonora.client.NotImplementedMulticallable()
+        return client.NotImplementedMulticallable()
 
 
-class UnaryUnaryMulticallable(sonora.client.Multicallable):
+class UnaryUnaryMulticallable(client.Multicallable):
     def __call__(self, request, timeout=None, metadata=None):
         call_metadata = self._metadata.copy()
         if metadata is not None:
@@ -64,7 +63,7 @@ class UnaryUnaryMulticallable(sonora.client.Multicallable):
         )
 
 
-class UnaryStreamMulticallable(sonora.client.Multicallable):
+class UnaryStreamMulticallable(client.Multicallable):
     def __call__(self, request, timeout=None, metadata=None):
         call_metadata = self._metadata.copy()
         if metadata is not None:
@@ -81,7 +80,7 @@ class UnaryStreamMulticallable(sonora.client.Multicallable):
         )
 
 
-class Call(sonora.client.Call):
+class Call(client.Call):
     def __enter__(self):
         return self
 
