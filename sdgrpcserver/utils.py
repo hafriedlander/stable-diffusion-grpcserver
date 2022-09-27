@@ -5,7 +5,7 @@ import PIL
 import numpy as np
 import cv2 as cv
 
-from generated import generation_pb2
+import generation_pb2
 
 def artifact_to_image(artifact):
     if artifact.type == generation_pb2.ARTIFACT_IMAGE or artifact.type == generation_pb2.ARTIFACT_MASK:

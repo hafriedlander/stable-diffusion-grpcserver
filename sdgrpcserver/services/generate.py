@@ -3,7 +3,7 @@ import traceback, threading
 from types import SimpleNamespace as SN
 
 import grpc
-from generated import generation_pb2, generation_pb2_grpc
+import generation_pb2, generation_pb2_grpc
 
 from sdgrpcserver.utils import image_to_artifact, artifact_to_image
 

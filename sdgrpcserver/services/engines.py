@@ -1,4 +1,4 @@
-from generated import engines_pb2, engines_pb2_grpc
+import engines_pb2, engines_pb2_grpc
 
 class EnginesServiceServicer(engines_pb2_grpc.EnginesServiceServicer):
     def __init__(self, manager):

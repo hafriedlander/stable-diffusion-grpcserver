@@ -1,4 +1,4 @@
-from generated import dashboard_pb2, dashboard_pb2_grpc
+import dashboard_pb2, dashboard_pb2_grpc
 
 class DashboardServiceServicer(dashboard_pb2_grpc.DashboardServiceServicer):
     def __init__(self):

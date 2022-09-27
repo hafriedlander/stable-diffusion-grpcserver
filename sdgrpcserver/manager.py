@@ -11,7 +11,7 @@ from tqdm.auto import tqdm
 from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler
 from diffusers.configuration_utils import FrozenDict
 
-from generated import generation_pb2
+import generation_pb2
 
 from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipeline
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker

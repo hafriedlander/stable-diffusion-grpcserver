@@ -18,7 +18,7 @@ from wsgicors import CORS
 generatedPath = os.path.join(os.path.dirname(os.path.dirname(__file__)), "generated")
 sys.path.append(generatedPath)
 
-from generated import generation_pb2_grpc, dashboard_pb2_grpc, engines_pb2_grpc
+import generation_pb2_grpc, dashboard_pb2_grpc, engines_pb2_grpc
 
 from sdgrpcserver.manager import EngineManager
 from sdgrpcserver.services.dashboard import DashboardServiceServicer
