@@ -3,7 +3,7 @@ requires = ["flit_core >=3.2,<4"]
 build-backend = "flit_core.buildapi"
 
 [project]
-name = "sdgrpcserver"
+name = "stable-diffusion-grpcserver"
 authors = [{name = "Hamish Friedlander", email = "hafriedlander@gmail.com"}]
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -34,3 +34,5 @@ Home = "https://github.com/hafriedlander/stable-diffusion-grpcserver"
 [project.scripts]
 sdgrpcserver = "sdgrpcserver.server:main"
 
+[tool.flit.module]
+name = "sdgrpcserver"

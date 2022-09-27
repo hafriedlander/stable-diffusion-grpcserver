@@ -1,6 +1,29 @@
 An implementation of a server for the Stability AI API
 
-Working:
+# Installation
+
+Option 1 (recommended):
+
+Install Miniconda, then in a Conda console:
+
+```
+git clone https://github.com/hafriedlander/stable-diffusion-grpcserver.git
+cd stable-diffusion-grpcserver
+conda env create -f environment.yaml
+conda activate sd-grpc-server
+sets HF_API_TOKEN={your huggingface token}
+python ./server.py
+```
+
+Option 2:
+
+```
+PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu116 pip install stable-diffusion-grpcserver
+set HF_API_TOKEN={your huggingface token} 
+sdgrpcserver
+```
+
+# Features
 
 - Txt2Img and Img2Img from Stability-AI/Stability-SDK, specifying a prompt
 - Can load multiple pipelines, such as Stable and Waifu Diffusion, and swap between them as needed
@@ -12,19 +35,23 @@ Working:
     Strength above 1 acts as a boost - the higher the value, the more even areas protected by a mask are allowed to change
 - Euler, Euler_A samplers are currently integrated, and DDIM accepts an ETA parameter
 - Cancel over API (using GRPC cancel will abort the currently in progress generation)
+- Negative prompting (send a `Prompt` object with `text` and a negative `weight`)
+
+
+# Thanks to / Credits:
+
+- Seamless outpainting https://github.com/parlance-zz/g-diffuser-bot/tree/g-diffuser-bot-beta2
+
+# Roadmap
 
 Core API functions not working yet:
 
 - Some samplers (like dpm2) are not currently supported in Diffusers
+- ChainGenerate not implemented
 
-Thanks to / Credits:
-
-- Seamless outpainting https://github.com/parlance-zz/g-diffuser-bot/tree/g-diffuser-bot-beta2
-
-Extensions not done yet:
+Extra features to add
 
 - Progress reporting over the API is included but not exposed yet
-- Negative prompting included but not exposed over API
 - Embedding params in png
 - Extra APIs
   - Image resizing
