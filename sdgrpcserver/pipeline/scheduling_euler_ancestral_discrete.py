@@ -20,7 +20,8 @@ import torch
 from scipy import integrate
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
-from diffusers.schedulers.scheduling_utils import SchedulerMixin, SchedulerOutput
+from diffusers.schedulers.scheduling_utils import SchedulerOutput
+from sdgrpcserver.pipeline.scheduling_utils import SchedulerMixin
 
 
 class EulerAncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
