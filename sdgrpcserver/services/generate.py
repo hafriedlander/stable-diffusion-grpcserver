@@ -74,7 +74,13 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
             
             if request.image.HasField("transform") and request.image.transform.WhichOneof("type") == "diffusion": params.sampler = request.image.transform.diffusion
 
-            pipe = self._manager.getPipe(request.engine_id)
+            try:
+                pipe = self._manager.getPipe(request.engine_id)
+            except KeyError as e:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details("Engine not found")
+                return
+
             ctr = 0
             last_seed = -1
 

@@ -8,7 +8,7 @@ class EnginesServiceServicer(engines_pb2_grpc.EnginesServiceServicer):
         engines = engines_pb2.Engines()
 
         for engine in self._manager.engines:
-            if not (engine.get("enabled", False) or engine.get("visible", False)):
+            if not (engine.get("enabled", False) and engine.get("visible", False)):
                 continue
 
             info=engines_pb2.EngineInfo()
@@ -19,7 +19,7 @@ class EnginesServiceServicer(engines_pb2_grpc.EnginesServiceServicer):
             info.ready=True
             info.type=engines_pb2.EngineType.PICTURE
 
-            engines.engine.append(engine)
+            engines.engine.append(info)
 
         return engines
 
