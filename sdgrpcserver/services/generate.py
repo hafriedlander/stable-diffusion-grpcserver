@@ -1,5 +1,5 @@
 
-import traceback, threading
+import random, traceback, threading
 from types import SimpleNamespace as SN
 
 import grpc
@@ -94,6 +94,8 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                     seed = last_seed + 1
                 else:
                     seed = -1
+
+                if seed == -1: seed = random.randrange(0, 4294967295)
 
                 params.seed = last_seed = seed
                 print(f'Generating {repr(params)}, {"with Image" if image else ""}, {"with Mask" if mask else ""}')

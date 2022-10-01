@@ -22,6 +22,7 @@ from sdgrpcserver.pipeline.scheduling_euler_discrete import EulerDiscreteSchedul
 from sdgrpcserver.pipeline.scheduling_euler_ancestral_discrete import EulerAncestralDiscreteScheduler
 
 def preprocess(image):
+    image = image.convert("RGB")
     w, h = image.size
     w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
     image = image.resize((w, h), resample=PIL.Image.LANCZOS)
