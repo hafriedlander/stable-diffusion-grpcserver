@@ -11,6 +11,7 @@ git clone https://github.com/hafriedlander/stable-diffusion-grpcserver.git
 cd stable-diffusion-grpcserver
 conda env create -f environment.yaml
 conda activate sd-grpc-server
+flit install --pth-file
 sets HF_API_TOKEN={your huggingface token}
 python ./server.py
 ```

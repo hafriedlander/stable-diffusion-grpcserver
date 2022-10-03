@@ -25,7 +25,8 @@ dependencies = [
   "Twisted ~= 22.8.0",
   "hupper ~= 1.10.3",
   "watchdog ~= 2.1.9",
-  "python-dotenv ~= 0.21.0"
+  "python-dotenv ~= 0.21.0",
+  "service_identity ~= 21.1.0"
 ]
 
 [project.urls]
