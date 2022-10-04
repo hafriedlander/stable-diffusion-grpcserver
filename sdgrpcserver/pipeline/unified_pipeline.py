@@ -31,6 +31,16 @@ def preprocess(image):
     image = torch.from_numpy(image)
     return 2.0 * image - 1.0
 
+def preprocess_tensor(tensor):
+    # Make sure it's BCHW not just CHW
+    if tensor.ndim == 3: tensor = tensor[None, ...]
+    # Strip any alpha
+    tensor = tensor[:, [0,1,2]]
+    # Adjust to -1 .. 1
+    tensor = 2.0 * tensor - 1.0
+    # Done
+    return tensor
+
 def preprocess_mask(mask):
     mask = mask.convert("L")
     w, h = mask.size
@@ -43,6 +53,16 @@ def preprocess_mask(mask):
     mask = torch.from_numpy(mask)
     return mask
 
+def preprocess_mask_tensor(tensor):
+    if tensor.ndim == 3: tensor = tensor[None, ...]
+    # Create 4 channels from the R channel
+    tensor = tensor[:, [0, 0, 0, 0]]
+    # Resize to 1/8th normal
+    tensor = T.functional.resize(tensor, [tensor.shape[2]//8, tensor.shape[3]//8], T.InterpolationMode.NEAREST)
+    # Invert
+    tensor = 1 - tensor
+    # Done
+    return tensor
 
 
 class UnifiedPipeline(DiffusionPipeline):
@@ -179,7 +199,8 @@ class UnifiedPipeline(DiffusionPipeline):
         generator: Optional[torch.Generator] = None,
         latents: Optional[torch.FloatTensor] = None,
         output_type: Optional[str] = "pil",
-        return_dict: bool = True
+        return_dict: bool = True,
+        run_safety_checker: bool = True,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -253,8 +274,8 @@ class UnifiedPipeline(DiffusionPipeline):
             raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
 
         # Calculate operating mode based on arguments
-        if mask_image: mode = "inpaint"
-        elif init_image: mode = "img2img"
+        if mask_image != None: mode = "inpaint"
+        elif init_image != None: mode = "img2img"
         else: mode = "txt2img"
 
         max_strength = 2.0 if mode == "inpaint" else 1.0
@@ -298,6 +319,8 @@ class UnifiedPipeline(DiffusionPipeline):
         else:
             if isinstance(init_image, PIL.Image.Image):
                 init_image = preprocess(init_image)
+            else:
+                init_image = preprocess_tensor(init_image)
 
             if mode == "inpaint": init_image = init_image.to(self.device)
 
@@ -316,7 +339,7 @@ class UnifiedPipeline(DiffusionPipeline):
                 if isinstance(mask_image, PIL.Image.Image):
                     mask = preprocess_mask(mask_image)
                 else:
-                    mask = mask_image
+                    mask = preprocess_mask_tensor(mask_image)
 
                 mask = mask.to(self.device)
                 mask = torch.cat([mask] * batch_size)
@@ -513,14 +536,21 @@ class UnifiedPipeline(DiffusionPipeline):
         image = self.vae.decode(latents.to(self.vae.device)).sample
 
         image = (image / 2 + 0.5).clamp(0, 1)
-        image = image.to(self.vae.device).cpu().permute(0, 2, 3, 1).numpy()
+        numpyImage = image.to(self.vae.device).cpu().permute(0, 2, 3, 1).numpy()
 
-        # run safety checker
-        safety_cheker_input = self.feature_extractor(self.numpy_to_pil(image), return_tensors="pt").to(self.device)
-        image, has_nsfw_concept = self.safety_checker(images=image, clip_input=safety_cheker_input.pixel_values)
+        if run_safety_checker:
+            # run safety checker
+            safety_cheker_input = self.feature_extractor(self.numpy_to_pil(numpyImage), return_tensors="pt").to(self.device)
+            numpyImage, has_nsfw_concept = self.safety_checker(images=numpyImage, clip_input=safety_cheker_input.pixel_values)
+        else:
+            has_nsfw_concept = [False] * numpyImage.shape[0]
 
         if output_type == "pil":
             image = self.numpy_to_pil(image)
+        elif output_type == "tensor":
+            image = torch.from_numpy(numpyImage).permute(0, 3, 1, 2)
+        else:
+            image = numpyImage
 
         if not return_dict:
             return (image, has_nsfw_concept)

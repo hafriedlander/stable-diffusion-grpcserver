@@ -7,12 +7,33 @@ import generation_pb2, generation_pb2_grpc
 
 from sdgrpcserver.utils import image_to_artifact, artifact_to_image
 
+from sdgrpcserver import images
+
 class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
     def __init__(self, manager):
         self._manager = manager
 
     def unimp(self, what):
         raise NotImplementedError(f"{what} not implemented")
+
+    def _handleImageAdjustment(self, tensor, adjustments):
+        if type(tensor) is bytes: tensor = images.fromPngBytes(tensor)
+        
+        for adjustment in adjustments:
+            which = adjustment.WhichOneof("adjustment")
+
+            if which == "blur":
+                tensor = images.gaussianblur(tensor, adjustment.blur.sigma)
+            elif which == "invert":
+                tensor = images.invert(tensor)
+            elif which == "levels":
+                tensor = images.levels(tensor, adjustment.levels.input_low, adjustment.levels.input_high, adjustment.levels.output_low, adjustment.levels.output_high)
+            elif which == "channels":
+                tensor = images.channelmap(tensor, [adjustment.channels.r,  adjustment.channels.g,  adjustment.channels.b,  adjustment.channels.a])
+            elif which == "rescale":
+                raise NotImplementedError("Rescale not currently implemented")
+        
+        return tensor
 
     def Generate(self, request, context):
         try:
@@ -22,7 +43,8 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
 
             # Extract prompt inputs
             image=None
-            mask=None
+            inMask=None
+            outMask=None
             text=""
             negative=""
 
@@ -38,9 +60,12 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                     self.unimp("Sequence prompts")
                 else:
                     if prompt.artifact.type == generation_pb2.ARTIFACT_IMAGE:
-                        image=artifact_to_image(prompt.artifact)
+                        image = images.fromPngBytes(prompt.artifact.binary).to(self._manager.device)
+                        image = self._handleImageAdjustment(image, prompt.artifact.adjustments)
                     elif prompt.artifact.type == generation_pb2.ARTIFACT_MASK:
-                        mask=artifact_to_image(prompt.artifact)
+                        mask = images.fromPngBytes(prompt.artifact.binary).to(self._manager.device)
+                        inMask = self._handleImageAdjustment(mask, prompt.artifact.adjustments)
+                        outMask = self._handleImageAdjustment(mask, prompt.artifact.postAdjustments)
                     else:
                         self.unimp(f"Artifact prompts of type {prompt.artifact.type}")
 
@@ -98,8 +123,8 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                 if seed == -1: seed = random.randrange(0, 4294967295)
 
                 params.seed = last_seed = seed
-                print(f'Generating {repr(params)}, {"with Image" if image else ""}, {"with Mask" if mask else ""}')
-                results = pipe.generate(text=text, negative_text=negative, image=image, mask=mask, params=params, stop_event=stop_event)
+                print(f'Generating {repr(params)}, {"with Image" if image != None else ""}, {"with Mask" if inMask != None else ""}')
+                results = pipe.generate(text=text, negative_text=negative, image=image, mask=inMask, params=params, stop_event=stop_event)
 
                 for result_image, nsfw in zip(results[0], results[1]):
                     answer = generation_pb2.Answer()

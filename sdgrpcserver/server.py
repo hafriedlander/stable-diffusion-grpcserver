@@ -1,4 +1,4 @@
-import argparse, os, sys
+import argparse, os, sys, threading, signal
 from concurrent import futures
 
 import yaml
@@ -149,9 +149,6 @@ def main():
         engines = yaml.load(cfg, Loader=Loader)
         manager = EngineManager(engines, weight_root=args.weight_root, enable_mps=args.enable_mps, vram_optimisation_level=args.vram_optimisation_level, nsfw_behaviour=args.nsfw_behaviour)
 
-        # Start GRPC
-        start_grpc(manager, "[::]" if args.listen_to_all else "localhost", args.grpc_port)
-
         # Build the web handler
         controller = RoutingController(args.http_file_root, build_sonora(manager))
 
@@ -163,5 +160,17 @@ def main():
         print(f"HTTP listening on port {args.http_port}")
 
         # Run the Twisted reactor
-        reactor.run()
+        threading.Thread(target=reactor.run, args=(False,)).start()
+
+        prevHandler = None
+        def shutdown_reactor_handler(*args):
+            reactor.callFromThread(reactor.stop)
+            return prevHandler(*args)
+        prevHandler = signal.signal(signal.SIGINT, shutdown_reactor_handler)
+
+        # Start GRPC
+        start_grpc(manager, "[::]" if args.listen_to_all else "localhost", args.grpc_port, block=True)
+
+        # After ctrl-c, 
+
 

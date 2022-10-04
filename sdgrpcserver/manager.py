@@ -184,6 +184,7 @@ class PipelineWrapper(object):
                 guidance_scale=params.cfg_scale,
                 eta=params.eta,
                 generator=generator,
+                output_type="tensor",
                 return_dict=False
             )
 
@@ -209,7 +210,10 @@ class EngineManager(object):
         self._token=os.environ.get("HF_API_TOKEN", True)
 
         self.loadPipelines()
-    
+
+    @property
+    def device(self): return self._device
+
     def _getWeightPath(self, remote_path, local_path):
         if local_path:
             test_path = local_path if os.path.isabs(local_path) else os.path.join(self._weight_root, local_path)
