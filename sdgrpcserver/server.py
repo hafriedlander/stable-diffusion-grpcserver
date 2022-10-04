@@ -160,12 +160,17 @@ def main():
         print(f"HTTP listening on port {args.http_port}")
 
         # Run the Twisted reactor
-        threading.Thread(target=reactor.run, args=(False,)).start()
+        twistedMainThread = threading.Thread(target=reactor.run, args=(False,))
+        twistedMainThread.start()
 
         prevHandler = None
         def shutdown_reactor_handler(*args):
             reactor.callFromThread(reactor.stop)
-            return prevHandler(*args)
+            print("Waiting for server to shutdown...")
+            twistedMainThread.join(timeout=10.0)
+            print("All done. Goodbye.")
+            sys.exit(0)
+
         prevHandler = signal.signal(signal.SIGINT, shutdown_reactor_handler)
 
         # Start GRPC
