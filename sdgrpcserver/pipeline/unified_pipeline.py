@@ -189,6 +189,7 @@ class UnifiedPipeline(DiffusionPipeline):
         prompt: Union[str, List[str]],
         init_image: Optional[Union[torch.FloatTensor, PIL.Image.Image]] = None,
         mask_image: Optional[Union[torch.FloatTensor, PIL.Image.Image]] = None,
+        outmask_image: Optional[Union[torch.FloatTensor, PIL.Image.Image]] = None,
         strength: Optional[float] = 0.8,
         height: Optional[int] = 512,
         width: Optional[int] = 512,
@@ -317,6 +318,8 @@ class UnifiedPipeline(DiffusionPipeline):
             t_start = 0
 
         else:
+            init_image_orig = init_image
+
             if isinstance(init_image, PIL.Image.Image):
                 init_image = preprocess(init_image)
             else:
@@ -536,6 +539,16 @@ class UnifiedPipeline(DiffusionPipeline):
         image = self.vae.decode(latents.to(self.vae.device)).sample
 
         image = (image / 2 + 0.5).clamp(0, 1)
+
+        if outmask_image != None and mode == "inpaint" and strength == 1:
+            outmask = torch.cat([outmask_image] * batch_size)
+            outmask = outmask[:, [0,1,2]]
+
+            source =  torch.cat([init_image_orig] * batch_size)
+            source = source[:, [0,1,2]]
+
+            image = source * (1-outmask) + image * outmask
+
         numpyImage = image.to(self.vae.device).cpu().permute(0, 2, 3, 1).numpy()
 
         if run_safety_checker:

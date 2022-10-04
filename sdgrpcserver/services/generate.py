@@ -9,6 +9,26 @@ from sdgrpcserver.utils import image_to_artifact, artifact_to_image
 
 from sdgrpcserver import images
 
+def buildDefaultMaskPostAdjustments():
+    hardenMask = generation_pb2.ImageAdjustment()
+    hardenMask.levels.input_low = 0
+    hardenMask.levels.input_high = 0.05
+    hardenMask.levels.output_low = 0
+    hardenMask.levels.output_high = 1
+
+    blur = generation_pb2.ImageAdjustment()
+    blur.blur.sigma = 48
+
+    levels = generation_pb2.ImageAdjustment()
+    levels.levels.input_low = 0
+    levels.levels.input_high = 0.5
+    levels.levels.output_low = 0
+    levels.levels.output_high = 1
+
+    return [hardenMask, blur, levels]
+
+defaultMaskPostAdjustments = buildDefaultMaskPostAdjustments();
+
 class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
     def __init__(self, manager):
         self._manager = manager
@@ -65,7 +85,11 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                     elif prompt.artifact.type == generation_pb2.ARTIFACT_MASK:
                         mask = images.fromPngBytes(prompt.artifact.binary).to(self._manager.device)
                         inMask = self._handleImageAdjustment(mask, prompt.artifact.adjustments)
-                        outMask = self._handleImageAdjustment(mask, prompt.artifact.postAdjustments)
+
+                        postAdjustments = prompt.artifact.postAdjustments
+                        if not postAdjustments: postAdjustments = defaultMaskPostAdjustments
+
+                        outMask = self._handleImageAdjustment(inMask, postAdjustments)
                     else:
                         self.unimp(f"Artifact prompts of type {prompt.artifact.type}")
 
@@ -124,7 +148,7 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
 
                 params.seed = last_seed = seed
                 print(f'Generating {repr(params)}, {"with Image" if image != None else ""}, {"with Mask" if inMask != None else ""}')
-                results = pipe.generate(text=text, negative_text=negative, image=image, mask=inMask, params=params, stop_event=stop_event)
+                results = pipe.generate(text=text, negative_text=negative, image=image, mask=inMask, outmask=outMask, params=params, stop_event=stop_event)
 
                 for result_image, nsfw in zip(results[0], results[1]):
                     answer = generation_pb2.Answer()

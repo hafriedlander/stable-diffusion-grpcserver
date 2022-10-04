@@ -148,7 +148,7 @@ class PipelineWrapper(object):
         if self._device == "cuda": return torch.autocast(self._device)
         return WithNoop()
 
-    def generate(self, text, params, image=None, mask=None, negative_text=None, progress_callback=None, stop_event=None):
+    def generate(self, text, params, image=None, mask=None, outmask=None, negative_text=None, progress_callback=None, stop_event=None):
         generator=None
 
         if params.seed > 0:
@@ -177,6 +177,7 @@ class PipelineWrapper(object):
                 negative_prompt=negative_text if negative_text else None,
                 init_image=image,
                 mask_image=mask,
+                outmask_image=outmask,
                 strength=params.strength,
                 width=params.width,
                 height=params.height,
