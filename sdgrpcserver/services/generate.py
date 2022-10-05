@@ -130,21 +130,25 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                 context.set_details("Engine not found")
                 return
 
-            ctr = 0
-            last_seed = -1
-
             stop_event = threading.Event()
             context.add_callback(lambda: stop_event.set())
 
+            ctr = 0
+            last_seed = -1
+
             for _ in range(params.samples):
+                seed = -1
+
+                # While we still have seeds from the client, consume them
                 if seeds:
                     seed = seeds.pop(0)
+                # Or if we have a previous seed, sequentially work from that
                 elif last_seed != -1:
                     seed = last_seed + 1
-                else:
-                    seed = -1
 
-                if seed == -1: seed = random.randrange(0, 4294967295)
+                # If either the client passed -1, or they passed nothing & this is our first seed, pick something randomly
+                if seed == -1: 
+                    seed = random.randrange(0, 2**32-1)
 
                 params.seed = last_seed = seed
                 print(f'Generating {repr(params)}, {"with Image" if image != None else ""}, {"with Mask" if inMask != None else ""}')
@@ -154,6 +158,8 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                     answer = generation_pb2.Answer()
                     answer.request_id=request.request_id
                     answer.answer_id=f"{request.request_id}-{ctr}"
+                    answer.index=ctr
+                    answer.seed=seed
                     artifact=image_to_artifact(result_image)
                     artifact.finish_reason=generation_pb2.FILTER if nsfw else generation_pb2.NULL
                     answer.artifacts.append(artifact)
