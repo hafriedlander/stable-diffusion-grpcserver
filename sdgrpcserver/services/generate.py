@@ -51,7 +51,7 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
             elif which == "channels":
                 tensor = images.channelmap(tensor, [adjustment.channels.r,  adjustment.channels.g,  adjustment.channels.b,  adjustment.channels.a])
             elif which == "rescale":
-                raise NotImplementedError("Rescale not currently implemented")
+                self.unimp("Rescale")
         
         return tensor
 
@@ -80,10 +80,10 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                     self.unimp("Sequence prompts")
                 else:
                     if prompt.artifact.type == generation_pb2.ARTIFACT_IMAGE:
-                        image = images.fromPngBytes(prompt.artifact.binary).to(self._manager.device)
+                        image = images.fromPngBytes(prompt.artifact.binary).to(self._manager.mode.device)
                         image = self._handleImageAdjustment(image, prompt.artifact.adjustments)
                     elif prompt.artifact.type == generation_pb2.ARTIFACT_MASK:
-                        mask = images.fromPngBytes(prompt.artifact.binary).to(self._manager.device)
+                        mask = images.fromPngBytes(prompt.artifact.binary).to(self._manager.mode.device)
                         inMask = self._handleImageAdjustment(mask, prompt.artifact.adjustments)
 
                         postAdjustments = prompt.artifact.postAdjustments
@@ -158,10 +158,10 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                     answer = generation_pb2.Answer()
                     answer.request_id=request.request_id
                     answer.answer_id=f"{request.request_id}-{ctr}"
-                    answer.index=ctr
-                    answer.seed=seed
                     artifact=image_to_artifact(result_image)
                     artifact.finish_reason=generation_pb2.FILTER if nsfw else generation_pb2.NULL
+                    artifact.index=ctr
+                    artifact.seed=seed
                     answer.artifacts.append(artifact)
  
                     yield answer

@@ -23,7 +23,7 @@ sys.path.append(generatedPath)
 
 import generation_pb2_grpc, dashboard_pb2_grpc, engines_pb2_grpc
 
-from sdgrpcserver.manager import EngineManager
+from sdgrpcserver.manager import EngineMode, EngineManager
 from sdgrpcserver.services.dashboard import DashboardServiceServicer
 from sdgrpcserver.services.generate import GenerationServiceServicer
 from sdgrpcserver.services.engines import EnginesServiceServicer
@@ -47,28 +47,59 @@ class DartGRPCCompatibility(object):
 
         return self.app(environ, wrapped_start_response)
 
-def start_grpc(manager, host, port, block=False):
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-    generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(manager), server)
-    dashboard_pb2_grpc.add_DashboardServiceServicer_to_server(DashboardServiceServicer(), server)
-    engines_pb2_grpc.add_EnginesServiceServicer_to_server(EnginesServiceServicer(manager), server)
+class GrpcServer(object):
+    def __init__(self, args):
+        host = "[::]" if args.listen_to_all else "localhost"
+        port = args.grpc_port
 
-    server.add_insecure_port(f"{host}:{port}")
-    server.start()
+        self._server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+        self._server.add_insecure_port(f"{host}:{port}")
 
-    print(f"GRPC listening on port {host}:{port}")
-    if block: server.wait_for_termination()
+    @property
+    def grpc_server(self):
+        return self._server
 
-def build_sonora(manager):
-    grpcapp = wsgi_app = grpcWSGI(None)
-    wsgi_app = DartGRPCCompatibility(wsgi_app)
-    wsgi_app = CORS(wsgi_app, headers="*", methods="*", origin="*")
+    def start(self):
+        self._server.start()
 
-    generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(manager), grpcapp)
-    dashboard_pb2_grpc.add_DashboardServiceServicer_to_server(DashboardServiceServicer(), grpcapp)
-    engines_pb2_grpc.add_EnginesServiceServicer_to_server(EnginesServiceServicer(manager), grpcapp)
+    def block(self):
+        self._server.wait_for_termination()
 
-    return WSGIResource(reactor, reactor.getThreadPool(), wsgi_app)
+    def stop(self, grace=10):
+        self._server.stop(grace)
+
+class HttpServer(object):
+    def __init__(self, args):
+        host = "" if args.listen_to_all else "127.0.0.1"
+        port = args.http_port
+
+        # Build the WSGI layer for GRPC-WEB handling
+        self._grpcapp = wsgi_app = grpcWSGI(None)
+        wsgi_app = DartGRPCCompatibility(wsgi_app)
+        wsgi_app = CORS(wsgi_app, headers="*", methods="*", origin="*")
+
+        wsgi_resource = WSGIResource(reactor, reactor.getThreadPool(), wsgi_app)
+
+        # Build the web handler
+        controller = RoutingController(args.http_file_root, wsgi_resource)
+
+        # Connect to an endpoint
+        site = server.Site(controller)
+        endpoint = endpoints.TCP4ServerEndpoint(reactor, port, interface=host)
+        endpoint.listen(site)
+
+    @property
+    def grpc_server(self):
+        return self._grpcapp
+    
+    def start(self, block=False):
+        # Run the Twisted reactor
+        self._thread = threading.Thread(target=reactor.run, args=(False,))
+        self._thread.start()
+
+    def stop(self, grace=10):
+        reactor.callFromThread(reactor.stop)
+        self._thread.join(timeout=grace)
 
 class ServerDetails(resource.Resource):
     isLeaf = True
@@ -101,7 +132,6 @@ class RoutingController(resource.Resource):
 
     def render(self, request):
         return self.files.render(request) if self.files else self.wsgi.render(request)
-
 
 def main():
     parser = argparse.ArgumentParser(
@@ -145,37 +175,45 @@ def main():
         # start_reloader will only return in a monitored subprocess
         reloader = hupper.start_reloader('sdgrpcserver.server.main', reload_interval=10)
 
+    grpc = GrpcServer(args)
+    grpc.start()
+
+    http = HttpServer(args)
+    http.start()
+
+    prevHandler = None
+    def shutdown_reactor_handler(*args):
+        print("Waiting for server to shutdown...")
+        http.stop()
+        grpc.stop()
+        print("All done. Goodbye.")
+        sys.exit(0)
+
+    prevHandler = signal.signal(signal.SIGINT, shutdown_reactor_handler)
+
     with open(os.path.normpath(args.enginecfg), 'r') as cfg:
         engines = yaml.load(cfg, Loader=Loader)
-        manager = EngineManager(engines, weight_root=args.weight_root, enable_mps=args.enable_mps, vram_optimisation_level=args.vram_optimisation_level, nsfw_behaviour=args.nsfw_behaviour)
+        manager = EngineManager(
+            engines, 
+            weight_root=args.weight_root,
+            mode=EngineMode(vram_optimisation_level=args.vram_optimisation_level, enable_cuda=True, enable_mps=args.enable_mps), 
+            nsfw_behaviour=args.nsfw_behaviour
+        )
 
-        # Build the web handler
-        controller = RoutingController(args.http_file_root, build_sonora(manager))
+        generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(manager), grpc.grpc_server)
+        dashboard_pb2_grpc.add_DashboardServiceServicer_to_server(DashboardServiceServicer(), grpc.grpc_server)
+        engines_pb2_grpc.add_EnginesServiceServicer_to_server(EnginesServiceServicer(manager), grpc.grpc_server)
 
-        # Connect to an endpoint
-        site = server.Site(controller)
-        endpoint = endpoints.TCP4ServerEndpoint(reactor, args.http_port, interface="" if args.listen_to_all else "127.0.0.1")
-        endpoint.listen(site)
+        generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(manager), http.grpc_server)
+        dashboard_pb2_grpc.add_DashboardServiceServicer_to_server(DashboardServiceServicer(), http.grpc_server)
+        engines_pb2_grpc.add_EnginesServiceServicer_to_server(EnginesServiceServicer(manager), http.grpc_server)
 
-        print(f"HTTP listening on port {args.http_port}")
+        print(f"GRPC listening on port {args.grpc_port}, HTTP listening on port {args.http_port}. Start your engines....")
 
-        # Run the Twisted reactor
-        twistedMainThread = threading.Thread(target=reactor.run, args=(False,))
-        twistedMainThread.start()
+        manager.loadPipelines()
 
-        prevHandler = None
-        def shutdown_reactor_handler(*args):
-            reactor.callFromThread(reactor.stop)
-            print("Waiting for server to shutdown...")
-            twistedMainThread.join(timeout=10.0)
-            print("All done. Goodbye.")
-            sys.exit(0)
+        print("All engines ready")
 
-        prevHandler = signal.signal(signal.SIGINT, shutdown_reactor_handler)
-
-        # Start GRPC
-        start_grpc(manager, "[::]" if args.listen_to_all else "localhost", args.grpc_port, block=True)
-
-        # After ctrl-c, 
-
+        # Block until termination
+        grpc.block()
 

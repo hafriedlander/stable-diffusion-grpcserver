@@ -7,6 +7,7 @@ class EnginesServiceServicer(engines_pb2_grpc.EnginesServiceServicer):
     def ListEngines(self, request, context):
         engines = engines_pb2.Engines()
 
+        status = self._manager.getStatus()
         for engine in self._manager.engines:
             if not (engine.get("enabled", False) and engine.get("visible", False)):
                 continue
@@ -16,7 +17,7 @@ class EnginesServiceServicer(engines_pb2_grpc.EnginesServiceServicer):
             info.name=engine["name"]
             info.description=engine["description"]
             info.owner="stable-diffusion-grpcserver"
-            info.ready=True
+            info.ready=status.get(engine["id"], False)
             info.type=engines_pb2.EngineType.PICTURE
 
             engines.engine.append(info)

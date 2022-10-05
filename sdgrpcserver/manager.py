@@ -54,17 +54,44 @@ class ProgressBarWrapper(object):
         return ProgressBarWrapper.InternalTqdm(self._progress_callback, self._stop_event, iterable)
     
 
+class EngineMode(object):
+    def __init__(self, vram_optimisation_level=0, enable_cuda = True, enable_mps = False):
+        self._vramO = vram_optimisation_level
+        self._enable_cuda = enable_cuda
+        self._enable_mps = enable_mps
+    
+    @property
+    def device(self):
+        self._hasCuda = self._enable_cuda and getattr(torch, 'cuda', False) and torch.cuda.is_available()
+        self._hasMps = self._enable_mps and getattr(torch.backends, 'mps', False) and torch.backends.mps.is_available()
+        return "cuda" if self._hasCuda else "mps" if self._hasMps else "cpu"
+
+    @property
+    def attention_slice(self):
+        return self.device == "cuda" and self._vramO > 0
+
+    @property
+    def fp16(self):
+        return self.device == "cuda" and self._vramO > 1 and not self.cuda_only_unet
+
+    @property
+    def cuda_only_unet(self):
+        return self.device == "cuda" and self._vramO > 2
+
 class PipelineWrapper(object):
 
-    def __init__(self, id, device, pipeline, fp16_pipeline=None, vramO=0):
+    def __init__(self, id, mode, pipeline):
         self._id = id
-        self._device = device
-        self._vramO = vramO
+        self._mode = mode
 
-        self._pipeline = fp16_pipeline if self.fp16 and fp16_pipeline else pipeline
-        if self.cuda_only_unet: self._pipeline.unet = fp16_pipeline.unet if fp16_pipeline else self._pipeline.to(torch.float16)
+        self._pipeline = pipeline
+        if self.mode.fp16:
+            self._pipeline = pipeline.to(torch.float16)
+        elif self.mode.cuda_only_unet: 
+            self._pipeline.unet = self._pipeline.unet.to(torch.float16)
 
-        print(self.fp16, self.attention_slice, self.cuda_only_unet)
+        if self.mode.attention_slice:
+            self._pipeline.enable_attention_slicing(1)
 
         self._plms = pipeline.scheduler
         self._klms = self._prepScheduler(LMSDiscreteScheduler(
@@ -93,9 +120,6 @@ class PipelineWrapper(object):
                 num_train_timesteps=1000
             ))
 
-    def progress(self, **kwargs):
-        print(repr(kwargs))
-
     def _prepScheduler(self, scheduler):
         scheduler = scheduler.set_format("pt")
 
@@ -119,33 +143,19 @@ class PipelineWrapper(object):
     def id(self): return self._id
 
     @property
-    def device(self): return self._device
-
-    # -- A few different adjustments we make based on vramO
-
-    @property
-    def attention_slice(self): return self.device == "cuda" and self._vramO > 0
-
-    @property
-    def fp16(self): return self.device == "cuda" and self._vramO > 1 and not self.cuda_only_unet
-
-    @property
-    def cuda_only_unet(self): return self.device == "cuda" and self._vramO > 2
-
+    def mode(self): return self._mode
 
     def activate(self):
-        if self.attention_slice: self._pipeline.enable_attention_slicing(1)
-
         # Pipeline.to is in-place, so we move to the device on activate, and out again on deactivate
-        if self.cuda_only_unet: self._pipeline.unet.to(torch.device("cuda"))
-        else: self._pipeline.to(self._device)
+        if self.mode.cuda_only_unet: self._pipeline.unet.to(torch.device("cuda"))
+        else: self._pipeline.to(self.mode.device)
         
     def deactivate(self):
         self._pipeline.to("cpu")
-        if self._device == "cuda": torch.cuda.empty_cache()
+        if self.mode.device == "cuda": torch.cuda.empty_cache()
 
     def _autocast(self):
-        if self._device == "cuda": return torch.autocast(self._device)
+        if self.mode.device == "cuda": return torch.autocast(self.mode.device)
         return WithNoop()
 
     def generate(self, text, params, image=None, mask=None, outmask=None, negative_text=None, progress_callback=None, stop_event=None):
@@ -193,7 +203,7 @@ class PipelineWrapper(object):
 
 class EngineManager(object):
 
-    def __init__(self, engines, weight_root="./weights", enable_mps=False, vram_optimisation_level=0, nsfw_behaviour="block"):
+    def __init__(self, engines, weight_root="./weights", mode=EngineMode(), nsfw_behaviour="block"):
         self.engines = engines
         self._default = None
         self._pipelines = {}
@@ -201,19 +211,13 @@ class EngineManager(object):
         self._active = None
 
         self._weight_root = weight_root
-        self._vramO = vram_optimisation_level
+
+        self._mode = mode
         self._nsfw = nsfw_behaviour
-
-        self._hasCuda = getattr(torch, 'cuda', False) and torch.cuda.is_available()
-        self._hasMps = enable_mps and getattr(torch.backends, 'mps', False) and torch.backends.mps.is_available()
-        self._device = "cuda" if self._hasCuda else "mps" if self._hasMps else "cpu"
-
-        self._token=os.environ.get("HF_API_TOKEN", True)
-
-        self.loadPipelines()
+        self._token = os.environ.get("HF_API_TOKEN", True)
 
     @property
-    def device(self): return self._device
+    def mode(self): return self._mode
 
     def _getWeightPath(self, remote_path, local_path):
         if local_path:
@@ -224,7 +228,6 @@ class EngineManager(object):
 
     def buildPipeline(self, engine):
         weight_path=self._getWeightPath(engine["model"], engine.get("local_model", None))
-        fp16_weight_path=self._getWeightPath(engine["model"], engine.get("local_fp16_model", None))
 
         use_auth_token=self._token if engine.get("use_auth_token", False) else False
 
@@ -235,39 +238,23 @@ class EngineManager(object):
 
         if engine["class"] == "StableDiffusionPipeline":
             return PipelineWrapper(
-                id=engine["id"], 
-                device=self._device, 
-                vramO=self._vramO, 
+                id=engine["id"],
+                mode=self._mode,
                 pipeline=StableDiffusionPipeline.from_pretrained(
                     weight_path,
                     use_auth_token=use_auth_token,
                     **extra_kwargs                        
-                ),
-                fp16_pipeline=StableDiffusionPipeline.from_pretrained(
-                    fp16_weight_path, 
-                    revision="fp16", 
-                    torch_dtype=torch.float16, 
-                    use_auth_token=use_auth_token,
-                    **extra_kwargs                        
-                ) if self._hasCuda and engine.get("has_fp16", False) else None
+                )
             )
         elif engine["class"] == "UnifiedPipeline":
             return PipelineWrapper(
-                id=engine["id"], 
-                device=self._device, 
-                vramO=self._vramO, 
+                id=engine["id"],
+                mode=self._mode,
                 pipeline=UnifiedPipeline.from_pretrained(
                     weight_path, 
                     use_auth_token=use_auth_token,
                     **extra_kwargs                        
-                ),
-                fp16_pipeline=UnifiedPipeline.from_pretrained(
-                    fp16_weight_path, 
-                    revision="fp16", 
-                    torch_dtype=torch.float16, 
-                    use_auth_token=use_auth_token,
-                    **extra_kwargs                        
-                ) if self._hasCuda and engine.get("has_fp16", False) else None
+                )
             )
     
     def loadPipelines(self):
@@ -281,6 +268,9 @@ class EngineManager(object):
                 if engine.get("default", False): self._default = pipe
             else:
                 raise Exception(f'Unknown engine class "{engine["class"]}"')
+
+    def getStatus(self):
+        return {engine["id"]: engine["id"] in self._pipelines for engine in self.engines if engine.get("enabled", True)}
 
     def getPipe(self, id):
         """
