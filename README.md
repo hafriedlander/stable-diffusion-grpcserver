@@ -74,3 +74,5 @@ Extra features to add
   - Huge seeds
 - Other thoughts
   - Figure out how to just suppress NSFW filtering altogether (takes VRAM, if you're not interested)
+
+# ![Stable Cabal Logo](stablecabal.png) [Part of the Stable Cabal](https://www.stablecabal.org/)
