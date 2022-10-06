@@ -76,4 +76,4 @@ Extra features to add
   - Figure out how to just suppress NSFW filtering altogether (takes VRAM, if you're not interested)
 
 
-[![Stable Cabal Logo](stablecabal.png)](https://www.stabelcabal.org/)
+[![Stable Cabal Logo](stablecabal.png)](https://www.stablecabal.org/)
