@@ -1,12 +1,14 @@
 
-import os, gc, warnings
+import os, warnings
 import torch
 
-import numpy as np
-import PIL
-from types import SimpleNamespace as SN
-
 from tqdm.auto import tqdm
+
+# Patch attention to use MemoryEfficientCrossAttention if xformers is available
+from diffusers.models import attention
+from sdgrpcserver.pipeline.fastattention import has_xformers, MemoryEfficientCrossAttention
+print(f"Using xformers: {'yes' if has_xformers() else 'no'}")
+if has_xformers(): attention.CrossAttention = MemoryEfficientCrossAttention
 
 from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler
 from diffusers.configuration_utils import FrozenDict
