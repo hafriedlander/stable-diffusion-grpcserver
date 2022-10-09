@@ -33,8 +33,15 @@ message Tokens {
   optional string tokenizer_id = 2;
 }
 
+enum GaussianDirection {
+  DIRECTION_NONE = 0;
+  DIRECTION_UP = 1;
+  DIRECTION_DOWN = 2;
+}
+
 message ImageAdjustment_Gaussian {
   float sigma = 1;
+  GaussianDirection direction = 2;
 }
 
 message ImageAdjustment_Invert{
@@ -77,6 +84,13 @@ message ImageAdjustment_Rescale {
   repeated string algorithm_hint = 4;
 }
 
+message ImageAdjustment_Crop {
+  uint64 top = 1;
+  uint64 left = 2;
+  uint64 width = 3;
+  uint64 height = 4;
+}
+
 message ImageAdjustment {
   oneof adjustment {
     ImageAdjustment_Gaussian blur = 1;
@@ -84,6 +98,7 @@ message ImageAdjustment {
     ImageAdjustment_Levels levels = 3;
     ImageAdjustment_Channels channels = 4;
     ImageAdjustment_Rescale rescale = 5;
+    ImageAdjustment_Crop crop = 6;
   }
 }
 

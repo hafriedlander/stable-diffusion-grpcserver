@@ -1,6 +1,8 @@
 
+from math import sqrt
 import random, traceback, threading
 from types import SimpleNamespace as SN
+import torch
 
 import grpc
 import generation_pb2, generation_pb2_grpc
@@ -17,33 +19,60 @@ def buildDefaultMaskPostAdjustments():
     hardenMask.levels.output_high = 1
 
     blur = generation_pb2.ImageAdjustment()
-    blur.blur.sigma = 48
+    blur.blur.sigma = 32
+    blur.blur.direction = generation_pb2.DIRECTION_UP
 
-    levels = generation_pb2.ImageAdjustment()
-    levels.levels.input_low = 0
-    levels.levels.input_high = 0.5
-    levels.levels.output_low = 0
-    levels.levels.output_high = 1
+    #levels = generation_pb2.ImageAdjustment()
+    #levels.levels.input_low = 0
+    #levels.levels.input_high = 0.5
+    #levels.levels.output_low = 0
+    #levels.levels.output_high = 1
 
-    return [hardenMask, blur, levels]
+    return [hardenMask, blur] #, levels]
 
 defaultMaskPostAdjustments = buildDefaultMaskPostAdjustments();
+
+debugCtr=0
 
 class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
     def __init__(self, manager):
         self._manager = manager
+
+    def saveDebugTensor(self, tensor):
+        global debugCtr
+        debugCtr += 1 
+        with open(f"debug-{debugCtr}.png", "wb") as f:
+            f.write(images.toPngBytes(tensor)[0])
+
 
     def unimp(self, what):
         raise NotImplementedError(f"{what} not implemented")
 
     def _handleImageAdjustment(self, tensor, adjustments):
         if type(tensor) is bytes: tensor = images.fromPngBytes(tensor)
-        
+
+        #self.saveDebugTensor(tensor)
+
         for adjustment in adjustments:
             which = adjustment.WhichOneof("adjustment")
 
             if which == "blur":
-                tensor = images.gaussianblur(tensor, adjustment.blur.sigma)
+                sigma = adjustment.blur.sigma
+                direction = adjustment.blur.direction
+
+                if direction == generation_pb2.DIRECTION_DOWN or direction == generation_pb2.DIRECTION_UP:
+                    orig = tensor
+                    repeatCount=256
+                    sigma /= sqrt(repeatCount)
+
+                    for _ in range(repeatCount):
+                        tensor = images.gaussianblur(tensor, sigma)
+                        if direction == generation_pb2.DIRECTION_DOWN:
+                            tensor = torch.minimum(tensor, orig)
+                        else:
+                            tensor = torch.maximum(tensor, orig)
+                else:
+                    tensor = images.gaussianblur(tensor, adjustment.blur.sigma)
             elif which == "invert":
                 tensor = images.invert(tensor)
             elif which == "levels":
@@ -52,6 +81,10 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                 tensor = images.channelmap(tensor, [adjustment.channels.r,  adjustment.channels.g,  adjustment.channels.b,  adjustment.channels.a])
             elif which == "rescale":
                 self.unimp("Rescale")
+            elif which == "crop":
+                tensor = images.crop(tensor, adjustment.crop.top, adjustment.crop.left, adjustment.crop.height, adjustment.crop.width)
+            
+            #self.saveDebugTensor(tensor)
         
         return tensor
 

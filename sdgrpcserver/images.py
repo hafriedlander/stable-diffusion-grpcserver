@@ -87,9 +87,11 @@ def channelmap(tensor, srcchannels):
 
     return tensor
 
-# TODO: is kernal size of 6 sigma (r = 3 * sigma) good?
 def gaussianblur(tensor, sigma):
     if np.isscalar(sigma): sigma = (sigma, sigma)
     kernel = [ceil(sigma[0]*6), ceil(sigma[1]*6)]
     kernel = [kernel[0] - kernel[0] % 2 + 1, kernel[1] - kernel[1] % 2 + 1]
     return torchvision.transforms.functional.gaussian_blur(tensor, kernel, sigma)
+
+def crop(tensor, top, left, height, width):
+    return tensor[:, :, top:top+height, left:left+width]
