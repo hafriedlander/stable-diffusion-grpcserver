@@ -1,5 +1,6 @@
 
 import os, warnings
+from sdgrpcserver.pipeline.old_schedulers.scheduling_utils import OldSchedulerMixin
 import torch
 
 from tqdm.auto import tqdm
@@ -130,6 +131,9 @@ class PipelineWrapper(object):
             ))
 
     def _prepScheduler(self, scheduler):
+        if isinstance(scheduler, OldSchedulerMixin):
+            scheduler = scheduler.set_format("pt")
+
         if hasattr(scheduler.config, "steps_offset") and scheduler.config.steps_offset != 1:
             deprecation_message = (
                 f"The configuration file of this scheduler: {scheduler} is outdated. `steps_offset`"
@@ -146,24 +150,6 @@ class PipelineWrapper(object):
 
         return scheduler
 
-        scheduler = scheduler.set_format("pt")
-
-        if hasattr(scheduler.config, "steps_offset") and scheduler.config.steps_offset != 1:
-            warnings.warn(
-                f"The configuration file of this scheduler: {scheduler} is outdated. `steps_offset`"
-                f" should be set to 1 instead of {scheduler.config.steps_offset}. Please make sure "
-                "to update the config accordingly as leaving `steps_offset` might led to incorrect results"
-                " in future versions. If you have downloaded this checkpoint from the Hugging Face Hub,"
-                " it would be very nice if you could open a Pull request for the `scheduler/scheduler_config.json`"
-                " file",
-                DeprecationWarning,
-            )
-            new_config = dict(scheduler.config)
-            new_config["steps_offset"] = 1
-            scheduler._internal_dict = FrozenDict(new_config)
-
-        return scheduler
-
     @property
     def id(self): return self._id
 
@@ -172,16 +158,15 @@ class PipelineWrapper(object):
 
     def activate(self):
         # Pipeline.to is in-place, so we move to the device on activate, and out again on deactivate
-        if self.mode.cuda_only_unet: self._pipeline.unet.to(torch.device("cuda"))
-        else: self._pipeline.to(self.mode.device)
+        if self.mode.cuda_only_unet: 
+            self._pipeline.to("cpu")
+            self._pipeline.unet.to(torch.device("cuda"))
+        else: 
+            self._pipeline.to(self.mode.device)
         
     def deactivate(self):
         self._pipeline.to("cpu")
         if self.mode.device == "cuda": torch.cuda.empty_cache()
-
-    def _autocast(self):
-        if self.mode.device == "cuda": return torch.autocast(self.mode.device)
-        return WithNoop()
 
     def generate(self, text, params, image=None, mask=None, outmask=None, negative_text=None, progress_callback=None, stop_event=None):
         generator=None
@@ -206,23 +191,22 @@ class PipelineWrapper(object):
         self._pipeline.scheduler = scheduler
         self._pipeline.progress_bar = ProgressBarWrapper(progress_callback, stop_event)
 
-        with self._autocast():
-            images = self._pipeline(
-                prompt=text,
-                negative_prompt=negative_text if negative_text else None,
-                init_image=image,
-                mask_image=mask,
-                outmask_image=outmask,
-                strength=params.strength,
-                width=params.width,
-                height=params.height,
-                num_inference_steps=params.steps,
-                guidance_scale=params.cfg_scale,
-                eta=params.eta,
-                generator=generator,
-                output_type="tensor",
-                return_dict=False
-            )
+        images = self._pipeline(
+            prompt=text,
+            negative_prompt=negative_text if negative_text else None,
+            init_image=image,
+            mask_image=mask,
+            outmask_image=outmask,
+            strength=params.strength,
+            width=params.width,
+            height=params.height,
+            num_inference_steps=params.steps,
+            guidance_scale=params.cfg_scale,
+            eta=params.eta,
+            generator=generator,
+            output_type="tensor",
+            return_dict=False
+        )
 
         return images
 

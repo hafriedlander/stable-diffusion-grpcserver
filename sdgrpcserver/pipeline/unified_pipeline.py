@@ -1,4 +1,4 @@
-import inspect
+import inspect, traceback
 from mimetypes import init
 from typing import Callable, List, Optional, Union
 
@@ -28,6 +28,9 @@ class UnifiedMode(object):
 
     def generateLatents(self):
         raise NotImplementedError('Subclasses must implement')
+
+    def to(self, device, dtype):
+        pass
 
     def latentStep(self, latents, i, t):
         return latents
@@ -87,6 +90,7 @@ class Img2imgMode(UnifiedMode):
 
         self.device = pipeline.device
         self.scheduler = pipeline.scheduler
+        self.unet = pipeline.unet
         self.vae = pipeline.vae
 
         self.generator = generator
@@ -314,9 +318,15 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         init_latents = self._addInitialNoise(init_latents)
         return init_latents
 
+    def to(self, device, dtype):
+        self.init_latents_orig = self.init_latents_orig.to(device=device, dtype=dtype)
+        self.image_noise = self.image_noise.to(device=device, dtype=dtype)
+        self.blend_mask = self.blend_mask.to(device=device, dtype=dtype)
+
     def latentStep(self, latents, i, t):
         # masking
-        init_latents_proper = self.scheduler.add_noise(self.init_latents_orig, self.image_noise, self._getSchedulerNoiseTimestep(i, t))
+        init_latents_proper = self.scheduler.add_noise(self.init_latents_orig, self.image_noise, self._getSchedulerNoiseTimestep(i, t))       
+        init_latents_proper = init_latents_proper.to(latents.dtype)
 
         steppos = i / self.num_inference_steps
         iteration_mask = self.blend_mask.ge(steppos).to(self.blend_mask.dtype)
@@ -618,7 +628,17 @@ class UnifiedPipeline(DiffusionPipeline):
         if accepts_generator: extra_step_kwargs["generator"] = generator
 
         t_start = mode.t_start
-        timesteps_tensor = self.scheduler.timesteps[t_start:].to(self.device)
+
+        # --- ENTERING UNET SECTION. All tensors should be on unet.device, in case it isn't the same as self.device
+
+        timesteps_tensor = self.scheduler.timesteps[t_start:].to(self.unet.device)
+
+        latents = latents.to(device=self.unet.device, dtype=self.unet.dtype)
+        text_embeddings = text_embeddings.to(device=self.unet.device, dtype=self.unet.dtype)
+
+        mode.to(device=self.unet.device, dtype=self.unet.dtype)
+
+        # ---
 
         for i, t in enumerate(self.progress_bar(timesteps_tensor)):
             t_index = t_start + i
@@ -653,6 +673,12 @@ class UnifiedPipeline(DiffusionPipeline):
             if callback is not None and i % callback_steps == 0:
                 callback(i, t, latents)
 
+        # --- EXITING UNET SECTION. Any tensors being used should be moved back to self.device
+
+        latents = latents.to(device=self.device, dtype=self.vae.dtype)
+
+        # ---
+
         latents = 1 / 0.18215 * latents
         image = self.vae.decode(latents).sample
 
@@ -661,9 +687,11 @@ class UnifiedPipeline(DiffusionPipeline):
         if outmask_image != None:
             outmask = torch.cat([outmask_image] * batch_size)
             outmask = outmask[:, [0,1,2]]
+            outmask = outmask.to(self.device)
 
             source =  torch.cat([init_image] * batch_size)
             source = source[:, [0,1,2]]
+            source = source.to(self.device)
 
             image = source * (1-outmask) + image * outmask
 
@@ -673,7 +701,7 @@ class UnifiedPipeline(DiffusionPipeline):
         if run_safety_checker:
             # run safety checker
             safety_cheker_input = self.feature_extractor(self.numpy_to_pil(numpyImage), return_tensors="pt").to(self.device)
-            numpyImage, has_nsfw_concept = self.safety_checker(images=numpyImage, clip_input=safety_cheker_input.pixel_values)
+            numpyImage, has_nsfw_concept = self.safety_checker(images=numpyImage, clip_input=safety_cheker_input.pixel_values.to(self.vae.dtype))
         else:
             has_nsfw_concept = [False] * numpyImage.shape[0]
 

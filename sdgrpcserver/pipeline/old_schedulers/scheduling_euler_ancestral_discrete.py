@@ -147,7 +147,7 @@ class EulerAncestralDiscreteScheduler(OldSchedulerMixin, ConfigMixin):
 
         prev_sample = sample + derivative * dt
 
-        noise = torch.randn(prev_sample.size(), dtype=prev_sample.dtype, layout=prev_sample.layout, device=prev_sample.device, generator=generator) 
+        noise = torch.randn(prev_sample.size(), dtype=prev_sample.dtype, layout=prev_sample.layout, device=generator.device, generator=generator).to(prev_sample.device)
         prev_sample = prev_sample + noise * sigma_up
 
         if not return_dict:
