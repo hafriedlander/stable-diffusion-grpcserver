@@ -21,10 +21,10 @@ from scipy import integrate
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.schedulers.scheduling_utils import SchedulerOutput
-from sdgrpcserver.pipeline.scheduling_utils import SchedulerMixin
+from .scheduling_utils import OldSchedulerMixin
 
 
-class EulerAncestralDiscreteScheduler(SchedulerMixin, ConfigMixin):
+class EulerAncestralDiscreteScheduler(OldSchedulerMixin, ConfigMixin):
     """
     Ancestral sampling with Euler method steps.
     for discrete beta schedules. Based on the original k-diffusion implementation by

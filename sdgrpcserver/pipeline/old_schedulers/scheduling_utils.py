@@ -17,27 +17,10 @@ from typing import Union
 import numpy as np
 import torch
 
-from diffusers.utils import BaseOutput
-
 
 SCHEDULER_CONFIG_NAME = "scheduler_config.json"
 
-
-@dataclass
-class SchedulerOutput(BaseOutput):
-    """
-    Base class for the scheduler's step function output.
-
-    Args:
-        prev_sample (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)` for images):
-            Computed sample (x_{t-1}) of previous timestep. `prev_sample` should be used as next model input in the
-            denoising loop.
-    """
-
-    prev_sample: torch.FloatTensor
-
-
-class SchedulerMixin:
+class OldSchedulerMixin:
     """
     Mixin containing common functions for the schedulers.
     """

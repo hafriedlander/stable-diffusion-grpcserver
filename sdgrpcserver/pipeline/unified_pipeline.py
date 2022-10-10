@@ -3,6 +3,7 @@ from mimetypes import init
 from typing import Callable, List, Optional, Union
 
 import numpy as np
+from sdgrpcserver.pipeline.old_schedulers.scheduling_utils import OldSchedulerMixin
 import torch
 import torchvision.transforms as T
 
@@ -22,7 +23,7 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 class UnifiedMode(object):
 
-    def __init__(self):
+    def __init__(self, **_):
         self.t_start = 0
 
     def generateLatents(self):
@@ -33,9 +34,11 @@ class UnifiedMode(object):
 
 class Txt2imgMode(UnifiedMode):
 
-    def __init__(self, pipeline, generator, height, width, latents_dtype, batch_total, **_):
+    def __init__(self, pipeline, generator, height, width, latents_dtype, batch_total, **kwargs):
         if height % 8 != 0 or width % 8 != 0:
             raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
+
+        super().__init__(**kwargs)
 
         self.device = pipeline.device
         self.scheduler = pipeline.scheduler
@@ -65,7 +68,10 @@ class Txt2imgMode(UnifiedMode):
         latents = latents.to(self.device)
 
         # scale the initial noise by the standard deviation required by the scheduler
-        return latents * self.scheduler.init_noise_sigma        
+        if isinstance(self.scheduler, OldSchedulerMixin): 
+            return latents
+        else:
+            return latents * self.scheduler.init_noise_sigma
 
     def timestepsTensor(self):
         return super().timestepsTensor(0)
@@ -73,10 +79,12 @@ class Txt2imgMode(UnifiedMode):
 
 class Img2imgMode(UnifiedMode):
 
-    def __init__(self, pipeline, generator, init_image, latents_dtype, batch_total, num_inference_steps, strength, **_):
+    def __init__(self, pipeline, generator, init_image, latents_dtype, batch_total, num_inference_steps, strength, **kwargs):
         if strength < 0 or strength > 1:
             raise ValueError(f"The value of strength should in [0.0, 1.0] but is {strength}")
         
+        super().__init__(**kwargs)
+
         self.device = pipeline.device
         self.scheduler = pipeline.scheduler
         self.vae = pipeline.vae
@@ -124,13 +132,25 @@ class Img2imgMode(UnifiedMode):
         # expand init_latents for batch_size
         return torch.cat([init_latents] * self.batch_total, dim=0)
 
-    def _addInitialNoise(self, latents):
-        # add noise to latents using the timesteps
-        timesteps = self.scheduler.timesteps[-self.init_timestep]
-        timesteps = torch.tensor([timesteps] * self.batch_total, device=self.device)
+    def _getSchedulerNoiseTimestep(self, i, t = None):
+        """Figure out the timestep to pass to scheduler.add_noise
+        If it's an old-style scheduler:
+          - return the index as a single integer tensor
 
+        If it's a new-style scheduler:
+          - if we know the timestep use it
+          - otherwise look up the timestep in the scheduler
+          - either way, return a tensor * batch_total on our device
+        """
+        if isinstance(self.scheduler, OldSchedulerMixin): 
+            return torch.tensor(i)
+        else:
+            timesteps = t if t != None else self.scheduler.timesteps[i]
+            return torch.tensor([timesteps] * self.batch_total, device=self.device)
+
+    def _addInitialNoise(self, latents):
         self.image_noise = torch.randn(latents.shape, generator=self.generator, device=self.device, dtype=self.latents_dtype)
-        return self.scheduler.add_noise(latents, self.image_noise, timesteps)
+        return self.scheduler.add_noise(latents, self.image_noise, self._getSchedulerNoiseTimestep(self.t_start))
 
     def generateLatents(self):
         init_latents = self._buildInitialLatents()
@@ -296,7 +316,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
 
     def latentStep(self, latents, i, t):
         # masking
-        init_latents_proper = self.scheduler.add_noise(self.init_latents_orig, self.image_noise, torch.tensor([t]))
+        init_latents_proper = self.scheduler.add_noise(self.init_latents_orig, self.image_noise, self._getSchedulerNoiseTimestep(i, t))
 
         steppos = i / self.num_inference_steps
         iteration_mask = self.blend_mask.ge(steppos).to(self.blend_mask.dtype)
@@ -494,9 +514,6 @@ class UnifiedPipeline(DiffusionPipeline):
         if (outmask_image != None and init_image == None):
             raise ValueError(f"Can't pass a outmask without an image")
 
-        scheduler_is_old = not getattr(self.scheduler, 'scale_model_input', False)
-
-
         # set timesteps
         self.scheduler.set_timesteps(num_inference_steps)
 
@@ -594,9 +611,11 @@ class UnifiedPipeline(DiffusionPipeline):
         # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
         # and should be between [0, 1]
         accepts_eta = "eta" in set(inspect.signature(self.scheduler.step).parameters.keys())
+        accepts_generator = "generator" in set(inspect.signature(self.scheduler.step).parameters.keys())
+
         extra_step_kwargs = {}
-        if accepts_eta:
-            extra_step_kwargs["eta"] = eta
+        if accepts_eta: extra_step_kwargs["eta"] = eta
+        if accepts_generator: extra_step_kwargs["generator"] = generator
 
         t_start = mode.t_start
         timesteps_tensor = self.scheduler.timesteps[t_start:].to(self.device)
@@ -607,7 +626,7 @@ class UnifiedPipeline(DiffusionPipeline):
             # expand the latents if we are doing classifier free guidance
             latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
 
-            if scheduler_is_old:
+            if isinstance(self.scheduler, OldSchedulerMixin): 
                 sigma = self.scheduler.sigmas[t_index]
                 latent_model_input = latent_model_input / ((sigma**2 + 1) ** 0.5)
             else:
@@ -623,7 +642,7 @@ class UnifiedPipeline(DiffusionPipeline):
 
             # compute the previous noisy sample x_t -> x_t-1
 
-            if scheduler_is_old:
+            if isinstance(self.scheduler, OldSchedulerMixin): 
                 latents = self.scheduler.step(noise_pred, t_index, latents, **extra_step_kwargs).prev_sample
             else:
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample

@@ -10,7 +10,7 @@ from sdgrpcserver.pipeline.fastattention import has_xformers, MemoryEfficientCro
 print(f"Using xformers: {'yes' if has_xformers() else 'no'}")
 if has_xformers(): attention.CrossAttention = MemoryEfficientCrossAttention
 
-from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler, DDIMScheduler
+from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler, PNDMScheduler
 from diffusers.configuration_utils import FrozenDict
 from diffusers.utils import deprecate
 
@@ -19,9 +19,9 @@ import generation_pb2
 from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipeline
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 
-#from sdgrpcserver.pipeline.scheduling_ddim import DDIMScheduler
-from sdgrpcserver.pipeline.scheduling_euler_discrete import EulerDiscreteScheduler
-from sdgrpcserver.pipeline.scheduling_euler_ancestral_discrete import EulerAncestralDiscreteScheduler
+from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
+from sdgrpcserver.pipeline.old_schedulers.scheduling_euler_discrete import EulerDiscreteScheduler
+from sdgrpcserver.pipeline.old_schedulers.scheduling_euler_ancestral_discrete import EulerAncestralDiscreteScheduler
 
 class WithNoop(object):
     def __enter__(self):
@@ -96,7 +96,13 @@ class PipelineWrapper(object):
         if self.mode.attention_slice:
             self._pipeline.enable_attention_slicing(1)
 
-        self._plms = pipeline.scheduler
+        self._plms = self._prepScheduler(PNDMScheduler(
+                beta_start=0.00085, 
+                beta_end=0.012, 
+                beta_schedule="scaled_linear",
+                num_train_timesteps=1000,
+                skip_prk_steps=True
+        ))
         self._klms = self._prepScheduler(LMSDiscreteScheduler(
                 beta_start=0.00085, 
                 beta_end=0.012, 
