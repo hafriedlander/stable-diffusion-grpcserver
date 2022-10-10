@@ -10,15 +10,16 @@ from sdgrpcserver.pipeline.fastattention import has_xformers, MemoryEfficientCro
 print(f"Using xformers: {'yes' if has_xformers() else 'no'}")
 if has_xformers(): attention.CrossAttention = MemoryEfficientCrossAttention
 
-from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler
+from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler, DDIMScheduler
 from diffusers.configuration_utils import FrozenDict
+from diffusers.utils import deprecate
 
 import generation_pb2
 
 from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipeline
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 
-from sdgrpcserver.pipeline.scheduling_ddim import DDIMScheduler
+#from sdgrpcserver.pipeline.scheduling_ddim import DDIMScheduler
 from sdgrpcserver.pipeline.scheduling_euler_discrete import EulerDiscreteScheduler
 from sdgrpcserver.pipeline.scheduling_euler_ancestral_discrete import EulerAncestralDiscreteScheduler
 
@@ -123,6 +124,22 @@ class PipelineWrapper(object):
             ))
 
     def _prepScheduler(self, scheduler):
+        if hasattr(scheduler.config, "steps_offset") and scheduler.config.steps_offset != 1:
+            deprecation_message = (
+                f"The configuration file of this scheduler: {scheduler} is outdated. `steps_offset`"
+                f" should be set to 1 instead of {scheduler.config.steps_offset}. Please make sure "
+                "to update the config accordingly as leaving `steps_offset` might led to incorrect results"
+                " in future versions. If you have downloaded this checkpoint from the Hugging Face Hub,"
+                " it would be very nice if you could open a Pull request for the `scheduler/scheduler_config.json`"
+                " file"
+            )
+            deprecate("steps_offset!=1", "1.0.0", deprecation_message, standard_warn=False)
+            new_config = dict(scheduler.config)
+            new_config["steps_offset"] = 1
+            scheduler._internal_dict = FrozenDict(new_config)
+
+        return scheduler
+
         scheduler = scheduler.set_format("pt")
 
         if hasattr(scheduler.config, "steps_offset") and scheduler.config.steps_offset != 1:

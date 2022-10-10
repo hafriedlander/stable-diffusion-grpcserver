@@ -12,7 +12,7 @@ scipy~=1.9.1
 transformers~=4.22.1
 -e git+https://github.com/CompVis/taming-transformers.git@master#egg=taming-transformers
 -e git+https://github.com/openai/CLIP.git@main#egg=clip
--e git+https://github.com/huggingface/diffusers@main#egg=diffusers
+diffusers~=0.4.1
 
 # Server libraries
 protobuf~=3.20
