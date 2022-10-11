@@ -1,5 +1,5 @@
 
-import os, sys, re
+import os, sys, re, time
 
 import yaml
 try:
@@ -14,6 +14,8 @@ sys.path.append(basePath)
 from sdgrpcserver.server import main
 from sdgrpcserver.services.generate import GenerationServiceServicer
 from sdgrpcserver.manager import EngineMode, EngineManager
+
+from VRAMUsageMonitor import VRAMUsageMonitor
 
 import generation_pb2, generation_pb2_grpc
 
@@ -136,8 +138,13 @@ class FakeContext():
 
 instance = TestRunner()
 
+monitor = VRAMUsageMonitor()
+monitor.start()
+
 with open(os.path.normpath("testengines.yaml"), 'r') as cfg:
     engines = yaml.load(cfg, Loader=Loader)
+
+stats = {}
 
 for vramO in range(4):
     print("opt", vramO)
@@ -151,5 +158,21 @@ for vramO in range(4):
 
     manager.loadPipelines()
 
+    monitor.read_and_reset()
+    start_time = time.process_time()
+
     instance.run(args, manager, FakeContext(), prefix=f"vram_{vramO}_")
+
+    end_time = time.process_time() 
+    used, total = monitor.read_and_reset()
+
+    runstats = {"vramused": used, "time": end_time - start_time}
+    print("Run complete", repr(runstats))
+
+    stats[f"run vram-optimisation-level={vramO}"] = runstats
+
+monitor.stop()
+
+print("Stats")
+print(repr(stats))
 
