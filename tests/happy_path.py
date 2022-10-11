@@ -1,6 +1,8 @@
 
 import os, sys, re, time
 
+import torch
+
 import yaml
 try:
     from yaml import CLoader as Loader, CDumper as Dumper
@@ -149,6 +151,8 @@ stats = {}
 for vramO in range(4):
     print("opt", vramO)
 
+    torch.cuda.empty_cache()
+
     manager = EngineManager(
         engines, 
         weight_root="../weights/",
@@ -159,11 +163,11 @@ for vramO in range(4):
     manager.loadPipelines()
 
     monitor.read_and_reset()
-    start_time = time.process_time()
+    start_time = time.monotonic()
 
     instance.run(args, manager, FakeContext(), prefix=f"vram_{vramO}_")
 
-    end_time = time.process_time() 
+    end_time = time.monotonic() 
     used, total = monitor.read_and_reset()
 
     runstats = {"vramused": used, "time": end_time - start_time}
