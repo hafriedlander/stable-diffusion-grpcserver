@@ -1,4 +1,5 @@
 import inspect, traceback
+import time
 from mimetypes import init
 from typing import Callable, List, Optional, Union
 
@@ -32,7 +33,7 @@ class UnifiedMode(object):
     def to(self, device, dtype):
         pass
 
-    def latentStep(self, latents, i, t):
+    def latentStep(self, latents, i, t, steppos):
         return latents
 
 class Txt2imgMode(UnifiedMode):
@@ -207,7 +208,7 @@ class OriginalInpaintMode(Img2imgMode, MaskProcessorMixin):
         init_latents = self._addInitialNoise(init_latents)
         return init_latents
 
-    def latentStep(self, latents, i, t):
+    def latentStep(self, latents, i, t, steppos):
         # masking
         init_latents_proper = self.scheduler.add_noise(self.init_latents_orig, self.image_noise, torch.tensor([t]))
         return (init_latents_proper * self.mask) + (latents * (1 - self.mask))
@@ -248,6 +249,22 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         # Create a mask which is scaled to allow protected-area depending on how close mask_scale is to 0
         self.blend_mask = self.mask * self.mask_scale
 
+    def _matchToSamplerSD(self, tensor):
+        # Normalise tensor to -1..1
+        tensor=tensor-tensor.min()
+        tensor=tensor.div(tensor.max())
+        tensor=tensor*2-1
+
+        # Caculate standard deviation
+        sd = tensor.std()
+
+        if isinstance(self.scheduler, OldSchedulerMixin): 
+            targetSD = 1
+        else:
+            targetSD = self.scheduler.init_noise_sigma
+
+        return tensor * targetSD / sd
+
     def _matchNorm(self, tensor, like, cf=1):
         # Normalise tensor to 0..1
         tensor=tensor-tensor.min()
@@ -268,6 +285,9 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         # 0 == normal, matched to latent, 1 == cauchy, matched to latent, 2 == log_normal, 3 == standard normal, mean=0, std=1
         # 0 sometimes gives the best result, but sometimes it gives artifacts
         noise_mode=0
+
+        # 0 == to sampler requested std deviation, 1 == to original image distribution
+        match_mode = 0
 
         # Current theory: if we can match the noise to the image latents, we get a nice well scaled color blend between the two.
         # The nmask mostly adjusts for incorrect scale. With correct scale, nmask hurts more than it helps
@@ -303,7 +323,8 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         noise = torch.fft.ifftn(convolve, norm=fft_norm_mode).real
 
         # Stretch colored noise to match the image latent
-        noise = self._matchNorm(noise, masked_latents, cf=1)
+        if match_mode == 0: noise = self._matchToSamplerSD(noise)
+        else: noise = self._matchNorm(noise, masked_latents, cf=1)
 
         # And mix resulting noise into the black areas of the mask
         return (init_latents * self.mask) + (noise * (1 - self.mask))
@@ -323,12 +344,12 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         self.image_noise = self.image_noise.to(device=device, dtype=dtype)
         self.blend_mask = self.blend_mask.to(device=device, dtype=dtype)
 
-    def latentStep(self, latents, i, t):
+    def latentStep(self, latents, i, t, steppos):
         # masking
         init_latents_proper = self.scheduler.add_noise(self.init_latents_orig, self.image_noise, self._getSchedulerNoiseTimestep(i, t))       
         init_latents_proper = init_latents_proper.to(latents.dtype)
 
-        steppos = i / self.num_inference_steps
+#        steppos = i / self.num_inference_steps
         iteration_mask = self.blend_mask.ge(steppos).to(self.blend_mask.dtype)
 
         return (init_latents_proper * iteration_mask) + (latents * (1 - iteration_mask))       
@@ -667,7 +688,7 @@ class UnifiedPipeline(DiffusionPipeline):
             else:
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
-            latents = mode.latentStep(latents, i, t)
+            latents = mode.latentStep(latents, t_index, t, i / timesteps_tensor.shape[0])
 
             # call the callback, if provided
             if callback is not None and i % callback_steps == 0:
