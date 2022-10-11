@@ -223,7 +223,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         # to 1 for parent class
         self.fill_with_shaped_noise = strength >= 1.0
         self.mask_scale = 2 - strength
-        strength = max(strength, 1)
+        strength = min(strength, 1)
 
         super().__init__(strength=strength, num_inference_steps=num_inference_steps, **kwargs)
 
