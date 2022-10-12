@@ -6,6 +6,7 @@ from typing import Callable, List, Optional, Union
 import numpy as np
 from sdgrpcserver.pipeline.old_schedulers.scheduling_utils import OldSchedulerMixin
 import torch
+import torchvision
 import torchvision.transforms as T
 
 import PIL
@@ -29,9 +30,6 @@ class UnifiedMode(object):
 
     def generateLatents(self):
         raise NotImplementedError('Subclasses must implement')
-
-    def to(self, device, dtype):
-        pass
 
     def latentStep(self, latents, i, t, steppos):
         return latents
@@ -73,7 +71,7 @@ class Txt2imgMode(UnifiedMode):
 
         # scale the initial noise by the standard deviation required by the scheduler
         if isinstance(self.scheduler, OldSchedulerMixin): 
-            return latents
+            return latents * self.scheduler.sigmas[0]
         else:
             return latents * self.scheduler.init_noise_sigma
 
@@ -91,8 +89,7 @@ class Img2imgMode(UnifiedMode):
 
         self.device = pipeline.device
         self.scheduler = pipeline.scheduler
-        self.unet = pipeline.unet
-        self.vae = pipeline.vae
+        self.pipeline = pipeline
 
         self.generator = generator
 
@@ -130,7 +127,7 @@ class Img2imgMode(UnifiedMode):
 
     def _buildInitialLatents(self):
         init_image = self.init_image.to(device=self.device, dtype=self.latents_dtype)
-        init_latent_dist = self.vae.encode(init_image).latent_dist
+        init_latent_dist = self.pipeline.vae.encode(init_image).latent_dist
         init_latents = init_latent_dist.sample(generator=self.generator)
         init_latents = 0.18215 * init_latents
 
@@ -155,7 +152,8 @@ class Img2imgMode(UnifiedMode):
 
     def _addInitialNoise(self, latents):
         self.image_noise = torch.randn(latents.shape, generator=self.generator, device=self.device, dtype=self.latents_dtype)
-        return self.scheduler.add_noise(latents, self.image_noise, self._getSchedulerNoiseTimestep(self.t_start))
+        result = self.scheduler.add_noise(latents, self.image_noise, self._getSchedulerNoiseTimestep(self.t_start))
+        return result.to(latents.dtype) # This is needed while we use the old schedulers, since they don't correctly match type
 
     def generateLatents(self):
         init_latents = self._buildInitialLatents()
@@ -239,7 +237,8 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         #if not self.mask.shape == self.init_latents.shape:
         #    raise ValueError("The mask and init_image should be the same size!")
 
-        self.mask = self.mask.to(self.device)
+
+        self.mask = self.mask.to(device=self.device, dtype=self.latents_dtype)
         self.mask = torch.cat([self.mask] * self.batch_total)
 
         # Create a mask which is either 1 (for any pixels that aren't pure black) or 0 (for pure black)
@@ -249,7 +248,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         # Create a mask which is scaled to allow protected-area depending on how close mask_scale is to 0
         self.blend_mask = self.mask * self.mask_scale
 
-    def _matchToSamplerSD(self, tensor):
+    def _matchToSamplerSD2(self, tensor):
         # Normalise tensor to -1..1
         tensor=tensor-tensor.min()
         tensor=tensor.div(tensor.max())
@@ -259,11 +258,19 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         sd = tensor.std()
 
         if isinstance(self.scheduler, OldSchedulerMixin): 
-            targetSD = 1
+            targetSD = self.scheduler.sigmas[0]
         else:
             targetSD = self.scheduler.init_noise_sigma
 
         return tensor * targetSD / sd
+
+    def _matchToSamplerSD(self, tensor):
+        if isinstance(self.scheduler, OldSchedulerMixin): 
+            targetSD = self.scheduler.sigmas[0]
+        else:
+            targetSD = self.scheduler.init_noise_sigma
+
+        return torchvision.transforms.functional.normalize(tensor, [0, 0, 0, 0], [targetSD, targetSD, targetSD, targetSD])
 
     def _matchNorm(self, tensor, like, cf=1):
         # Normalise tensor to 0..1
@@ -317,10 +324,10 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
             noise = noise.mul(1-(noise_mask * noise_mask_factor))
 
         # Color the noise by the latent
-        noise_fft = torch.fft.fftn(noise, norm=fft_norm_mode)
-        latent_fft = torch.fft.fftn(masked_latents, norm=fft_norm_mode)
+        noise_fft = torch.fft.fftn(noise.to(torch.float32), norm=fft_norm_mode)
+        latent_fft = torch.fft.fftn(masked_latents.to(torch.float32), norm=fft_norm_mode)
         convolve = noise_fft.mul(latent_fft)
-        noise = torch.fft.ifftn(convolve, norm=fft_norm_mode).real
+        noise = torch.fft.ifftn(convolve, norm=fft_norm_mode).real.to(self.latents_dtype)
 
         # Stretch colored noise to match the image latent
         if match_mode == 0: noise = self._matchToSamplerSD(noise)
@@ -330,31 +337,116 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         return (init_latents * self.mask) + (noise * (1 - self.mask))
 
     def generateLatents(self):
+        # Build initial latents from init_image the same as for img2img
         init_latents = self._buildInitialLatents()
         # Save the original latents for re-application in latentStep, but only the portions that definitely have pixel data
         self.init_latents_orig = init_latents * self.high_mask
-
+        # If strength was >=1, filled exposed areas in mask with new, shaped noise
         if self.fill_with_shaped_noise: init_latents = self._fillWithShapedNoise(init_latents)
-
+        # Add the initial noise
         init_latents = self._addInitialNoise(init_latents)
+        # And return
         return init_latents
-
-    def to(self, device, dtype):
-        self.init_latents_orig = self.init_latents_orig.to(device=device, dtype=dtype)
-        self.image_noise = self.image_noise.to(device=device, dtype=dtype)
-        self.blend_mask = self.blend_mask.to(device=device, dtype=dtype)
 
     def latentStep(self, latents, i, t, steppos):
         # masking
         init_latents_proper = self.scheduler.add_noise(self.init_latents_orig, self.image_noise, self._getSchedulerNoiseTimestep(i, t))       
         init_latents_proper = init_latents_proper.to(latents.dtype)
 
-#        steppos = i / self.num_inference_steps
         iteration_mask = self.blend_mask.ge(steppos).to(self.blend_mask.dtype)
 
         return (init_latents_proper * iteration_mask) + (latents * (1 - iteration_mask))       
 
-class UnifiedPipeline(DiffusionPipeline):
+class DynamicModuleDiffusionPipeline(DiffusionPipeline):
+
+    def __init__(self, *args, **kwargs):
+        self._moduleMode = "all"
+        self._moduleDevice = torch.device("cpu")
+
+    def register_modules(self, **kwargs):
+        self._modules = set(kwargs.keys())
+        self._modulesDyn = set(("vae", "text_encoder", "unet", "safety_checker"))
+        self._modulesStat = self._modules - self._modulesDyn
+
+        super().register_modules(**kwargs)
+
+    def set_module_mode(self, mode):
+        self._moduleMode = mode
+        self.to(self._moduleDevice)
+
+    def to(self, torch_device, forceAll=False):
+        if torch_device is None:
+            return self
+
+        module_names, _ = self.extract_init_dict(dict(self.config))
+
+        self._moduleDevice = torch.device(torch_device)
+
+        moveNow = self._modules if (self._moduleMode == "all" or forceAll) else self._modulesStat
+
+        for name in moveNow:
+            module = getattr(self, f"_{name}" if name in self._modulesDyn else name)
+            if isinstance(module, torch.nn.Module):
+                module.to(torch_device)
+        
+        return self
+
+    @property
+    def device(self) -> torch.device:
+        return self._moduleDevice
+
+    def prepmodule(self, name, module):
+        if self._moduleMode == "all":
+            return module
+
+        # We assume if this module is on a device of the right type we put it there
+        # (How else would it get there?)
+        if self._moduleDevice.type == module.device.type:
+            return module
+
+        if name in self._modulesStat:
+            return module
+
+        for name in self._modulesDyn:
+            other = getattr(self, f"_{name}")
+            if other is not module: other.to("cpu")
+        
+        module.to(self._moduleDevice)
+        return module
+
+    @property 
+    def vae(self):
+        return self.prepmodule("vae", self._vae)
+    
+    @vae.setter 
+    def vae(self, value):
+        self._vae = value
+
+    @property 
+    def text_encoder(self):
+        return self.prepmodule("text_encoder", self._text_encoder)
+    
+    @text_encoder.setter 
+    def text_encoder(self, value):
+        self._text_encoder = value
+
+    @property 
+    def unet(self):
+        return self.prepmodule("unet", self._unet)
+    
+    @unet.setter 
+    def unet(self, value):
+        self._unet = value
+
+    @property 
+    def safety_checker(self):
+        return self.prepmodule("safety_checker", self._safety_checker)
+    
+    @safety_checker.setter 
+    def safety_checker(self, value):
+        self._safety_checker = value
+
+class UnifiedPipeline(DynamicModuleDiffusionPipeline):
     r"""
     Pipeline for unified image generation using Stable Diffusion.
 
@@ -382,6 +474,8 @@ class UnifiedPipeline(DiffusionPipeline):
             Model that extracts features from generated images to be used as inputs for the `safety_checker`.
     """
 
+
+    
     def __init__(
         self,
         vae: AutoencoderKL,
@@ -650,16 +744,7 @@ class UnifiedPipeline(DiffusionPipeline):
 
         t_start = mode.t_start
 
-        # --- ENTERING UNET SECTION. All tensors should be on unet.device, in case it isn't the same as self.device
-
-        timesteps_tensor = self.scheduler.timesteps[t_start:].to(self.unet.device)
-
-        latents = latents.to(device=self.unet.device, dtype=self.unet.dtype)
-        text_embeddings = text_embeddings.to(device=self.unet.device, dtype=self.unet.dtype)
-
-        mode.to(device=self.unet.device, dtype=self.unet.dtype)
-
-        # ---
+        timesteps_tensor = self.scheduler.timesteps[t_start:].to(self.device)
 
         for i, t in enumerate(self.progress_bar(timesteps_tensor)):
             t_index = t_start + i
@@ -694,12 +779,6 @@ class UnifiedPipeline(DiffusionPipeline):
             if callback is not None and i % callback_steps == 0:
                 callback(i, t, latents)
 
-        # --- EXITING UNET SECTION. Any tensors being used should be moved back to self.device
-
-        latents = latents.to(device=self.device, dtype=self.vae.dtype)
-
-        # ---
-
         latents = 1 / 0.18215 * latents
         image = self.vae.decode(latents).sample
 
@@ -716,13 +795,12 @@ class UnifiedPipeline(DiffusionPipeline):
 
             image = source * (1-outmask) + image * outmask
 
-        numpyImage = image.to(self.vae.device).cpu().permute(0, 2, 3, 1).numpy()
-
+        numpyImage = image.cpu().permute(0, 2, 3, 1).numpy()
 
         if run_safety_checker:
             # run safety checker
             safety_cheker_input = self.feature_extractor(self.numpy_to_pil(numpyImage), return_tensors="pt").to(self.device)
-            numpyImage, has_nsfw_concept = self.safety_checker(images=numpyImage, clip_input=safety_cheker_input.pixel_values.to(self.vae.dtype))
+            numpyImage, has_nsfw_concept = self.safety_checker(images=numpyImage, clip_input=safety_cheker_input.pixel_values.to(text_embeddings.dtype))
         else:
             has_nsfw_concept = [False] * numpyImage.shape[0]
 

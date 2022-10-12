@@ -76,11 +76,11 @@ class EngineMode(object):
 
     @property
     def fp16(self):
-        return self.device == "cuda" and self._vramO > 1 and not self.cuda_only_unet
+        return self.device == "cuda" and self._vramO > 1
 
     @property
-    def cuda_only_unet(self):
-        return self.device == "cuda" and self._vramO > 2
+    def module_mode(self):
+        return "one" if self.device == "cuda" and self._vramO > 2 else "all"
 
 class PipelineWrapper(object):
 
@@ -89,13 +89,9 @@ class PipelineWrapper(object):
         self._mode = mode
 
         self._pipeline = pipeline
-        if self.mode.fp16:
-            self._pipeline = pipeline.to(torch.float16)
-        elif self.mode.cuda_only_unet: 
-            self._pipeline.unet = self._pipeline.unet.to(torch.float16)
 
-        if self.mode.attention_slice:
-            self._pipeline.enable_attention_slicing(1)
+        self._pipeline.enable_attention_slicing(1 if self.mode.attention_slice else None)
+        self._pipeline.set_module_mode(self.mode.module_mode)
 
         self._plms = self._prepScheduler(PNDMScheduler(
                 beta_start=0.00085, 
@@ -158,14 +154,10 @@ class PipelineWrapper(object):
 
     def activate(self):
         # Pipeline.to is in-place, so we move to the device on activate, and out again on deactivate
-        if self.mode.cuda_only_unet: 
-            self._pipeline.to("cpu")
-            self._pipeline.unet.to(torch.device("cuda"))
-        else: 
-            self._pipeline.to(self.mode.device)
+        self._pipeline.to(self.mode.device)
         
     def deactivate(self):
-        self._pipeline.to("cpu")
+        self._pipeline.to("cpu", forceAll=True)
         if self.mode.device == "cuda": torch.cuda.empty_cache()
 
     def generate(self, text, params, image=None, mask=None, outmask=None, negative_text=None, progress_callback=None, stop_event=None):
@@ -236,14 +228,27 @@ class EngineManager(object):
         return remote_path
 
     def buildPipeline(self, engine):
-        weight_path=self._getWeightPath(engine["model"], engine.get("local_model", None))
+        if self.mode.fp16:
+           weight_path=self._getWeightPath(engine["model"], engine.get("local_model_fp16", None))
+        else:
+           weight_path=self._getWeightPath(engine["model"], engine.get("local_model", None))
+
 
         use_auth_token=self._token if engine.get("use_auth_token", False) else False
 
         extra_kwargs={}
 
+        if self.mode.fp16:
+            extra_kwargs["revision"]="fp16"
+            extra_kwargs["torch_dtype"]=torch.float16
+
         if self._nsfw == "flag":
-            extra_kwargs["safety_checker"]=FlagOnlySafetyChecker.from_pretrained(weight_path, subfolder="safety_checker", use_auth_token=use_auth_token)
+            extra_kwargs["safety_checker"]=FlagOnlySafetyChecker.from_pretrained(
+                weight_path, 
+                subfolder="safety_checker", 
+                use_auth_token=use_auth_token,
+                **extra_kwargs
+            )
 
         if engine["class"] == "StableDiffusionPipeline":
             return PipelineWrapper(

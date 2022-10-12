@@ -33,7 +33,14 @@ algorithms = {
 }
 
 args = {
-    "sampler": ["ddim", "plms", "k_euler", "k_euler_ancestral", "k_lms"],
+    "sampler": [
+        {"sampler": "ddim", "eta": 0},
+        {"sampler": "ddim", "eta": 0.8},
+        {"sampler": "plms"}, 
+        {"sampler": "k_euler"}, 
+        {"sampler": "k_euler_ancestral"}, 
+#        {"sampler": "k_lms"},
+    ],
     "image": [
         {},
         {"image": True, "strength": 0.25},
@@ -53,10 +60,14 @@ with open("mask.png", "rb") as file:
 
 class TestRunner(object):
 
-    def sampler(self, item, request, prompt):
-        request.image.transform.diffusion=algorithms[item]
-    
-    def image(self,  item, request, prompt):
+    def sampler(self, item, request, prompt, parameters):
+        request.image.transform.diffusion=algorithms[item["sampler"]]
+
+        eta = item.get("eta", None)
+        if eta != None:
+            parameters.sampler.eta=eta
+
+    def image(self,  item, request, prompt, parameters):
         if item.get("image", False):
             prompt.append(generation_pb2.Prompt(
                 parameters = generation_pb2.PromptParameters(
@@ -69,12 +80,8 @@ class TestRunner(object):
             ))
 
 
-            request.image.parameters.append(generation_pb2.StepParameter(
-                schedule=generation_pb2.ScheduleParameters(
-                    start=item["strength"],
-                    end=0.01,
-                )
-            ))
+            parameters.schedule.start=item["strength"]
+            parameters.schedule.end=0.01
 
         if item.get("mask", False):
             prompt.append(generation_pb2.Prompt(
@@ -107,7 +114,9 @@ class TestRunner(object):
             request_id=re.sub('[^\w]+', '_', repr(combo))
             request_id=request_id.strip("_")
 
-            prompt=[generation_pb2.Prompt(text="A frog wearing a tophat")]
+            prompt=[generation_pb2.Prompt(text="A digital painting of a shark in the deep ocean, highly detailed, trending on artstation")]
+
+            parameters = generation_pb2.StepParameter()
 
             request = generation_pb2.Request(
                 engine_id="stable-diffusion-v1-4",
@@ -116,18 +125,21 @@ class TestRunner(object):
                 image=generation_pb2.ImageParameters(
                     height=512,
                     width=512,
-                    seed=[420420420], # It's the funny number
+                    seed=[420430440], # It's the funny number
                     steps=50,
                     samples=1,
+                    parameters = []
                 ),
             )
 
             for key, item in combo.items():
-                getattr(self, key)(item, request, prompt)
+                getattr(self, key)(item, request, prompt, parameters)
             
             for part in prompt:
                 request.prompt.append(part)
             
+            request.image.parameters.append(parameters)
+
             for result in generator.Generate(request, context):
                 for artifact in result.artifacts:
                     if artifact.type == generation_pb2.ARTIFACT_IMAGE:
@@ -136,6 +148,13 @@ class TestRunner(object):
 
 class FakeContext():
     def add_callback(self, callback):
+        pass
+
+    def set_code(self, code):
+        print("Test failed")
+        sys.exit(-1)
+    
+    def set_details(self, code):
         pass
 
 instance = TestRunner()

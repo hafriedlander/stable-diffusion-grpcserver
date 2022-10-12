@@ -1,15 +1,16 @@
-import argparse, os, sys, threading, signal
+import argparse, os, sys, threading, signal, time, shutil, re, secrets
 from concurrent import futures
 
 import yaml
 try:
-    from yaml import CLoader as Loader, CDumper as Dumper
+    from yaml import CLoader as Loader
 except ImportError:
-    from yaml import Loader, Dumper
+    from yaml import Loader
 
+from twisted import web
 from twisted.web import server, resource, static
 from twisted.web.wsgi import WSGIResource 
-from twisted.internet import reactor, endpoints
+from twisted.internet import reactor, endpoints, protocol
 
 import grpc
 import hupper
@@ -47,12 +48,41 @@ class DartGRPCCompatibility(object):
 
         return self.app(environ, wrapped_start_response)
 
+class CheckAuthHeaderMixin(object):
+
+    def _checkAuthHeader(self, value):
+        token = re.match('Bearer\s+(.*)', value, re.IGNORECASE)
+        if token and token[1] == self.access_token: return True
+        return False
+
+class GrpcServerTokenChecker(grpc.ServerInterceptor, CheckAuthHeaderMixin):
+    def __init__(self, key):
+        self.access_token = key
+
+        def deny(_, context):
+            context.abort(grpc.StatusCode.UNAUTHENTICATED, 'Invalid key')
+
+        self._deny = grpc.unary_unary_rpc_method_handler(deny)
+
+    def intercept_service(self, continuation, handler_call_details):
+        metadatum = handler_call_details.invocation_metadata
+
+        for meta in metadatum:
+            if meta.key == 'authorization':
+                if self._checkAuthHeader(meta.value):
+                    return continuation(handler_call_details)
+        
+        return self._deny
+
 class GrpcServer(object):
     def __init__(self, args):
         host = "[::]" if args.listen_to_all else "localhost"
         port = args.grpc_port
 
-        self._server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+        interceptors = []        
+        if args.access_token: interceptors.append(GrpcServerTokenChecker(args.access_token))
+
+        self._server = grpc.server(futures.ThreadPoolExecutor(max_workers=4), interceptors=interceptors)
         self._server.add_insecure_port(f"{host}:{port}")
 
     @property
@@ -101,6 +131,69 @@ class HttpServer(object):
         reactor.callFromThread(reactor.stop)
         self._thread.join(timeout=grace)
 
+class LocaltunnelServer(object):
+
+    class LTProcessProtocol(protocol.ProcessProtocol):
+
+        def __init__(self, access_token):
+            self.access_token = access_token # Just used to print out with address later
+            self.received_address = False
+
+        def connectionMade(self):
+            self.transport.closeStdin()
+        
+        def outReceived(self, data):
+            data = data.decode("utf-8")
+            print("Received unexpected output from localtunnel:")
+            print("  ", data)
+
+        def outReceived(self, err):
+            err = err.decode("utf-8")
+            m = re.search('url is: https://(.*)$', err, re.M)
+            if m:
+                self.received_address = True
+                print(f"Localtunnel started. Use these settings to connect:")
+                print(f"    Server '{m[1]}'")
+                print(f"    Port '443'")
+                print(f"    Key '{self.access_token}'")
+
+            else:
+                print("Received unexpected error from localtunnel:")
+                print("  ", err)
+        
+        def processExited(self, status):
+            if not self.received_address:
+                print("Didn't receive an address from localtunnel before it shut down. Please check your installation.")
+
+    def __init__(self, args):
+        self.access_token = args.access_token
+        self.internal_port = args.http_port
+
+    def start(self):
+        npx_path = shutil.which("npx")
+        if not npx_path: 
+            raise NotImplementedError("You need an npx install in your path to run localtunnel")
+
+        self.proc = reactor.spawnProcess(
+            LocaltunnelServer.LTProcessProtocol(self.access_token), 
+            executable=npx_path, 
+            args=["npx", "localtunnel", "--port", str(self.internal_port)],
+            env=os.environ,
+        )
+
+    def stop(self, grace=10):
+        self.proc.signalProcess("TERM")
+
+        for _ in range(grace):
+            if not self.proc.pid: return
+            time.sleep(1) 
+
+        print("Hard killing LT")
+        self.proc.signalProcess("KILL")
+        
+
+
+
 class ServerDetails(resource.Resource):
     isLeaf = True
     def render_GET(self, request):
@@ -108,16 +201,29 @@ class ServerDetails(resource.Resource):
         request.setHeader(b"Content-type", b"application/json; charset=utf-8")
         return bytes(f'{{"host": "{host.host}", "port": "{host.port}"}}', encoding='utf-8')
 
-class RoutingController(resource.Resource):
-    def __init__(self, fileroot, wsgiapp):
+class RoutingController(resource.Resource, CheckAuthHeaderMixin):
+    def __init__(self, fileroot, wsgiapp, access_token=None):
         super().__init__()
 
         self.details = ServerDetails()
         self.fileroot=fileroot
         self.files = static.File(fileroot) if fileroot else None
         self.wsgi=wsgiapp
+        self.access_token = access_token
 
-    def getChild(self, child, request):        
+    def _checkAuthorization(self, request):
+        if not self.access_token: return True
+
+        authHeader = request.getHeader("authorization")
+        if authHeader:
+            if self._checkAuthHeader(authHeader):
+                return True
+        
+        raise web.error.Error(403)
+
+    def getChild(self, child, request):       
+        self._checkAuthorization(request)
+
         request.prepath.pop()
         request.postpath.insert(0, child)
 
@@ -131,6 +237,8 @@ class RoutingController(resource.Resource):
             return self.wsgi
 
     def render(self, request):
+        self._checkAuthorization(request)
+
         return self.files.render(request) if self.files else self.wsgi.render(request)
 
 def main():
@@ -168,8 +276,16 @@ def main():
     parser.add_argument(
         "--http_file_root", type=str, default=os.environ.get("SD_HTTP_FILE_ROOT", ""), help="Set this to the root of a filestructure to serve that via the HTTP server (in addition to the GRPC-WEB handler)"
     )
-    
+    parser.add_argument(
+        "--access_token", type=str, default=os.environ.get("SD_ACCESS_TOKEN", None), help="Set a single access token that must be provided to access this server" 
+    )
+    parser.add_argument(
+        "--localtunnel", action="store_true", help="Expose HTTP to public internet over localtunnel.me. If you don't specify an access token, setting this option will add one for you."
+    )
     args = parser.parse_args()
+
+    if args.localtunnel and not args.access_token:
+        args.access_token = secrets.token_urlsafe(16)
 
     if args.reload:
         # start_reloader will only return in a monitored subprocess
@@ -181,11 +297,17 @@ def main():
     http = HttpServer(args)
     http.start()
 
+    localtunnel = None
+    if (args.localtunnel):
+        localtunnel = LocaltunnelServer(args)
+        localtunnel.start()
+
     prevHandler = None
     def shutdown_reactor_handler(*args):
         print("Waiting for server to shutdown...")
+        if localtunnel: localtunnel.stop()
         http.stop()
-        grpc.stop()
+        grpc.stop()        
         print("All done. Goodbye.")
         sys.exit(0)
 
@@ -216,4 +338,7 @@ def main():
 
         # Block until termination
         grpc.block()
+
+
+        
 
