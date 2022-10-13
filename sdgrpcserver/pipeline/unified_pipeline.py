@@ -16,7 +16,8 @@ from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
 from diffusers.configuration_utils import FrozenDict
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from diffusers.pipeline_utils import DiffusionPipeline
-from diffusers.schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
+from diffusers.schedulers import LMSDiscreteScheduler
+from diffusers.schedulers.scheduling_utils import SchedulerMixin
 from diffusers.utils import deprecate, logging
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
@@ -151,9 +152,12 @@ class Img2imgMode(UnifiedMode):
             return torch.tensor([timesteps] * self.batch_total, device=self.device)
 
     def _addInitialNoise(self, latents):
-        self.image_noise = torch.randn(latents.shape, generator=self.generator, device=self.device, dtype=self.latents_dtype)
-        result = self.scheduler.add_noise(latents, self.image_noise, self._getSchedulerNoiseTimestep(self.t_start))
-        return result.to(latents.dtype) # This is needed while we use the old schedulers, since they don't correctly match type
+        # NOTE: We run K_LMS in float32, because it seems to have problems with float16
+        noise_dtype=torch.float32 if isinstance(self.scheduler, LMSDiscreteScheduler) else self.latents_dtype
+
+        self.image_noise = torch.randn(latents.shape, generator=self.generator, device=self.device, dtype=noise_dtype)
+        result = self.scheduler.add_noise(latents.to(noise_dtype), self.image_noise, self._getSchedulerNoiseTimestep(self.t_start))
+        return result.to(self.latents_dtype) # Old schedulers return float32, and we force K_LMS into float32, but we need to return float16
 
     def generateLatents(self):
         init_latents = self._buildInitialLatents()
@@ -248,7 +252,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         # Create a mask which is scaled to allow protected-area depending on how close mask_scale is to 0
         self.blend_mask = self.mask * self.mask_scale
 
-    def _matchToSamplerSD2(self, tensor):
+    def _matchToSamplerSD(self, tensor):
         # Normalise tensor to -1..1
         tensor=tensor-tensor.min()
         tensor=tensor.div(tensor.max())
@@ -264,14 +268,6 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
 
         return tensor * targetSD / sd
 
-    def _matchToSamplerSD(self, tensor):
-        if isinstance(self.scheduler, OldSchedulerMixin): 
-            targetSD = self.scheduler.sigmas[0]
-        else:
-            targetSD = self.scheduler.init_noise_sigma
-
-        return torchvision.transforms.functional.normalize(tensor, [0, 0, 0, 0], [targetSD, targetSD, targetSD, targetSD])
-
     def _matchNorm(self, tensor, like, cf=1):
         # Normalise tensor to 0..1
         tensor=tensor-tensor.min()
@@ -281,6 +277,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         norm_range = (like.max() - like.min()) * cf
         norm_min = like.min() * cf
         return tensor * norm_range + norm_min
+
 
     def _fillWithShapedNoise(self, init_latents):
         # HERE ARE ALL THE THINGS THAT GIVE BETTER OR WORSE RESULTS DEPENDING ON THE IMAGE:
@@ -294,7 +291,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         noise_mode=0
 
         # 0 == to sampler requested std deviation, 1 == to original image distribution
-        match_mode = 0
+        match_mode=1
 
         # Current theory: if we can match the noise to the image latents, we get a nice well scaled color blend between the two.
         # The nmask mostly adjusts for incorrect scale. With correct scale, nmask hurts more than it helps
@@ -317,6 +314,13 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
             noise = noise.log_normal_(generator=self.generator)
             noise = noise - noise.mean()
         elif noise_mode == 3: noise = noise.normal_(generator=self.generator)
+        elif noise_mode == 4: 
+            if isinstance(self.scheduler, OldSchedulerMixin): 
+                targetSD = self.scheduler.sigmas[0]
+            else:
+                targetSD = self.scheduler.init_noise_sigma
+
+            noise = noise.normal_(generator=self.generator, mean=0, std=targetSD)
 
         # Make the noise less of a component of the convolution compared to the latent in the unmasked portion
         if nmask_mode > 0:
@@ -349,8 +353,8 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         return init_latents
 
     def latentStep(self, latents, i, t, steppos):
-        # masking
-        init_latents_proper = self.scheduler.add_noise(self.init_latents_orig, self.image_noise, self._getSchedulerNoiseTimestep(i, t))       
+        # The type shifting here is due to note in Img2img._addInitialNoise
+        init_latents_proper = self.scheduler.add_noise(self.init_latents_orig.to(self.image_noise.dtype), self.image_noise, self._getSchedulerNoiseTimestep(i, t))       
         init_latents_proper = init_latents_proper.to(latents.dtype)
 
         iteration_mask = self.blend_mask.ge(steppos).to(self.blend_mask.dtype)
@@ -465,8 +469,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
             [CLIPTokenizer](https://huggingface.co/docs/transformers/v4.21.0/en/model_doc/clip#transformers.CLIPTokenizer).
         unet ([`UNet2DConditionModel`]): Conditional U-Net architecture to denoise the encoded image latents.
         scheduler ([`SchedulerMixin`]):
-            A scheduler to be used in combination with `unet` to denoise the encoded image latens. Can be one of
-            [`DDIMScheduler`], [`LMSDiscreteScheduler`], or [`PNDMScheduler`].
+            A scheduler to be used in combination with `unet` to denoise the encoded image latents.
         safety_checker ([`StableDiffusionSafetyChecker`]):
             Classification module that estimates whether generated images could be considered offensive or harmful.
             Please, refer to the [model card](https://huggingface.co/CompVis/stable-diffusion-v1-4) for details.
@@ -482,7 +485,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         text_encoder: CLIPTextModel,
         tokenizer: CLIPTokenizer,
         unet: UNet2DConditionModel,
-        scheduler: Union[DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler],
+        scheduler: SchedulerMixin,
         safety_checker: StableDiffusionSafetyChecker,
         feature_extractor: CLIPFeatureExtractor,
     ):
@@ -784,7 +787,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
 
         image = (image / 2 + 0.5).clamp(0, 1)
 
-        if outmask_image != None:
+        if strength <= 1 and outmask_image != None:
             outmask = torch.cat([outmask_image] * batch_size)
             outmask = outmask[:, [0,1,2]]
             outmask = outmask.to(self.device)

@@ -205,6 +205,6 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
             context.set_details(str(e))
             print(f"Unsupported request parameters: {e}")
         except Exception as e:
+            traceback.print_exc()
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details("Something went wrong")
-            traceback.print_exc()

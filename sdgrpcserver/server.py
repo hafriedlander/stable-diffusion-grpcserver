@@ -11,6 +11,7 @@ from twisted import web
 from twisted.web import server, resource, static
 from twisted.web.wsgi import WSGIResource 
 from twisted.internet import reactor, endpoints, protocol
+from twisted.web.resource import ForbiddenResource
 
 import grpc
 import hupper
@@ -111,7 +112,10 @@ class HttpServer(object):
         wsgi_resource = WSGIResource(reactor, reactor.getThreadPool(), wsgi_app)
 
         # Build the web handler
-        controller = RoutingController(args.http_file_root, wsgi_resource)
+        controller = RoutingController(
+            args.http_file_root, wsgi_resource, 
+            access_token=args.access_token
+        )
 
         # Connect to an endpoint
         site = server.Site(controller)
@@ -191,9 +195,6 @@ class LocaltunnelServer(object):
         print("Hard killing LT")
         self.proc.signalProcess("KILL")
         
-
-
-
 class ServerDetails(resource.Resource):
     isLeaf = True
     def render_GET(self, request):
@@ -209,20 +210,22 @@ class RoutingController(resource.Resource, CheckAuthHeaderMixin):
         self.fileroot=fileroot
         self.files = static.File(fileroot) if fileroot else None
         self.wsgi=wsgiapp
+
         self.access_token = access_token
 
     def _checkAuthorization(self, request):
         if not self.access_token: return True
+        if request.method == b"OPTIONS": return True
 
         authHeader = request.getHeader("authorization")
         if authHeader:
             if self._checkAuthHeader(authHeader):
                 return True
         
-        raise web.error.Error(403)
+        return False
 
     def getChild(self, child, request):       
-        self._checkAuthorization(request)
+        if not self._checkAuthorization(request): return ForbiddenResource()
 
         request.prepath.pop()
         request.postpath.insert(0, child)
@@ -237,7 +240,7 @@ class RoutingController(resource.Resource, CheckAuthHeaderMixin):
             return self.wsgi
 
     def render(self, request):
-        self._checkAuthorization(request)
+        if not self._checkAuthorization(request): return ForbiddenResource().render(request)
 
         return self.files.render(request) if self.files else self.wsgi.render(request)
 
@@ -284,6 +287,11 @@ def main():
     )
     args = parser.parse_args()
 
+    args.listen_to_all = args.listen_to_all or 'SD_LISTEN_TO_ALL' in os.environ
+    args.enable_mps = args.enable_mps or 'SD_ENABLE_MPS' in os.environ
+    args.reload = args.reload or 'SD_RELOAD' in os.environ
+    args.localtunnel = args.localtunnel or 'SD_LOCALTUNNEL' in os.environ
+
     if args.localtunnel and not args.access_token:
         args.access_token = secrets.token_urlsafe(16)
 
@@ -315,12 +323,15 @@ def main():
 
     with open(os.path.normpath(args.enginecfg), 'r') as cfg:
         engines = yaml.load(cfg, Loader=Loader)
+
         manager = EngineManager(
             engines, 
             weight_root=args.weight_root,
             mode=EngineMode(vram_optimisation_level=args.vram_optimisation_level, enable_cuda=True, enable_mps=args.enable_mps), 
             nsfw_behaviour=args.nsfw_behaviour
         )
+
+        print("Manager loaded")
 
         generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(manager), grpc.grpc_server)
         dashboard_pb2_grpc.add_DashboardServiceServicer_to_server(DashboardServiceServicer(), grpc.grpc_server)

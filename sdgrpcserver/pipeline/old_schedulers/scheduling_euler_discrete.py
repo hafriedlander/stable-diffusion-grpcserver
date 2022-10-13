@@ -115,7 +115,7 @@ class EulerDiscreteScheduler(OldSchedulerMixin, ConfigMixin):
         s_tmin:  float = 0.,
         s_tmax: float = float('inf'),
         s_noise:  float = 1.,
-        generator=None,
+        generator = None,
         return_dict: bool = True,
     ) -> Union[SchedulerOutput, Tuple]:
         """

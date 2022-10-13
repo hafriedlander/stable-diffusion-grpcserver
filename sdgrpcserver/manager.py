@@ -23,6 +23,9 @@ from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
 from sdgrpcserver.pipeline.old_schedulers.scheduling_euler_discrete import EulerDiscreteScheduler
 from sdgrpcserver.pipeline.old_schedulers.scheduling_euler_ancestral_discrete import EulerAncestralDiscreteScheduler
+from sdgrpcserver.pipeline.old_schedulers.scheduling_dpm2_discrete import DPM2DiscreteScheduler
+from sdgrpcserver.pipeline.old_schedulers.scheduling_dpm2_ancestral_discrete import DPM2AncestralDiscreteScheduler
+from sdgrpcserver.pipeline.old_schedulers.scheduling_heun_discrete import HeunDiscreteScheduler
 
 class WithNoop(object):
     def __enter__(self):
@@ -125,6 +128,24 @@ class PipelineWrapper(object):
                 beta_schedule="scaled_linear",
                 num_train_timesteps=1000
             ))
+        self._dpm2 = self._prepScheduler(DPM2DiscreteScheduler(
+                beta_start=0.00085, 
+                beta_end=0.012, 
+                beta_schedule="scaled_linear",
+                num_train_timesteps=1000
+            ))
+        self._dpm2a = self._prepScheduler(DPM2AncestralDiscreteScheduler(
+                beta_start=0.00085, 
+                beta_end=0.012, 
+                beta_schedule="scaled_linear",
+                num_train_timesteps=1000
+            ))
+        self._heun = self._prepScheduler(HeunDiscreteScheduler(
+                beta_start=0.00085, 
+                beta_end=0.012, 
+                beta_schedule="scaled_linear",
+                num_train_timesteps=1000
+            ))
 
     def _prepScheduler(self, scheduler):
         if isinstance(scheduler, OldSchedulerMixin):
@@ -177,6 +198,12 @@ class PipelineWrapper(object):
             scheduler=self._euler
         elif params.sampler == generation_pb2.SAMPLER_K_EULER_ANCESTRAL:
             scheduler=self._eulera
+        elif params.sampler == generation_pb2.SAMPLER_K_DPM_2:
+            scheduler=self._dpm2
+        elif params.sampler == generation_pb2.SAMPLER_K_DPM_2_ANCESTRAL:
+            scheduler=self._dpm2a
+        elif params.sampler == generation_pb2.SAMPLER_K_HEUN:
+            scheduler=self._heun
         else:
             raise NotImplementedError("Scheduler not implemented")
 

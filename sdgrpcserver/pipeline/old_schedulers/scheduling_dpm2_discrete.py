@@ -24,12 +24,12 @@ from diffusers.schedulers.scheduling_utils import SchedulerOutput
 from .scheduling_utils import OldSchedulerMixin
 
 
-class EulerAncestralDiscreteScheduler(OldSchedulerMixin, ConfigMixin):
+class DPM2DiscreteScheduler(OldSchedulerMixin, ConfigMixin):
     """
-    Ancestral sampling with Euler method steps.
+    A sampler inspired by DPM-Solver-2 and Algorithm 2 from Karras et al. (2022).
     for discrete beta schedules. Based on the original k-diffusion implementation by
     Katherine Crowson:
-    https://github.com/crowsonkb/k-diffusion/blob/481677d114f6ea445aa009cf5bd7a9cdee909e47/k_diffusion/sampling.py#L72
+    https://github.com/crowsonkb/k-diffusion/blob/481677d114f6ea445aa009cf5bd7a9cdee909e47/k_diffusion/sampling.py#L119
 
     [`~ConfigMixin`] takes care of storing all config attributes that are passed in the scheduler's `__init__`
     function, such as `num_train_timesteps`. They can be accessed via `scheduler.config.num_train_timesteps`.
@@ -111,6 +111,10 @@ class EulerAncestralDiscreteScheduler(OldSchedulerMixin, ConfigMixin):
         model_output: Union[torch.FloatTensor, np.ndarray],
         timestep: int,
         sample: Union[torch.FloatTensor, np.ndarray],
+        s_churn: float = 0.,
+        s_tmin:  float = 0.,
+        s_tmax: float = float('inf'),
+        s_noise:  float = 1.,
         generator = None,
         return_dict: bool = True,
     ) -> Union[SchedulerOutput, Tuple]:
@@ -123,6 +127,10 @@ class EulerAncestralDiscreteScheduler(OldSchedulerMixin, ConfigMixin):
             timestep (`int`): current discrete timestep in the diffusion chain.
             sample (`torch.FloatTensor` or `np.ndarray`):
                 current instance of sample being created by diffusion process.
+            s_churn (`float`)
+            s_tmin  (`float`)
+            s_tmax  (`float`)
+            s_noise (`float`)
             return_dict (`bool`): option for returning tuple rather than SchedulerOutput class
 
         Returns:
@@ -132,23 +140,27 @@ class EulerAncestralDiscreteScheduler(OldSchedulerMixin, ConfigMixin):
 
         """
         sigma = self.sigmas[timestep]
-
+        gamma = min(s_churn / (len(self.sigmas) - 1), 2 ** 0.5 - 1) if s_tmin <= sigma <= s_tmax else 0.
+        eps = torch.randn(sample.size(), dtype=sample.dtype, layout=sample.layout, device=generator.device, generator=generator).to(sample.device) * s_noise
+        sigma_hat = sigma * (gamma + 1)
+        if gamma > 0:
+            sample = sample + eps * (sigma_hat ** 2 - sigma ** 2) ** 0.5
         # 1. compute predicted original sample (x_0) from sigma-scaled predicted noise
-        pred_original_sample = sample - sigma * model_output
-        sigma_from = self.sigmas[timestep]
-        sigma_to = self.sigmas[timestep + 1]
-        sigma_up = (sigma_to ** 2 * (sigma_from ** 2 - sigma_to ** 2) / sigma_from ** 2) ** 0.5
-        sigma_down = (sigma_to ** 2 - sigma_up ** 2) ** 0.5
+        pred_original_sample = sample - sigma_hat * model_output
+
         # 2. Convert to an ODE derivative
-        derivative = (sample - pred_original_sample) / sigma
+        derivative = (sample - pred_original_sample) / sigma_hat
         self.derivatives.append(derivative)
 
-        dt = sigma_down - sigma
+        sigma_mid = ((sigma_hat ** (1 / 3) + self.sigmas[timestep + 1] ** (1 / 3)) / 2) ** 3
+        dt_1 = sigma_mid - sigma_hat
+        dt_2 = self.sigmas[timestep + 1] - sigma_hat
+        sample_2 = sample + derivative * dt_1
+        pred_original_sample_2 = sample_2 - sigma_mid * model_output
+        derivative_2 = (sample_2 - pred_original_sample_2) / sigma_mid
+        sample = sample + derivative_2 * dt_2
 
-        prev_sample = sample + derivative * dt
-
-        noise = torch.randn(prev_sample.size(), dtype=prev_sample.dtype, layout=prev_sample.layout, device=generator.device, generator=generator).to(prev_sample.device)
-        prev_sample = prev_sample + noise * sigma_up
+        prev_sample = sample
 
         if not return_dict:
             return (prev_sample,)

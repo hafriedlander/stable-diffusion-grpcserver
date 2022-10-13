@@ -37,9 +37,12 @@ args = {
         {"sampler": "ddim", "eta": 0},
         {"sampler": "ddim", "eta": 0.8},
         {"sampler": "plms"}, 
+        {"sampler": "k_lms"},
         {"sampler": "k_euler"}, 
         {"sampler": "k_euler_ancestral"}, 
-#        {"sampler": "k_lms"},
+        {"sampler": "k_heun"}, 
+        {"sampler": "k_dpm_2"}, 
+        {"sampler": "k_dpm_2_ancestral"}, 
     ],
     "image": [
         {},
@@ -101,7 +104,7 @@ class TestRunner(object):
         result = []
 
         for item in args[key]:
-            result += [{key: item} | combo for combo in self.build_combinations(args, idx+1)]
+            result += [{**combo, key: item} for combo in self.build_combinations(args, idx+1)]
 
         return result
 
@@ -125,7 +128,7 @@ class TestRunner(object):
                 image=generation_pb2.ImageParameters(
                     height=512,
                     width=512,
-                    seed=[420430440], # It's the funny number
+                    seed=[420420420], # It's the funny number
                     steps=50,
                     samples=1,
                     parameters = []
@@ -152,6 +155,7 @@ class FakeContext():
 
     def set_code(self, code):
         print("Test failed")
+        monitor.stop()
         sys.exit(-1)
     
     def set_details(self, code):
