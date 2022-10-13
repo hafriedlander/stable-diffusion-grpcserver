@@ -1,5 +1,6 @@
 
 import os, warnings
+from sdgrpcserver.pipeline.old_schedulers.scheduling_utils import OldSchedulerMixin
 import torch
 
 from tqdm.auto import tqdm
@@ -10,17 +11,21 @@ from sdgrpcserver.pipeline.fastattention import has_xformers, MemoryEfficientCro
 print(f"Using xformers: {'yes' if has_xformers() else 'no'}")
 if has_xformers(): attention.CrossAttention = MemoryEfficientCrossAttention
 
-from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler
+from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler, PNDMScheduler
 from diffusers.configuration_utils import FrozenDict
+from diffusers.utils import deprecate
 
 import generation_pb2
 
 from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipeline
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 
-from sdgrpcserver.pipeline.scheduling_ddim import DDIMScheduler
-from sdgrpcserver.pipeline.scheduling_euler_discrete import EulerDiscreteScheduler
-from sdgrpcserver.pipeline.scheduling_euler_ancestral_discrete import EulerAncestralDiscreteScheduler
+from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
+from sdgrpcserver.pipeline.old_schedulers.scheduling_euler_discrete import EulerDiscreteScheduler
+from sdgrpcserver.pipeline.old_schedulers.scheduling_euler_ancestral_discrete import EulerAncestralDiscreteScheduler
+from sdgrpcserver.pipeline.old_schedulers.scheduling_dpm2_discrete import DPM2DiscreteScheduler
+from sdgrpcserver.pipeline.old_schedulers.scheduling_dpm2_ancestral_discrete import DPM2AncestralDiscreteScheduler
+from sdgrpcserver.pipeline.old_schedulers.scheduling_heun_discrete import HeunDiscreteScheduler
 
 class WithNoop(object):
     def __enter__(self):
@@ -74,11 +79,11 @@ class EngineMode(object):
 
     @property
     def fp16(self):
-        return self.device == "cuda" and self._vramO > 1 and not self.cuda_only_unet
+        return self.device == "cuda" and self._vramO > 1
 
     @property
-    def cuda_only_unet(self):
-        return self.device == "cuda" and self._vramO > 2
+    def module_mode(self):
+        return "one" if self.device == "cuda" and self._vramO > 2 else "all"
 
 class PipelineWrapper(object):
 
@@ -87,15 +92,17 @@ class PipelineWrapper(object):
         self._mode = mode
 
         self._pipeline = pipeline
-        if self.mode.fp16:
-            self._pipeline = pipeline.to(torch.float16)
-        elif self.mode.cuda_only_unet: 
-            self._pipeline.unet = self._pipeline.unet.to(torch.float16)
 
-        if self.mode.attention_slice:
-            self._pipeline.enable_attention_slicing(1)
+        self._pipeline.enable_attention_slicing(1 if self.mode.attention_slice else None)
+        self._pipeline.set_module_mode(self.mode.module_mode)
 
-        self._plms = pipeline.scheduler
+        self._plms = self._prepScheduler(PNDMScheduler(
+                beta_start=0.00085, 
+                beta_end=0.012, 
+                beta_schedule="scaled_linear",
+                num_train_timesteps=1000,
+                skip_prk_steps=True
+        ))
         self._klms = self._prepScheduler(LMSDiscreteScheduler(
                 beta_start=0.00085, 
                 beta_end=0.012, 
@@ -121,20 +128,39 @@ class PipelineWrapper(object):
                 beta_schedule="scaled_linear",
                 num_train_timesteps=1000
             ))
+        self._dpm2 = self._prepScheduler(DPM2DiscreteScheduler(
+                beta_start=0.00085, 
+                beta_end=0.012, 
+                beta_schedule="scaled_linear",
+                num_train_timesteps=1000
+            ))
+        self._dpm2a = self._prepScheduler(DPM2AncestralDiscreteScheduler(
+                beta_start=0.00085, 
+                beta_end=0.012, 
+                beta_schedule="scaled_linear",
+                num_train_timesteps=1000
+            ))
+        self._heun = self._prepScheduler(HeunDiscreteScheduler(
+                beta_start=0.00085, 
+                beta_end=0.012, 
+                beta_schedule="scaled_linear",
+                num_train_timesteps=1000
+            ))
 
     def _prepScheduler(self, scheduler):
-        scheduler = scheduler.set_format("pt")
+        if isinstance(scheduler, OldSchedulerMixin):
+            scheduler = scheduler.set_format("pt")
 
         if hasattr(scheduler.config, "steps_offset") and scheduler.config.steps_offset != 1:
-            warnings.warn(
+            deprecation_message = (
                 f"The configuration file of this scheduler: {scheduler} is outdated. `steps_offset`"
                 f" should be set to 1 instead of {scheduler.config.steps_offset}. Please make sure "
                 "to update the config accordingly as leaving `steps_offset` might led to incorrect results"
                 " in future versions. If you have downloaded this checkpoint from the Hugging Face Hub,"
                 " it would be very nice if you could open a Pull request for the `scheduler/scheduler_config.json`"
-                " file",
-                DeprecationWarning,
+                " file"
             )
+            deprecate("steps_offset!=1", "1.0.0", deprecation_message, standard_warn=False)
             new_config = dict(scheduler.config)
             new_config["steps_offset"] = 1
             scheduler._internal_dict = FrozenDict(new_config)
@@ -149,16 +175,11 @@ class PipelineWrapper(object):
 
     def activate(self):
         # Pipeline.to is in-place, so we move to the device on activate, and out again on deactivate
-        if self.mode.cuda_only_unet: self._pipeline.unet.to(torch.device("cuda"))
-        else: self._pipeline.to(self.mode.device)
+        self._pipeline.to(self.mode.device)
         
     def deactivate(self):
-        self._pipeline.to("cpu")
+        self._pipeline.to("cpu", forceAll=True)
         if self.mode.device == "cuda": torch.cuda.empty_cache()
-
-    def _autocast(self):
-        if self.mode.device == "cuda": return torch.autocast(self.mode.device)
-        return WithNoop()
 
     def generate(self, text, params, image=None, mask=None, outmask=None, negative_text=None, progress_callback=None, stop_event=None):
         generator=None
@@ -177,29 +198,34 @@ class PipelineWrapper(object):
             scheduler=self._euler
         elif params.sampler == generation_pb2.SAMPLER_K_EULER_ANCESTRAL:
             scheduler=self._eulera
+        elif params.sampler == generation_pb2.SAMPLER_K_DPM_2:
+            scheduler=self._dpm2
+        elif params.sampler == generation_pb2.SAMPLER_K_DPM_2_ANCESTRAL:
+            scheduler=self._dpm2a
+        elif params.sampler == generation_pb2.SAMPLER_K_HEUN:
+            scheduler=self._heun
         else:
             raise NotImplementedError("Scheduler not implemented")
 
         self._pipeline.scheduler = scheduler
         self._pipeline.progress_bar = ProgressBarWrapper(progress_callback, stop_event)
 
-        with self._autocast():
-            images = self._pipeline(
-                prompt=text,
-                negative_prompt=negative_text if negative_text else None,
-                init_image=image,
-                mask_image=mask,
-                outmask_image=outmask,
-                strength=params.strength,
-                width=params.width,
-                height=params.height,
-                num_inference_steps=params.steps,
-                guidance_scale=params.cfg_scale,
-                eta=params.eta,
-                generator=generator,
-                output_type="tensor",
-                return_dict=False
-            )
+        images = self._pipeline(
+            prompt=text,
+            negative_prompt=negative_text if negative_text else None,
+            init_image=image,
+            mask_image=mask,
+            outmask_image=outmask,
+            strength=params.strength,
+            width=params.width,
+            height=params.height,
+            num_inference_steps=params.steps,
+            guidance_scale=params.cfg_scale,
+            eta=params.eta,
+            generator=generator,
+            output_type="tensor",
+            return_dict=False
+        )
 
         return images
 
@@ -229,14 +255,27 @@ class EngineManager(object):
         return remote_path
 
     def buildPipeline(self, engine):
-        weight_path=self._getWeightPath(engine["model"], engine.get("local_model", None))
+        if self.mode.fp16:
+           weight_path=self._getWeightPath(engine["model"], engine.get("local_model_fp16", None))
+        else:
+           weight_path=self._getWeightPath(engine["model"], engine.get("local_model", None))
+
 
         use_auth_token=self._token if engine.get("use_auth_token", False) else False
 
         extra_kwargs={}
 
+        if self.mode.fp16:
+            extra_kwargs["revision"]="fp16"
+            extra_kwargs["torch_dtype"]=torch.float16
+
         if self._nsfw == "flag":
-            extra_kwargs["safety_checker"]=FlagOnlySafetyChecker.from_pretrained(weight_path, subfolder="safety_checker", use_auth_token=use_auth_token)
+            extra_kwargs["safety_checker"]=FlagOnlySafetyChecker.from_pretrained(
+                weight_path, 
+                subfolder="safety_checker", 
+                use_auth_token=use_auth_token,
+                **extra_kwargs
+            )
 
         if engine["class"] == "StableDiffusionPipeline":
             return PipelineWrapper(

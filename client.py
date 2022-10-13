@@ -184,21 +184,20 @@ class StabilityInference:
 
         call_credentials = []
 
-        if host.endswith("443"):
-            if key:
-                call_credentials.append(
-                    grpc.access_token_call_credentials(f"{key}"))
+        if key:
+            call_credentials.append(grpc.access_token_call_credentials(f"{key}"))
+            
+            if host.endswith("443"):
+                channel_credentials = grpc.ssl_channel_credentials()
             else:
-                raise ValueError(f"key is required for {host}")
-            channel_credentials = grpc.composite_channel_credentials(
-                grpc.ssl_channel_credentials(), *call_credentials
+                print("Key provided but channel is not HTTPS - assuming a local network")
+                channel_credentials = grpc.local_channel_credentials()
+            
+            channel = grpc.secure_channel(
+                host, 
+                grpc.composite_channel_credentials(channel_credentials, *call_credentials)
             )
-            channel = grpc.secure_channel(host, channel_credentials)
-        else:
-            if key:
-                logger.warning(
-                    "Not using authentication token due to non-secure transport"
-                )
+        else: 
             channel = grpc.insecure_channel(host)
 
         if verbose:

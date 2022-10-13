@@ -21,15 +21,15 @@ from scipy import integrate
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.schedulers.scheduling_utils import SchedulerOutput
-from sdgrpcserver.pipeline.scheduling_utils import SchedulerMixin
+from .scheduling_utils import OldSchedulerMixin
 
 
-class EulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
+class HeunDiscreteScheduler(OldSchedulerMixin, ConfigMixin):
     """
-    Implements Algorithm 2 (Euler steps) from Karras et al. (2022).
+    Implements Algorithm 2 (Heun steps) from Karras et al. (2022).
     for discrete beta schedules. Based on the original k-diffusion implementation by
     Katherine Crowson:
-    https://github.com/crowsonkb/k-diffusion/blob/481677d114f6ea445aa009cf5bd7a9cdee909e47/k_diffusion/sampling.py#L51
+    https://github.com/crowsonkb/k-diffusion/blob/481677d114f6ea445aa009cf5bd7a9cdee909e47/k_diffusion/sampling.py#L90
 
     [`~ConfigMixin`] takes care of storing all config attributes that are passed in the scheduler's `__init__`
     function, such as `num_train_timesteps`. They can be accessed via `scheduler.config.num_train_timesteps`.
@@ -115,7 +115,7 @@ class EulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         s_tmin:  float = 0.,
         s_tmax: float = float('inf'),
         s_noise:  float = 1.,
-        generator=None,
+        generator = None,
         return_dict: bool = True,
     ) -> Union[SchedulerOutput, Tuple]:
         """
@@ -141,7 +141,7 @@ class EulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         """
         sigma = self.sigmas[timestep]
         gamma = min(s_churn / (len(self.sigmas) - 1), 2 ** 0.5 - 1) if s_tmin <= sigma <= s_tmax else 0.
-        eps = torch.randn(sample.size(), dtype=sample.dtype, layout=sample.layout, device=sample.device, generator=generator) * s_noise
+        eps = torch.randn(sample.size(), dtype=sample.dtype, layout=sample.layout, device=generator.device, generator=generator).to(sample.device) * s_noise
         sigma_hat = sigma * (gamma + 1)
         if gamma > 0:
             sample = sample + eps * (sigma_hat ** 2 - sigma ** 2) ** 0.5
@@ -153,8 +153,18 @@ class EulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         self.derivatives.append(derivative)
 
         dt = self.sigmas[timestep + 1] - sigma_hat
-
-        prev_sample = sample + derivative * dt
+        if self.sigmas[timestep + 1] == 0:
+            # Euler method
+            sample = sample + derivative * dt
+        else:
+            # Heun's method
+            sample_2 = sample + derivative * dt
+            pred_original_sample_2 = sample_2 - self.sigmas[timestep + 1] * model_output
+            derivative_2 = (sample_2 - pred_original_sample_2) / self.sigmas[timestep + 1]
+            d_prime = (derivative + derivative_2) / 2
+            sample = sample + d_prime * dt
+        
+        prev_sample = sample
 
         if not return_dict:
             return (prev_sample,)
