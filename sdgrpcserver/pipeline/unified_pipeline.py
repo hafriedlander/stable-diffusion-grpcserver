@@ -450,6 +450,36 @@ class DynamicModuleDiffusionPipeline(DiffusionPipeline):
     def safety_checker(self, value):
         self._safety_checker = value
 
+
+class NoisePredictor:
+
+    def __init__(self, pipeline, text_embeddings, do_classifier_free_guidance, guidance_scale):
+        self.pipeline = pipeline
+        self.text_embeddings = text_embeddings
+        self.do_classifier_free_guidance = do_classifier_free_guidance
+        self.guidance_scale = guidance_scale
+
+    def step(self, latents, i, t, sigma = None):
+        # expand the latents if we are doing classifier free guidance
+        latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+
+        if isinstance(self.pipeline.scheduler, OldSchedulerMixin): 
+            if not sigma: sigma = self.pipeline.scheduler.sigmas[i] 
+            # the model input needs to be scaled to match the continuous ODE formulation in K-LMS
+            latent_model_input = latent_model_input / ((sigma**2 + 1) ** 0.5)
+        else:
+            latent_model_input = self.pipeline.scheduler.scale_model_input(latent_model_input, t)
+
+        # predict the noise residual
+        noise_pred = self.pipeline.unet(latent_model_input, t, encoder_hidden_states=self.text_embeddings).sample
+
+        # perform guidance
+        if self.do_classifier_free_guidance:
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+        return noise_pred
+
 class UnifiedPipeline(DynamicModuleDiffusionPipeline):
     r"""
     Pipeline for unified image generation using Stable Diffusion.
@@ -731,6 +761,14 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
 
         print(f"Mode {mode.__class__} with strength {strength}")
 
+        # Build the noise predictor. We move this into it's own class so it can be
+        # passed into a scheduler if they need to re-call
+        noise_predictor = NoisePredictor(
+            pipeline=self, 
+            text_embeddings=text_embeddings, 
+            do_classifier_free_guidance=do_classifier_free_guidance, guidance_scale=guidance_scale
+        )
+
         # Get the initial starting point - either pure random noise, or the source image with some noise depending on mode
         latents = mode.generateLatents()
 
@@ -740,10 +778,12 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         # and should be between [0, 1]
         accepts_eta = "eta" in set(inspect.signature(self.scheduler.step).parameters.keys())
         accepts_generator = "generator" in set(inspect.signature(self.scheduler.step).parameters.keys())
+        accepts_noise_predictor = "noise_predictor" in set(inspect.signature(self.scheduler.step).parameters.keys())
 
         extra_step_kwargs = {}
         if accepts_eta: extra_step_kwargs["eta"] = eta
         if accepts_generator: extra_step_kwargs["generator"] = generator
+        if accepts_noise_predictor: extra_step_kwargs["noise_predictor"] = noise_predictor.step
 
         t_start = mode.t_start
 
@@ -752,22 +792,8 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         for i, t in enumerate(self.progress_bar(timesteps_tensor)):
             t_index = t_start + i
 
-            # expand the latents if we are doing classifier free guidance
-            latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-
-            if isinstance(self.scheduler, OldSchedulerMixin): 
-                sigma = self.scheduler.sigmas[t_index]
-                latent_model_input = latent_model_input / ((sigma**2 + 1) ** 0.5)
-            else:
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-
             # predict the noise residual
-            noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embeddings).sample
-
-            # perform guidance
-            if do_classifier_free_guidance:
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+            noise_pred = noise_predictor.step(latents, t_index, t)
 
             # compute the previous noisy sample x_t -> x_t-1
 

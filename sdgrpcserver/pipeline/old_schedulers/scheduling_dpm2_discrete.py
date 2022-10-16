@@ -116,6 +116,7 @@ class DPM2DiscreteScheduler(OldSchedulerMixin, ConfigMixin):
         s_tmax: float = float('inf'),
         s_noise:  float = 1.,
         generator = None,
+        noise_predictor = None,
         return_dict: bool = True,
     ) -> Union[SchedulerOutput, Tuple]:
         """
@@ -139,6 +140,8 @@ class DPM2DiscreteScheduler(OldSchedulerMixin, ConfigMixin):
             returning a tuple, the first element is the sample tensor.
 
         """
+        if not noise_predictor: print("Noise predictor not provided, result will not be correct.")
+
         sigma = self.sigmas[timestep]
         gamma = min(s_churn / (len(self.sigmas) - 1), 2 ** 0.5 - 1) if s_tmin <= sigma <= s_tmax else 0.
         eps = torch.randn(sample.size(), dtype=sample.dtype, layout=sample.layout, device=generator.device, generator=generator).to(sample.device) * s_noise
@@ -152,13 +155,21 @@ class DPM2DiscreteScheduler(OldSchedulerMixin, ConfigMixin):
         derivative = (sample - pred_original_sample) / sigma_hat
         self.derivatives.append(derivative)
 
-        sigma_mid = ((sigma_hat ** (1 / 3) + self.sigmas[timestep + 1] ** (1 / 3)) / 2) ** 3
-        dt_1 = sigma_mid - sigma_hat
-        dt_2 = self.sigmas[timestep + 1] - sigma_hat
-        sample_2 = sample + derivative * dt_1
-        pred_original_sample_2 = sample_2 - sigma_mid * model_output
-        derivative_2 = (sample_2 - pred_original_sample_2) / sigma_mid
-        sample = sample + derivative_2 * dt_2
+        if self.sigmas[timestep + 1] == 0:
+            dt = self.sigmas[timestep + 1] - sigma_hat
+            sample = sample + derivative * dt
+        else:
+            sigma_mid = ((sigma_hat ** (1 / 3) + self.sigmas[timestep + 1] ** (1 / 3)) / 2) ** 3
+            dt_1 = sigma_mid - sigma_hat
+            dt_2 = self.sigmas[timestep + 1] - sigma_hat
+            sample_2 = sample + derivative * dt_1
+
+            model_output_2 = noise_predictor(sample_2, timestep+1, self.timesteps[timestep+1], sigma_mid)
+            pred_original_sample_2 = sample_2 - sigma_mid * model_output_2
+
+            #pred_original_sample_2 = sample_2 - sigma_mid * model_output
+            derivative_2 = (sample_2 - pred_original_sample_2) / sigma_mid
+            sample = sample + derivative_2 * dt_2
 
         prev_sample = sample
 

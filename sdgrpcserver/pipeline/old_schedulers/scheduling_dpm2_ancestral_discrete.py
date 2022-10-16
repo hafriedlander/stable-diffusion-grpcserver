@@ -116,6 +116,7 @@ class DPM2AncestralDiscreteScheduler(OldSchedulerMixin, ConfigMixin):
         s_tmax: float = float('inf'),
         s_noise:  float = 1.,
         generator = None,
+        noise_predictor = None,
         return_dict: bool = True,
     ) -> Union[SchedulerOutput, Tuple]:
         """
@@ -139,6 +140,8 @@ class DPM2AncestralDiscreteScheduler(OldSchedulerMixin, ConfigMixin):
             returning a tuple, the first element is the sample tensor.
 
         """
+        if not noise_predictor: print("Noise predictor not provided, result will not be correct.")
+
         sigma = self.sigmas[timestep]
         
         # 1. compute predicted original sample (x_0) from sigma-scaled predicted noise
@@ -152,17 +155,25 @@ class DPM2AncestralDiscreteScheduler(OldSchedulerMixin, ConfigMixin):
         derivative = (sample - pred_original_sample) / sigma
         self.derivatives.append(derivative)
 
-        # Midpoint method, where the midpoint is chosen according to a rho=3 Karras schedule
-        sigma_mid = ((sigma ** (1 / 3) + sigma_down ** (1 / 3)) / 2) ** 3
+        if sigma_down == 0:
+            dt = sigma_down - sigma
+            sample = sample + derivative * dt
+        else:
+            # Midpoint method, where the midpoint is chosen according to a rho=3 Karras schedule
+            sigma_mid = ((sigma ** (1 / 3) + sigma_down ** (1 / 3)) / 2) ** 3
 
-        dt_1 = sigma_mid - sigma
-        dt_2 = sigma_down - sigma
-        sample_2 = sample + derivative * dt_1
-        pred_original_sample_2 = sample_2 - sigma_mid * model_output
-        derivative_2 = (sample_2 - pred_original_sample_2) / sigma_mid
-        sample = sample + derivative_2 * dt_2
-        noise = torch.randn(sample.size(), dtype=sample.dtype, layout=sample.layout, device=generator.device, generator=generator).to(sample.device)
-        sample = sample + noise * sigma_up
+            dt_1 = sigma_mid - sigma
+            dt_2 = sigma_down - sigma
+            sample_2 = sample + derivative * dt_1
+
+            model_output_2 = noise_predictor(sample_2, timestep+1, self.timesteps[timestep+1], sigma_mid)
+            pred_original_sample_2 = sample_2 - sigma_mid * model_output_2
+
+            #pred_original_sample_2 = sample_2 - sigma_mid * model_output
+            derivative_2 = (sample_2 - pred_original_sample_2) / sigma_mid
+            sample = sample + derivative_2 * dt_2
+            noise = torch.randn(sample.size(), dtype=sample.dtype, layout=sample.layout, device=generator.device, generator=generator).to(sample.device)
+            sample = sample + noise * sigma_up
 
         prev_sample = sample
 

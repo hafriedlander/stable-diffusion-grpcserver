@@ -116,6 +116,7 @@ class HeunDiscreteScheduler(OldSchedulerMixin, ConfigMixin):
         s_tmax: float = float('inf'),
         s_noise:  float = 1.,
         generator = None,
+        noise_predictor = None,
         return_dict: bool = True,
     ) -> Union[SchedulerOutput, Tuple]:
         """
@@ -139,6 +140,8 @@ class HeunDiscreteScheduler(OldSchedulerMixin, ConfigMixin):
             returning a tuple, the first element is the sample tensor.
 
         """
+        if not noise_predictor: print("Noise predictor not provided, result will not be correct.")
+
         sigma = self.sigmas[timestep]
         gamma = min(s_churn / (len(self.sigmas) - 1), 2 ** 0.5 - 1) if s_tmin <= sigma <= s_tmax else 0.
         eps = torch.randn(sample.size(), dtype=sample.dtype, layout=sample.layout, device=generator.device, generator=generator).to(sample.device) * s_noise
@@ -159,7 +162,8 @@ class HeunDiscreteScheduler(OldSchedulerMixin, ConfigMixin):
         else:
             # Heun's method
             sample_2 = sample + derivative * dt
-            pred_original_sample_2 = sample_2 - self.sigmas[timestep + 1] * model_output
+            model_output_2 = noise_predictor(sample_2, timestep + 1, self.timesteps[timestep + 1])
+            pred_original_sample_2 = sample_2 - self.sigmas[timestep + 1] * model_output_2
             derivative_2 = (sample_2 - pred_original_sample_2) / self.sigmas[timestep + 1]
             d_prime = (derivative + derivative_2) / 2
             sample = sample + d_prime * dt
