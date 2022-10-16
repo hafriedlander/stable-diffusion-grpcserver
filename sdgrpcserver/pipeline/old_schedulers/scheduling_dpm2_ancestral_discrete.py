@@ -160,16 +160,18 @@ class DPM2AncestralDiscreteScheduler(OldSchedulerMixin, ConfigMixin):
             sample = sample + derivative * dt
         else:
             # Midpoint method, where the midpoint is chosen according to a rho=3 Karras schedule
-            sigma_mid = ((sigma ** (1 / 3) + sigma_down ** (1 / 3)) / 2) ** 3
+            sigma_mid = sigma.log().lerp(sigma_down.log(), 0.5).exp()
 
             dt_1 = sigma_mid - sigma
             dt_2 = sigma_down - sigma
             sample_2 = sample + derivative * dt_1
 
-            model_output_2 = noise_predictor(sample_2, timestep+1, self.timesteps[timestep+1], sigma_mid)
-            pred_original_sample_2 = sample_2 - sigma_mid * model_output_2
-
-            #pred_original_sample_2 = sample_2 - sigma_mid * model_output
+            if noise_predictor:
+                model_output_2 = noise_predictor(sample_2, timestep+1, self.timesteps[timestep+1], sigma_mid)
+                pred_original_sample_2 = sample_2 - sigma_mid * model_output_2
+            else:
+                pred_original_sample_2 = sample_2 - sigma_mid * model_output
+            
             derivative_2 = (sample_2 - pred_original_sample_2) / sigma_mid
             sample = sample + derivative_2 * dt_2
             noise = torch.randn(sample.size(), dtype=sample.dtype, layout=sample.layout, device=generator.device, generator=generator).to(sample.device)

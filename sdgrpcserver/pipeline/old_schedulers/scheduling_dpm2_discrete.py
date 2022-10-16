@@ -159,15 +159,18 @@ class DPM2DiscreteScheduler(OldSchedulerMixin, ConfigMixin):
             dt = self.sigmas[timestep + 1] - sigma_hat
             sample = sample + derivative * dt
         else:
-            sigma_mid = ((sigma_hat ** (1 / 3) + self.sigmas[timestep + 1] ** (1 / 3)) / 2) ** 3
+            sigma_mid = sigma_hat.log().lerp(self.sigmas[timestep + 1].log(), 0.5).exp()
+            #sigma_mid = ((sigma_hat ** (1 / 3) + self.sigmas[timestep + 1] ** (1 / 3)) / 2) ** 3
             dt_1 = sigma_mid - sigma_hat
             dt_2 = self.sigmas[timestep + 1] - sigma_hat
             sample_2 = sample + derivative * dt_1
 
-            model_output_2 = noise_predictor(sample_2, timestep+1, self.timesteps[timestep+1], sigma_mid)
-            pred_original_sample_2 = sample_2 - sigma_mid * model_output_2
-
-            #pred_original_sample_2 = sample_2 - sigma_mid * model_output
+            if noise_predictor:
+                model_output_2 = noise_predictor(sample_2, timestep+1, (self.timesteps[timestep] + self.timesteps[timestep+1])/2, sigma_mid)
+                pred_original_sample_2 = sample_2 - sigma_mid * model_output_2
+            else:
+                pred_original_sample_2 = sample_2 - sigma_mid * model_output
+            
             derivative_2 = (sample_2 - pred_original_sample_2) / sigma_mid
             sample = sample + derivative_2 * dt_2
 

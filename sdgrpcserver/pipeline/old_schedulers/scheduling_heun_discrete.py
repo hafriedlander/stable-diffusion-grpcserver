@@ -162,8 +162,13 @@ class HeunDiscreteScheduler(OldSchedulerMixin, ConfigMixin):
         else:
             # Heun's method
             sample_2 = sample + derivative * dt
-            model_output_2 = noise_predictor(sample_2, timestep + 1, self.timesteps[timestep + 1])
-            pred_original_sample_2 = sample_2 - self.sigmas[timestep + 1] * model_output_2
+
+            if noise_predictor:
+                model_output_2 = noise_predictor(sample_2, timestep + 1, self.timesteps[timestep + 1])
+                pred_original_sample_2 = sample_2 - self.sigmas[timestep + 1] * model_output_2
+            else:
+                pred_original_sample_2 = sample_2 - self.sigmas[timestep + 1] * model_output
+
             derivative_2 = (sample_2 - pred_original_sample_2) / self.sigmas[timestep + 1]
             d_prime = (derivative + derivative_2) / 2
             sample = sample + d_prime * dt
