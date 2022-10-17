@@ -225,7 +225,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         # When strength > 1, we start allowing the protected area to change too. Remember that and then set strength
         # to 1 for parent class
         self.fill_with_shaped_noise = strength >= 1.0
-        self.mask_scale = 2 - strength
+        self.mask_scale = min(2 - strength, 1)
         strength = min(strength, 1)
 
         super().__init__(strength=strength, num_inference_steps=num_inference_steps, **kwargs)
@@ -357,7 +357,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         init_latents_proper = self.scheduler.add_noise(self.init_latents_orig.to(self.image_noise.dtype), self.image_noise, self._getSchedulerNoiseTimestep(i, t))       
         init_latents_proper = init_latents_proper.to(latents.dtype)
 
-        iteration_mask = self.blend_mask.ge(steppos).to(self.blend_mask.dtype)
+        iteration_mask = self.blend_mask.gt(steppos).to(self.blend_mask.dtype)
 
         return (init_latents_proper * iteration_mask) + (latents * (1 - iteration_mask))       
 
@@ -802,7 +802,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
             else:
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
-            latents = mode.latentStep(latents, t_index, t, i / timesteps_tensor.shape[0])
+            latents = mode.latentStep(latents, t_index, t, i / (timesteps_tensor.shape[0] + 1))
 
             # call the callback, if provided
             if callback is not None and i % callback_steps == 0:
