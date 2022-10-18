@@ -440,7 +440,7 @@ if __name__ == "__main__":
         "-e",
         type=str,
         help="engine to use for inference",
-        default="stable-diffusion-v1-5",
+        default="stable-diffusion-v1-4",
     )
     parser.add_argument(
         "--init_image", "-i",
