@@ -1,23 +1,4 @@
-- id: "stable-diffusion-v1-4-standard"
-  enabled: False
-  visible: True
-  name: "Stable Diffusion V1.4 standard"
-  description: "Stable Diffusion using the original Stability.AI model and Diffusers pipeline"
-  class: "StableDiffusionPipeline"
-  model: "CompVis/stable-diffusion-v1-4"
-  local_model: "./stable-diffusion-v1-4"
-  use_auth_token: True
-- id: "waifu-diffusion-v1-2-standard"
-  enabled: False
-  visible: True
-  name: "Waifu Diffusion V1.2 standard"
-  description: "Stable Diffusion using Hakurei Waitfu Diffusion model and the original Diffusers pipeline"
-  class: "StableDiffusionPipeline"
-  model: "hakurei/waifu-diffusion"
-  local_model: "./waifu-diffusion"
-  use_auth_token: False
 - id: "stable-diffusion-v1-4"
-  default: True
   enabled: True
   visible: True
   name: "Stable Diffusion V1.4"
@@ -25,15 +6,33 @@
   class: "UnifiedPipeline"
   model: "CompVis/stable-diffusion-v1-4"
   local_model: "./stable-diffusion-v1-4"
+  local_model_fp16: "./stable-diffusion-v1-4-fp16"
   use_auth_token: True
-- id: "waifu-diffusion-v1-2"
+- id: "stable-diffusion-v1-5"
+  default: True
   enabled: True
   visible: True
-  name: "Waifu Diffusion V1.2"
+  name: "Stable Diffusion V1.5"
+  description: "Stable Diffusion using the RunwayML model and our Unified pipeline"
+  class: "UnifiedPipeline"
+  model: "runwayml/stable-diffusion-v1-5"
+  overrides:
+    vae: 
+      model: "stabilityai/sd-vae-ft-ema"
+      local_model: "./sd-vae-ft-ema"
+      has_fp16: False
+  local_model: "./stable-diffusion-v1-5"
+  local_model_fp16: "./stable-diffusion-v1-5-fp16"
+  use_auth_token: True
+- id: "waifu-diffusion-v1-3"
+  enabled: True
+  visible: True
+  name: "Waifu Diffusion V1.3"
   description: "Stable Diffusion using the Hakurei Waitfu Diffusion model and our Unified pipeline"
   class: "UnifiedPipeline"
   model: "hakurei/waifu-diffusion"
-  local_model: "./waifu-diffusion"
+  local_model: "./waifu-diffusion-v1-3"
+  local_model_fp16: "./waifu-diffusion-v1-3-fp16"
   use_auth_token: False
 
 
