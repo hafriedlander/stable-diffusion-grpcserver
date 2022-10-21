@@ -12,6 +12,7 @@ print(f"Using xformers: {'yes' if has_xformers() else 'no'}")
 if has_xformers(): attention.CrossAttention = MemoryEfficientCrossAttention
 
 from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler, PNDMScheduler
+from diffusers.models import AutoencoderKL
 from diffusers.configuration_utils import FrozenDict
 from diffusers.utils import deprecate
 
@@ -184,8 +185,11 @@ class PipelineWrapper(object):
     def generate(self, text, params, image=None, mask=None, outmask=None, negative_text=None, progress_callback=None, stop_event=None):
         generator=None
 
-        if params.seed > 0:
-            latents_device = "cpu" if self._pipeline.device.type == "mps" else self._pipeline.device
+        latents_device = "cpu" if self._pipeline.device.type == "mps" else self._pipeline.device
+
+        if isinstance(params.seed, list):
+            generator = [torch.Generator(latents_device).manual_seed(seed) for seed in params.seed] 
+        elif params.seed > 0:
             generator = torch.Generator(latents_device).manual_seed(params.seed)
 
         if params.sampler is None or params.sampler == generation_pb2.SAMPLER_DDPM:
@@ -254,48 +258,41 @@ class EngineManager(object):
             if os.path.isdir(test_path): return test_path
         return remote_path
 
-    def buildPipeline(self, engine):
-        if self.mode.fp16:
-           weight_path=self._getWeightPath(engine["model"], engine.get("local_model_fp16", None))
+    def fromPretrained(self, klass, opts, extra_kwargs = {}):
+        use_auth_token=self._token if opts.get("use_auth_token", False) else False
+
+        if self.mode.fp16 and opts.get("has_fp16", True):
+           weight_path=self._getWeightPath(opts.get("model", None), opts.get("local_model_fp16", None))
         else:
-           weight_path=self._getWeightPath(engine["model"], engine.get("local_model", None))
-
-
-        use_auth_token=self._token if engine.get("use_auth_token", False) else False
-
-        extra_kwargs={}
+           weight_path=self._getWeightPath(opts.get("model", None), opts.get("local_model", None))
 
         if self.mode.fp16:
-            extra_kwargs["revision"]="fp16"
+            if opts.get("has_fp16", True): extra_kwargs["revision"]="fp16"
             extra_kwargs["torch_dtype"]=torch.float16
 
-        if self._nsfw == "flag":
-            extra_kwargs["safety_checker"]=FlagOnlySafetyChecker.from_pretrained(
-                weight_path, 
-                subfolder="safety_checker", 
-                use_auth_token=use_auth_token,
-                **extra_kwargs
-            )
+        return klass.from_pretrained(weight_path, use_auth_token=use_auth_token, **extra_kwargs)
 
+    def buildPipeline(self, engine):
+        extra_kwargs={}
+
+        if self._nsfw == "flag":
+            extra_kwargs["safety_checker"] = self.fromPretrained(FlagOnlySafetyChecker, engine, {"subfolder": "safety_checker"})
+
+        for name, opts in engine.get("overrides", {}).items():
+            if name == "vae":
+                extra_kwargs["vae"] = self.fromPretrained(AutoencoderKL, opts)
+ 
         if engine["class"] == "StableDiffusionPipeline":
             return PipelineWrapper(
                 id=engine["id"],
                 mode=self._mode,
-                pipeline=StableDiffusionPipeline.from_pretrained(
-                    weight_path,
-                    use_auth_token=use_auth_token,
-                    **extra_kwargs                        
-                )
+                pipeline=self.fromPretrained(StableDiffusionPipeline, engine, extra_kwargs)
             )
         elif engine["class"] == "UnifiedPipeline":
             return PipelineWrapper(
                 id=engine["id"],
                 mode=self._mode,
-                pipeline=UnifiedPipeline.from_pretrained(
-                    weight_path, 
-                    use_auth_token=use_auth_token,
-                    **extra_kwargs                        
-                )
+                pipeline=self.fromPretrained(UnifiedPipeline, engine, extra_kwargs)
             )
     
     def loadPipelines(self):

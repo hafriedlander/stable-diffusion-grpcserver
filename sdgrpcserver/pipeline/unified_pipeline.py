@@ -46,7 +46,7 @@ class Txt2imgMode(UnifiedMode):
         self.device = pipeline.device
         self.scheduler = pipeline.scheduler
 
-        self.generator = generator
+        self.generators = generator if isinstance(generator, list) else [generator] * batch_total
 
         self.latents_device = "cpu" if self.device.type == "mps" else self.device
         self.latents_dtype = latents_dtype
@@ -61,12 +61,10 @@ class Txt2imgMode(UnifiedMode):
         # Unlike in other pipelines, latents need to be generated in the target device
         # for 1-to-1 results reproducibility with the CompVis implementation.
         # However this currently doesn't work in `mps`.
-        latents = torch.randn(
-            self.latents_shape, 
-            generator=self.generator, 
-            device=self.latents_device, 
-            dtype=self.latents_dtype
-        )
+        latents = torch.cat([
+            torch.randn((1, *self.latents_shape[1:]), generator=generator, device=self.latents_device, dtype=self.latents_dtype) 
+            for generator in self.generators
+        ], dim=0)
         
         latents = latents.to(self.device)
 
@@ -92,7 +90,7 @@ class Img2imgMode(UnifiedMode):
         self.scheduler = pipeline.scheduler
         self.pipeline = pipeline
 
-        self.generator = generator
+        self.generators = generator if isinstance(generator, list) else [generator] * batch_total
 
         self.latents_dtype = latents_dtype
         self.batch_total = batch_total
@@ -129,8 +127,15 @@ class Img2imgMode(UnifiedMode):
     def _buildInitialLatents(self):
         init_image = self.init_image.to(device=self.device, dtype=self.latents_dtype)
         init_latent_dist = self.pipeline.vae.encode(init_image).latent_dist
-        init_latents = init_latent_dist.sample(generator=self.generator)
+
+        init_latents = torch.cat([
+            init_latent_dist.sample(generator=generator)
+            for generator in self.generators
+        ], dim=0)
+
         init_latents = 0.18215 * init_latents
+
+        return init_latents
 
         # expand init_latents for batch_size
         return torch.cat([init_latents] * self.batch_total, dim=0)
@@ -155,7 +160,11 @@ class Img2imgMode(UnifiedMode):
         # NOTE: We run K_LMS in float32, because it seems to have problems with float16
         noise_dtype=torch.float32 if isinstance(self.scheduler, LMSDiscreteScheduler) else self.latents_dtype
 
-        self.image_noise = torch.randn(latents.shape, generator=self.generator, device=self.device, dtype=noise_dtype)
+        self.image_noise = torch.cat([
+            torch.randn((1, *latents.shape[1:]), generator=generator, device=self.device, dtype=noise_dtype)
+            for generator in self.generators
+        ])
+
         result = self.scheduler.add_noise(latents.to(noise_dtype), self.image_noise, self._getSchedulerNoiseTimestep(self.t_start))
         return result.to(self.latents_dtype) # Old schedulers return float32, and we force K_LMS into float32, but we need to return float16
 
@@ -308,37 +317,44 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
             latent_mask = self.low_mask if lmask_mode == 1 else self.mask if lmask_mode == 2 else self.high_mask
             masked_latents = masked_latents * latent_mask
 
-        # Generate some noise TODO: This might affect the seed?
-        noise = torch.empty_like(masked_latents)
-        if noise_mode == 0 and noise_mode < 1: noise = noise.normal_(generator=self.generator, mean=masked_latents.mean(), std=masked_latents.std())
-        elif noise_mode == 1 and noise_mode < 2: noise = noise.cauchy_(generator=self.generator, median=masked_latents.median(), sigma=masked_latents.std())
-        elif noise_mode == 2: 
-            noise = noise.log_normal_(generator=self.generator)
-            noise = noise - noise.mean()
-        elif noise_mode == 3: noise = noise.normal_(generator=self.generator)
-        elif noise_mode == 4: 
-            if isinstance(self.scheduler, OldSchedulerMixin): 
-                targetSD = self.scheduler.sigmas[0]
-            else:
-                targetSD = self.scheduler.init_noise_sigma
+        batch_noise = []
 
-            noise = noise.normal_(generator=self.generator, mean=0, std=targetSD)
+        for generator, split_latents in zip(self.generators, masked_latents.split(1)):
+            # Generate some noise TODO: This might affect the seed?
+            noise = torch.empty_like(split_latents)
+            if noise_mode == 0 and noise_mode < 1: noise = noise.normal_(generator=generator, mean=split_latents.mean(), std=split_latents.std())
+            elif noise_mode == 1 and noise_mode < 2: noise = noise.cauchy_(generator=generator, median=split_latents.median(), sigma=split_latents.std())
+            elif noise_mode == 2:
+                noise = noise.log_normal_(generator=generator)
+                noise = noise - noise.mean()
+            elif noise_mode == 3: noise = noise.normal_(generator=generator)
+            elif noise_mode == 4:
+                if isinstance(self.scheduler, OldSchedulerMixin):
+                    targetSD = self.scheduler.sigmas[0]
+                else:
+                    targetSD = self.scheduler.init_noise_sigma
 
-        # Make the noise less of a component of the convolution compared to the latent in the unmasked portion
-        if nmask_mode > 0:
-            noise_mask = self.low_mask if nmask_mode == 1 else self.mask if nmask_mode == 2 else self.high_mask
-            noise = noise.mul(1-(noise_mask * noise_mask_factor))
+                noise = noise.normal_(generator=generator, mean=0, std=targetSD)
 
-        # Color the noise by the latent
-        noise_fft = torch.fft.fftn(noise.to(torch.float32), norm=fft_norm_mode)
-        latent_fft = torch.fft.fftn(masked_latents.to(torch.float32), norm=fft_norm_mode)
-        convolve = noise_fft.mul(latent_fft)
-        noise = torch.fft.ifftn(convolve, norm=fft_norm_mode).real.to(self.latents_dtype)
+            # Make the noise less of a component of the convolution compared to the latent in the unmasked portion
+            if nmask_mode > 0:
+                noise_mask = self.low_mask if nmask_mode == 1 else self.mask if nmask_mode == 2 else self.high_mask
+                noise = noise.mul(1-(noise_mask * noise_mask_factor))
 
-        # Stretch colored noise to match the image latent
-        if match_mode == 0: noise = self._matchToSamplerSD(noise)
-        elif match_mode == 1: noise = self._matchNorm(noise, masked_latents, cf=1)
-        elif match_mode == 2: noise = self._matchToSD(noise, 1)
+            # Color the noise by the latent
+            noise_fft = torch.fft.fftn(noise.to(torch.float32), norm=fft_norm_mode)
+            latent_fft = torch.fft.fftn(split_latents.to(torch.float32), norm=fft_norm_mode)
+            convolve = noise_fft.mul(latent_fft)
+            noise = torch.fft.ifftn(convolve, norm=fft_norm_mode).real.to(self.latents_dtype)
+
+            # Stretch colored noise to match the image latent
+            if match_mode == 0: noise = self._matchToSamplerSD(noise)
+            elif match_mode == 1: noise = self._matchNorm(noise, split_latents, cf=1)
+            elif match_mode == 2: noise = self._matchToSD(noise, 1)
+
+            batch_noise.append(noise)
+
+        noise = torch.cat(batch_noise, dim=0)
 
         # And mix resulting noise into the black areas of the mask
         return (init_latents * self.mask) + (noise * (1 - self.mask))
@@ -590,7 +606,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
         eta: Optional[float] = 0.0,
-        generator: Optional[torch.Generator] = None,
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.FloatTensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
@@ -629,6 +645,9 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
             generator (`torch.Generator`, *optional*):
                 A [torch generator](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make generation
                 deterministic.
+                Alternatively, a list of torch generators, who's length must exactly match the length of the prompt, one
+                per batch. This allows batch-size-idependant consistency (except where schedulers that use generators are 
+                used)
             latents (`torch.FloatTensor`, *optional*):
                 Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
                 generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
@@ -660,6 +679,9 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
             batch_size = len(prompt)
         else:
             raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
+
+        if isinstance(generator, list) and len(generator) != batch_size:
+            raise ValueError(f"Generator passed as a list, but list length does not match batch size of {batch_size}")
 
         if (callback_steps is None) or (
             callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
@@ -785,7 +807,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
 
         extra_step_kwargs = {}
         if accepts_eta: extra_step_kwargs["eta"] = eta
-        if accepts_generator: extra_step_kwargs["generator"] = generator
+        if accepts_generator: extra_step_kwargs["generator"] = generator[0] if isinstance(generator, list) else generator
         if accepts_noise_predictor: extra_step_kwargs["noise_predictor"] = noise_predictor.step
 
         t_start = mode.t_start
