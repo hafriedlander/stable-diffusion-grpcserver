@@ -252,7 +252,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         # Create a mask which is scaled to allow protected-area depending on how close mask_scale is to 0
         self.blend_mask = self.mask * self.mask_scale
 
-    def _matchToSamplerSD(self, tensor):
+    def _matchToSD(self, tensor, targetSD):
         # Normalise tensor to -1..1
         tensor=tensor-tensor.min()
         tensor=tensor.div(tensor.max())
@@ -260,13 +260,15 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
 
         # Caculate standard deviation
         sd = tensor.std()
+        return tensor * targetSD / sd
 
+    def _matchToSamplerSD(self, tensor):
         if isinstance(self.scheduler, OldSchedulerMixin): 
             targetSD = self.scheduler.sigmas[0]
         else:
             targetSD = self.scheduler.init_noise_sigma
 
-        return tensor * targetSD / sd
+        return _matchToSD(self, tensor, targetSD)
 
     def _matchNorm(self, tensor, like, cf=1):
         # Normalise tensor to 0..1
@@ -291,7 +293,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         noise_mode=0
 
         # 0 == to sampler requested std deviation, 1 == to original image distribution
-        match_mode=1
+        match_mode=2
 
         # Current theory: if we can match the noise to the image latents, we get a nice well scaled color blend between the two.
         # The nmask mostly adjusts for incorrect scale. With correct scale, nmask hurts more than it helps
@@ -335,7 +337,8 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
 
         # Stretch colored noise to match the image latent
         if match_mode == 0: noise = self._matchToSamplerSD(noise)
-        else: noise = self._matchNorm(noise, masked_latents, cf=1)
+        elif match_mode == 1: noise = self._matchNorm(noise, masked_latents, cf=1)
+        elif match_mode == 2: noise = self._matchToSD(noise, 1)
 
         # And mix resulting noise into the black areas of the mask
         return (init_latents * self.mask) + (noise * (1 - self.mask))
