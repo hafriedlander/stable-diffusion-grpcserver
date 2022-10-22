@@ -122,6 +122,8 @@ def parse_prompt_attention(text):
     return res
 
 
+
+
 def get_prompts_with_weights(pipe: DiffusionPipeline, prompt: List[str], max_length: int):
     r"""
     Tokenize a list of prompts and return its tokens with weights of each token.
@@ -131,7 +133,7 @@ def get_prompts_with_weights(pipe: DiffusionPipeline, prompt: List[str], max_len
     weights = []
     truncated = False
     for text in prompt:
-        texts_and_weights = parse_prompt_attention(text)
+        texts_and_weights = parse_prompt_attention(text) if isinstance(text, str) else text
         text_token = []
         text_weight = []
         for word, weight in texts_and_weights:

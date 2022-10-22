@@ -1,7 +1,7 @@
 import inspect, traceback
 import time
 from mimetypes import init
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Tuple, Optional, Union
 
 import numpy as np
 from sdgrpcserver.pipeline.old_schedulers.scheduling_utils import OldSchedulerMixin
@@ -507,6 +507,7 @@ class BasicTextEmbedding():
         self.pipe = pipe
     
     def _get_embeddedings(self, strings, label):
+        strings = [string[0][0] for string in strings]
         tokenizer = self.pipe.tokenizer
 
         # get prompt text embeddings
@@ -629,10 +630,37 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         # set slice_size = `None` to disable `attention slicing`
         self.enable_attention_slicing(None)
 
+    def parse_prompts(self, prompts):
+
+        def check_tuples(list):
+            for item in list:
+                if not isinstance(item, tuple) or len(item) != 2 or not isinstance(item[0], str) or not isinstance(item[1], float):
+                    raise ValueError(f"Expected a list of (text, weight) tuples, but got {item} of type {type(item)}")
+
+        def parse_prompt(prompt):
+            if isinstance(prompt, str):
+                return [(prompt, 1.0)]
+            elif isinstance(prompt, list) and isinstance(prompt[0], tuple):
+                check_tuples(prompt)
+                return prompt
+
+            raise ValueError(f"Expected a string or a list of tuples, but got {type(prompt)}")
+
+        try:
+            return [parse_prompt(prompts)]
+        except:
+            if isinstance(prompts, list): return [parse_prompt(prompt) for prompt in prompts]
+
+            raise ValueError(
+                f"Expected a string, a list of strings, a list of (text, weight) tuples or "
+                f"a list of a list of tuples. Got {type(prompts)} instead."
+            )
+
+
     @torch.no_grad()
     def __call__(
         self,
-        prompt: Union[str, List[str]],
+        prompt: Union[str, List[str], List[Tuple[str, float]], List[List[Tuple[str, float]]]],
         height: int = 512,
         width: int = 512,
         init_image: Union[torch.FloatTensor, PIL.Image.Image] = None,
@@ -641,7 +669,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         strength: float = 0.0,
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
-        negative_prompt: Optional[Union[str, List[str]]] = None,
+        negative_prompt: Optional[Union[str, List[str], List[Tuple[str, float]], List[List[Tuple[str, float]]]]] = None,
         num_images_per_prompt: Optional[int] = 1,
         eta: Optional[float] = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
@@ -658,7 +686,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         Function invoked when calling the pipeline for generation.
 
         Args:
-            prompt (`str` or `List[str]`):
+            prompt (`str` or `List[str]` or `List[Tuple[str, double]]` or List[List[Tuple[str, double]]]):
                 The prompt or prompts to guide the image generation.
             height (`int`, *optional*, defaults to 512):
                 The height in pixels of the generated image.
@@ -712,19 +740,15 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
             (nsfw) content, according to the `safety_checker`.
         """
 
-        if isinstance(prompt, str):
-            batch_size = 1
-            prompt = [prompt]
-        elif isinstance(prompt, list):
-            batch_size = len(prompt)
-        else:
-            raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
+        prompt = self.parse_prompts(prompt)
+        batch_size = len(prompt)
 
         # Match the negative prompt length to the batch_size
         if negative_prompt is None:
-            negative_prompt = [""] * batch_size
-        elif isinstance(negative_prompt, str):
-            negative_prompt = [negative_prompt] * batch_size
+            negative_prompt = [[("", 1.0)]] * batch_size
+        else:
+            negative_prompt = self.parse_prompts(negative_prompt)
+
         if batch_size != len(negative_prompt):
             raise ValueError(
                 f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"

@@ -254,12 +254,13 @@ class PipelineWrapper(object):
 
     def generate(
         self, 
-        text, 
+        tokens, 
         params, 
+        negative_tokens=None, 
         image=None, 
         mask=None, 
-        outmask=None, 
-        negative_text=None, 
+        outmask=None,
+        num_images_per_prompt=1,
         progress_callback=None, 
         stop_event=None, 
         suppress_output=False
@@ -296,8 +297,9 @@ class PipelineWrapper(object):
         self._pipeline.progress_bar = ProgressBarWrapper(progress_callback, stop_event, suppress_output)
 
         images = self._pipeline(
-            prompt=text,
-            negative_prompt=negative_text if negative_text else None,
+            prompt=tokens,
+            negative_prompt=negative_tokens if negative_tokens else None,
+            num_images_per_prompt=num_images_per_prompt,
             init_image=image,
             mask_image=mask,
             outmask_image=outmask,

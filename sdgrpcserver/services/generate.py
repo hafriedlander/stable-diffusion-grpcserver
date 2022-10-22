@@ -118,18 +118,18 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
             image=None
             inMask=None
             outMask=None
-            text=""
-            negative=""
+            tokens=[]
+            negative=[]
 
             for prompt in request.prompt:
                 which = prompt.WhichOneof("prompt")
                 if which == "text": 
-                    if prompt.HasField("parameters") and prompt.parameters.HasField("weight") and prompt.parameters.weight < 0:
-                        negative += prompt.text
-                    else:
-                        text += prompt.text
-                elif which == "sequence": 
-                    self.unimp("Sequence prompts")
+                    weight = 1.0
+                    if prompt.HasField("parameters") and prompt.parameters.HasField("weight"): weight = prompt.parameters.weight
+                    if weight > 0: tokens.append((prompt.text, weight))
+                    else: negative.append((prompt.text, -weight))
+                elif which == "tokens": 
+                    self.unimp("Token prompts")
                 else:
                     if prompt.artifact.type == generation_pb2.ARTIFACT_IMAGE:
                         image = images.fromPngBytes(prompt.artifact.binary).to(self._manager.mode.device)
@@ -190,7 +190,7 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
             if params.samples <= batchmax:
                 batches = [params.samples]
             elif params.samples % batchmax == 0:
-                batches = [batchmax] * params.samples // batchmax
+                batches = [batchmax] * (params.samples // batchmax)
             else:
                 d = params.samples // batchmax + 1
                 batchsize = params.samples // d
@@ -202,7 +202,7 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                 params.seed, seeds = seeds[:batch], seeds[batch:]
 
                 print(f'Generating {repr(params)}, {"with Image" if image != None else ""}, {"with Mask" if inMask != None else ""}')
-                results = pipe.generate(text=[text]*batch, negative_text=[negative]*batch if negative else None, image=image, mask=inMask, outmask=outMask, params=params, stop_event=stop_event)
+                results = pipe.generate(tokens=tokens, negative_tokens=negative if negative else None, num_images_per_prompt=batch, image=image, mask=inMask, outmask=outMask, params=params, stop_event=stop_event)
 
                 for i, (result_image, nsfw) in enumerate(zip(results[0], results[1])):
                     answer = generation_pb2.Answer()
