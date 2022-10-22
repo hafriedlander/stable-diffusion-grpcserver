@@ -94,6 +94,26 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
             if request.requested_type != generation_pb2.ARTIFACT_NONE and request.requested_type != generation_pb2.ARTIFACT_IMAGE:
                 self.unimp('Generation of anything except images')
 
+            # Basic parameters
+            params=SN(
+                height=512,
+                width=512,
+                cfg_scale=7.5,
+                eta=0,
+                sampler=None,
+                steps=50,
+                seed=-1,
+                samples=1,
+                strength=0.8
+            )
+
+            for field in vars(params):
+                try:
+                    if request.image.HasField(field):
+                        setattr(params, field, getattr(request.image, field))
+                except Exception as e:
+                    pass
+
             # Extract prompt inputs
             image=None
             inMask=None
@@ -115,6 +135,8 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                     if prompt.artifact.type == generation_pb2.ARTIFACT_IMAGE:
                         image = images.fromPngBytes(prompt.artifact.binary).to(self._manager.mode.device)
                         image = self._handleImageAdjustment(image, prompt.artifact.adjustments)
+                        params.height = image.shape[2]
+                        params.width = image.shape[3]
                     elif prompt.artifact.type == generation_pb2.ARTIFACT_MASK:
                         mask = images.fromPngBytes(prompt.artifact.binary).to(self._manager.mode.device)
                         inMask = self._handleImageAdjustment(mask, prompt.artifact.adjustments)
@@ -126,24 +148,6 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                     else:
                         self.unimp(f"Artifact prompts of type {prompt.artifact.type}")
 
-            params=SN(
-                height=512,
-                width=512,
-                cfg_scale=7.5,
-                eta=0,
-                sampler=None,
-                steps=50,
-                seed=-1,
-                samples=1,
-                strength=0.8
-            )
-
-            for field in vars(params):
-                try:
-                    if request.image.HasField(field):
-                        setattr(params, field, getattr(request.image, field))
-                except Exception as e:
-                    pass
             
             seeds = list(request.image.seed)
 
@@ -167,34 +171,46 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
             context.add_callback(lambda: stop_event.set())
 
             ctr = 0
-            last_seed = -1
+            batchmax = self._manager.batchMode.batchmax(params.width * params.height)
 
-            for _ in range(params.samples):
-                seed = -1
+            # If we weren't given any seeds at all, just start with a single -1
+            if not seeds: seeds = [-1]
 
-                # While we still have seeds from the client, consume them
-                if seeds:
-                    seed = seeds.pop(0)
-                # Or if we have a previous seed, sequentially work from that
-                elif last_seed != -1:
-                    seed = last_seed + 1
+            # Replace any negative seeds with a randomly selected one
+            seeds = [seed if seed >= 0 else random.randrange(0, 2**32-1) for seed in seeds]
 
-                # If either the client passed -1, or they passed nothing & this is our first seed, pick something randomly
-                if seed == -1: 
-                    seed = random.randrange(0, 2**32-1)
+            # Fill seeds up to params.samples if we didn't get passed enough
+            if len(seeds) < params.samples:
+                # Starting with the last seed we were given
+                nextseed = seeds[-1]+1
+                while len(seeds) < params.samples: 
+                    seeds.append(nextseed)
+                    nextseed += 1
 
-                params.seed = last_seed = seed
+            # Calculate the most even possible split across batchmax
+            if params.samples % batchmax == 0:
+                batches = [batchmax] * params.samples // batchmax
+            else:
+                d = params.samples // batchmax + 1
+                batchsize = params.samples // d
+                r = params.samples - batchsize * d
+                batches = [batchsize+1]*r + [batchsize] * (d-r)
+
+            # Loop until we've returned the requested number of images
+            for batch in batches:
+                params.seed, seeds = seeds[:batch], seeds[batch:]
+
                 print(f'Generating {repr(params)}, {"with Image" if image != None else ""}, {"with Mask" if inMask != None else ""}')
-                results = pipe.generate(text=text, negative_text=negative, image=image, mask=inMask, outmask=outMask, params=params, stop_event=stop_event)
+                results = pipe.generate(text=[text]*batch, image=image, mask=inMask, outmask=outMask, params=params, stop_event=stop_event)
 
-                for result_image, nsfw in zip(results[0], results[1]):
+                for i, (result_image, nsfw) in enumerate(zip(results[0], results[1])):
                     answer = generation_pb2.Answer()
                     answer.request_id=request.request_id
                     answer.answer_id=f"{request.request_id}-{ctr}"
                     artifact=image_to_artifact(result_image)
                     artifact.finish_reason=generation_pb2.FILTER if nsfw else generation_pb2.NULL
                     artifact.index=ctr
-                    artifact.seed=seed
+                    artifact.seed=params.seed[i]
                     answer.artifacts.append(artifact)
  
                     yield answer

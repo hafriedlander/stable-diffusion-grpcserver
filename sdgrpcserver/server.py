@@ -25,7 +25,7 @@ sys.path.append(generatedPath)
 
 import generation_pb2_grpc, dashboard_pb2_grpc, engines_pb2_grpc
 
-from sdgrpcserver.manager import EngineMode, EngineManager
+from sdgrpcserver.manager import EngineMode, BatchMode, EngineManager
 from sdgrpcserver.services.dashboard import DashboardServiceServicer
 from sdgrpcserver.services.generate import GenerationServiceServicer
 from sdgrpcserver.services.engines import EnginesServiceServicer
@@ -285,12 +285,25 @@ def main():
     parser.add_argument(
         "--localtunnel", action="store_true", help="Expose HTTP to public internet over localtunnel.me. If you don't specify an access token, setting this option will add one for you."
     )
+    parser.add_argument(
+        "--batch_autodetect", action="store_true", help="Determine the maximum batch size automatically"
+    )
+    parser.add_argument(
+        "--batch_autodetect_margin", type=float, default=os.environ.get("SD_BATCH_AUTODETECT_MARGIN", 0.2), help="The % of memory that should be reserved when autodetecting batch max"
+    )
+    parser.add_argument(
+        "--batch_points", type=str, default=os.environ.get("SD_BATCH_POINTS", None), help="A JSON string of (pixels, batch_max) points, usually the output of running batch_autodetect"
+    )
+    parser.add_argument(
+        "--batch_max", type=int, default=os.environ.get("SD_BATCH_MAX", 1), help="A fixed maximum number of generations to run in a batch. Overriden by batch_points or batch_autodetect if provided."
+    )
     args = parser.parse_args()
 
     args.listen_to_all = args.listen_to_all or 'SD_LISTEN_TO_ALL' in os.environ
     args.enable_mps = args.enable_mps or 'SD_ENABLE_MPS' in os.environ
     args.reload = args.reload or 'SD_RELOAD' in os.environ
     args.localtunnel = args.localtunnel or 'SD_LOCALTUNNEL' in os.environ
+    args.batch_autodetect = args.batch_autodetect or 'SD_BATCH_AUTODETECT' in os.environ
 
     if args.localtunnel and not args.access_token:
         args.access_token = secrets.token_urlsafe(16)
@@ -328,6 +341,7 @@ def main():
             engines, 
             weight_root=args.weight_root,
             mode=EngineMode(vram_optimisation_level=args.vram_optimisation_level, enable_cuda=True, enable_mps=args.enable_mps), 
+            batchMode=BatchMode(autodetect=args.batch_autodetect, points=args.batch_points, simplemax=args.batch_max, safety_margin=args.batch_autodetect_margin),
             nsfw_behaviour=args.nsfw_behaviour
         )
 

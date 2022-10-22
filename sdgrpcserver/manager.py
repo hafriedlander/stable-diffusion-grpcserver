@@ -1,6 +1,7 @@
 
-import os, warnings
-from sdgrpcserver.pipeline.old_schedulers.scheduling_utils import OldSchedulerMixin
+import os, warnings, traceback, math, json
+from types import SimpleNamespace as SN
+
 import torch
 
 from tqdm.auto import tqdm
@@ -22,25 +23,21 @@ from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipeline
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 
 from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
+from sdgrpcserver.pipeline.old_schedulers.scheduling_utils import OldSchedulerMixin
 from sdgrpcserver.pipeline.old_schedulers.scheduling_euler_discrete import EulerDiscreteScheduler
 from sdgrpcserver.pipeline.old_schedulers.scheduling_euler_ancestral_discrete import EulerAncestralDiscreteScheduler
 from sdgrpcserver.pipeline.old_schedulers.scheduling_dpm2_discrete import DPM2DiscreteScheduler
 from sdgrpcserver.pipeline.old_schedulers.scheduling_dpm2_ancestral_discrete import DPM2AncestralDiscreteScheduler
 from sdgrpcserver.pipeline.old_schedulers.scheduling_heun_discrete import HeunDiscreteScheduler
 
-class WithNoop(object):
-    def __enter__(self):
-        pass
-    def __exit__(self, exc_type, exc_value, exc_tb):
-        pass
 
 class ProgressBarWrapper(object):
 
     class InternalTqdm(tqdm):
-        def __init__(self, progress_callback, stop_event, iterable):
+        def __init__(self, progress_callback, stop_event, suppress_output, iterable):
             self._progress_callback = progress_callback
             self._stop_event = stop_event
-            super().__init__(iterable)
+            super().__init__(iterable, disable=suppress_output)
 
         def update(self, n=1):
             displayed = super().update(n)
@@ -54,12 +51,13 @@ class ProgressBarWrapper(object):
                     break
                 yield x
 
-    def __init__(self, progress_callback, stop_event):
+    def __init__(self, progress_callback, stop_event, suppress_output=False):
         self._progress_callback = progress_callback
         self._stop_event = stop_event
+        self._suppress_output = suppress_output
 
     def __call__(self, iterable):
-        return ProgressBarWrapper.InternalTqdm(self._progress_callback, self._stop_event, iterable)
+        return ProgressBarWrapper.InternalTqdm(self._progress_callback, self._stop_event, self._suppress_output, iterable)
     
 
 class EngineMode(object):
@@ -85,6 +83,79 @@ class EngineMode(object):
     @property
     def module_mode(self):
         return "one" if self.device == "cuda" and self._vramO > 2 else "all"
+
+
+class BatchMode:
+    def __init__(self, autodetect=False, points=None, simplemax=1, safety_margin=0.2):
+        self.autodetect = autodetect
+        self.points = json.loads(points) if isinstance(points, str) else points
+        self.simplemax = simplemax
+        self.safety_margin = safety_margin
+    
+    def batchmax(self, pixels):
+        if self.points:
+            # If pixels less than first point, return that max
+            if pixels <= self.points[0][0]: return self.points[0][1]
+
+            # Linear interpolate between bracketing points
+            pairs = zip(self.points[:-1], self.points[1:])
+            for pair in pairs:
+                if pixels >= pair[0][0] and pixels <= pair[1][0]:
+                    i = (pixels - pair[0][0]) / (pair[1][0] - pair[0][0])
+                    return math.floor(pair[0][1] + i * (pair[1][1] - pair[0][1]))
+
+            # Off top of points - assume max of 1
+            return 1
+        
+        if self.simplemax is not None:
+            return self.simplemax
+
+        return 1
+
+    def run_autodetect(self, manager, resmax=2048, resstep=256):
+        torch.cuda.set_per_process_memory_fraction(1-self.safety_margin)
+
+        pipe = manager.getPipe()
+        params = SN(height=512, width=512, cfg_scale=7.5, sampler=generation_pb2.SAMPLER_DDIM, eta=0, steps=8, strength=1, seed=-1)
+
+        l = 32 # Starting value - 512x512 fails inside PyTorch at 32, no amount of VRAM can help
+
+        pixels=[]
+        batchmax=[]
+
+        for x in range(512, resmax, resstep):
+            params.width = x
+            print(f"Determining max batch for {x}")
+            # Quick binary search
+            r = l # Start with the max from the previous run
+            l = 1
+
+            while l < r-1:
+                b = (l+r)//2;
+                print (f"Trying {b}")
+                try:
+                    pipe.generate(["A Crocodile"]*b, params, suppress_output=True)
+                except Exception as e:
+                    traceback.print_exc()
+                    r = b
+                else:
+                    l = b
+            
+            print (f"Max for {x} is {l}")
+
+            pixels.append(params.width * params.height)
+            batchmax.append(l)
+
+            if l == 1:
+                print(f"Max res is {x}x512")
+                break
+            
+
+        self.points=list(zip(pixels, batchmax))
+        print("To save these for next time, use these for batch_points:", json.dumps(self.points))
+
+        torch.cuda.set_per_process_memory_fraction(1.0)
+
 
 class PipelineWrapper(object):
 
@@ -182,7 +253,18 @@ class PipelineWrapper(object):
         self._pipeline.to("cpu", forceAll=True)
         if self.mode.device == "cuda": torch.cuda.empty_cache()
 
-    def generate(self, text, params, image=None, mask=None, outmask=None, negative_text=None, progress_callback=None, stop_event=None):
+    def generate(
+        self, 
+        text, 
+        params, 
+        image=None, 
+        mask=None, 
+        outmask=None, 
+        negative_text=None, 
+        progress_callback=None, 
+        stop_event=None, 
+        suppress_output=False
+    ):
         generator=None
 
         latents_device = "cpu" if self._pipeline.device.type == "mps" else self._pipeline.device
@@ -212,7 +294,7 @@ class PipelineWrapper(object):
             raise NotImplementedError("Scheduler not implemented")
 
         self._pipeline.scheduler = scheduler
-        self._pipeline.progress_bar = ProgressBarWrapper(progress_callback, stop_event)
+        self._pipeline.progress_bar = ProgressBarWrapper(progress_callback, stop_event, suppress_output)
 
         images = self._pipeline(
             prompt=text,
@@ -235,7 +317,7 @@ class PipelineWrapper(object):
 
 class EngineManager(object):
 
-    def __init__(self, engines, weight_root="./weights", mode=EngineMode(), nsfw_behaviour="block"):
+    def __init__(self, engines, weight_root="./weights", mode=EngineMode(), nsfw_behaviour="block", batchMode=BatchMode()):
         self.engines = engines
         self._default = None
         self._pipelines = {}
@@ -245,11 +327,15 @@ class EngineManager(object):
         self._weight_root = weight_root
 
         self._mode = mode
+        self._batchMode = batchMode
         self._nsfw = nsfw_behaviour
         self._token = os.environ.get("HF_API_TOKEN", True)
 
     @property
     def mode(self): return self._mode
+
+    @property
+    def batchMode(self): return self._batchMode
 
     def _getWeightPath(self, remote_path, local_path):
         if local_path:
@@ -307,14 +393,20 @@ class EngineManager(object):
             else:
                 raise Exception(f'Unknown engine class "{engine["class"]}"')
 
+        if self.batchMode.autodetect:
+            self.batchMode.run_autodetect(self)
+
+
     def getStatus(self):
         return {engine["id"]: engine["id"] in self._pipelines for engine in self.engines if engine.get("enabled", True)}
 
-    def getPipe(self, id):
+    def getPipe(self, id=None):
         """
         Get and activate a pipeline
         TODO: Better activate / deactivate logic. Right now we just keep a max of one pipeline active.
         """
+
+        if id is None: id = self._default.id;
 
         # If we're already active, just return it
         if self._active and id == self._active.id: return self._active
