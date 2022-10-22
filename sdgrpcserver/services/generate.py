@@ -188,7 +188,9 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                     nextseed += 1
 
             # Calculate the most even possible split across batchmax
-            if params.samples % batchmax == 0:
+            if params.samples <= batchmax:
+                batches = [params.samples]
+            elif params.samples % batchmax == 0:
                 batches = [batchmax] * params.samples // batchmax
             else:
                 d = params.samples // batchmax + 1
