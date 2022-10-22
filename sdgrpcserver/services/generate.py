@@ -124,7 +124,6 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
             for prompt in request.prompt:
                 which = prompt.WhichOneof("prompt")
                 if which == "text": 
-                    print(prompt, prompt.HasField("parameters"), prompt.parameters.HasField("weight") if prompt.HasField("parameters") else "")
                     if prompt.HasField("parameters") and prompt.parameters.HasField("weight") and prompt.parameters.weight < 0:
                         negative += prompt.text
                     else:
@@ -203,7 +202,7 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                 params.seed, seeds = seeds[:batch], seeds[batch:]
 
                 print(f'Generating {repr(params)}, {"with Image" if image != None else ""}, {"with Mask" if inMask != None else ""}')
-                results = pipe.generate(text=[text]*batch, image=image, mask=inMask, outmask=outMask, params=params, stop_event=stop_event)
+                results = pipe.generate(text=[text]*batch, negative_text=[negative]*batch if negative else None, image=image, mask=inMask, outmask=outMask, params=params, stop_event=stop_event)
 
                 for i, (result_image, nsfw) in enumerate(zip(results[0], results[1])):
                     answer = generation_pb2.Answer()

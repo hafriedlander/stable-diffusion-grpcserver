@@ -22,6 +22,8 @@ from diffusers.utils import deprecate, logging
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 
+from sdgrpcserver.pipeline.lpw_text_embedding import LPWTextEmbedding
+
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 class UnifiedMode(object):
@@ -499,6 +501,42 @@ class NoisePredictor:
 
         return noise_pred
 
+class BasicTextEmbedding():
+
+    def __init__(self, pipe, **kwargs):
+        self.pipe = pipe
+    
+    def _get_embeddedings(self, strings, label):
+        tokenizer = self.pipe.tokenizer
+
+        # get prompt text embeddings
+        text_inputs = tokenizer(
+            strings,
+            padding="max_length",
+            max_length=tokenizer.model_max_length,
+            return_tensors="pt",
+        )
+        text_input_ids = text_inputs.input_ids
+
+        if text_input_ids.shape[-1] > tokenizer.model_max_length:
+            removed_text = tokenizer.batch_decode(text_input_ids[:, tokenizer.model_max_length :])
+            logger.warning(
+                f"The following part of your {label} input was truncated because CLIP can only handle sequences up to "
+                f"{tokenizer.model_max_length} tokens: {removed_text}"
+            )
+            text_input_ids = text_input_ids[:, :tokenizer.model_max_length]
+
+        text_embeddings = self.pipe.text_encoder(text_input_ids.to(self.pipe.device))[0]
+
+        return text_embeddings
+
+    def get_text_embeddings(self, prompt, uncond_prompt):
+        """Prompt and negative a both expected to be lists of strings, and matching in length"""
+        text_embeddings = self._get_embeddedings(prompt, "prompt")
+        uncond_embeddings = self._get_embeddedings(uncond_prompt, "negative prompt") if uncond_prompt else None
+
+        return (text_embeddings, uncond_embeddings)
+
 class UnifiedPipeline(DynamicModuleDiffusionPipeline):
     r"""
     Pipeline for unified image generation using Stable Diffusion.
@@ -608,6 +646,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         eta: Optional[float] = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.FloatTensor] = None,
+        max_embeddings_multiples: Optional[int] = 3,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         run_safety_checker: bool = True,
@@ -675,13 +714,32 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
 
         if isinstance(prompt, str):
             batch_size = 1
+            prompt = [prompt]
         elif isinstance(prompt, list):
             batch_size = len(prompt)
         else:
             raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
 
-        if isinstance(generator, list) and len(generator) != batch_size:
-            raise ValueError(f"Generator passed as a list, but list length does not match batch size of {batch_size}")
+        # Match the negative prompt length to the batch_size
+        if negative_prompt is None:
+            negative_prompt = [""] * batch_size
+        elif isinstance(negative_prompt, str):
+            negative_prompt = [negative_prompt] * batch_size
+        if batch_size != len(negative_prompt):
+            raise ValueError(
+                f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"
+                f" {prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
+                " the batch size of `prompt`."
+            )
+
+        batch_total = batch_size * num_images_per_prompt
+
+        # Match the generator list to the batch_total
+        if isinstance(generator, list) and len(generator) != batch_total:
+            raise ValueError(
+                f"Generator passed as a list, but list length does not match "
+                f"batch size {batch_size} * number of images per prompt {num_images_per_prompt}, i.e. {batch_total}"
+            )
 
         if (callback_steps is None) or (
             callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
@@ -700,75 +758,33 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         # set timesteps
         self.scheduler.set_timesteps(num_inference_steps)
 
-        # get prompt text embeddings
-        text_inputs = self.tokenizer(
-            prompt,
-            padding="max_length",
-            max_length=self.tokenizer.model_max_length,
-            return_tensors="pt",
-        )
-        text_input_ids = text_inputs.input_ids
-
-        if text_input_ids.shape[-1] > self.tokenizer.model_max_length:
-            removed_text = self.tokenizer.batch_decode(text_input_ids[:, self.tokenizer.model_max_length :])
-            logger.warning(
-                "The following part of your input was truncated because CLIP can only handle sequences up to"
-                f" {self.tokenizer.model_max_length} tokens: {removed_text}"
-            )
-            text_input_ids = text_input_ids[:, : self.tokenizer.model_max_length]
-        text_embeddings = self.text_encoder(text_input_ids.to(self.device))[0]
-
-        # duplicate text embeddings for each generation per prompt
-        text_embeddings = text_embeddings.repeat_interleave(num_images_per_prompt, dim=0)
-
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
+
+        text_embedding_calculator = LPWTextEmbedding(self, max_embeddings_multiples=max_embeddings_multiples)
+
         # get unconditional embeddings for classifier free guidance
+        text_embeddings, uncond_embeddings = text_embedding_calculator.get_text_embeddings(
+            prompt=prompt,
+            uncond_prompt=negative_prompt if do_classifier_free_guidance else None,
+        )
+
+        bs_embed, seq_len, _ = text_embeddings.shape
+        text_embeddings = text_embeddings.repeat(1, num_images_per_prompt, 1)
+        text_embeddings = text_embeddings.view(bs_embed * num_images_per_prompt, seq_len, -1)
+
         if do_classifier_free_guidance:
-            uncond_tokens: List[str]
-            if negative_prompt is None:
-                uncond_tokens = [""]
-            elif type(prompt) is not type(negative_prompt):
-                raise TypeError(
-                    "`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
-                    " {type(prompt)}."
-                )
-            elif isinstance(negative_prompt, str):
-                uncond_tokens = [negative_prompt]
-            elif batch_size != len(negative_prompt):
-                raise ValueError(
-                    f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"
-                    f" {prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
-                    " the batch size of `prompt`."
-                )
-            else:
-                uncond_tokens = negative_prompt
-
-            max_length = text_input_ids.shape[-1]
-            uncond_input = self.tokenizer(
-                uncond_tokens,
-                padding="max_length",
-                max_length=max_length,
-                truncation=True,
-                return_tensors="pt",
-            )
-            uncond_embeddings = self.text_encoder(uncond_input.input_ids.to(self.device))[0]
-
-            # duplicate unconditional embeddings for each generation per prompt
-            uncond_embeddings = uncond_embeddings.repeat_interleave(batch_size * num_images_per_prompt, dim=0)
-
-            # For classifier free guidance, we need to do two forward passes.
-            # Here we concatenate the unconditional and text embeddings into a single batch
-            # to avoid doing two forward passes
+            bs_embed, seq_len, _ = uncond_embeddings.shape
+            uncond_embeddings = uncond_embeddings.repeat(1, num_images_per_prompt, 1)
+            uncond_embeddings = uncond_embeddings.view(bs_embed * num_images_per_prompt, seq_len, -1)
             text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
 
-        # Calculate operating mode based on arguments
+        # Get the latents dtype based on the text_embeddings dtype
         latents_dtype = text_embeddings.dtype
-        batch_total = batch_size * num_images_per_prompt
 
-
+        # Calculate operating mode based on arguments
         if mask_image != None: mode_class = EnhancedInpaintMode
         elif init_image != None: mode_class = Img2imgMode
         else: mode_class = Txt2imgMode
@@ -839,11 +855,11 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         image = (image / 2 + 0.5).clamp(0, 1)
 
         if strength <= 1 and outmask_image != None:
-            outmask = torch.cat([outmask_image] * batch_size)
+            outmask = torch.cat([outmask_image] * batch_total)
             outmask = outmask[:, [0,1,2]]
             outmask = outmask.to(self.device)
 
-            source =  torch.cat([init_image] * batch_size)
+            source =  torch.cat([init_image] * batch_total)
             source = source[:, [0,1,2]]
             source = source.to(self.device)
 
