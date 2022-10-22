@@ -136,7 +136,6 @@ class BatchMode:
                 try:
                     pipe.generate(["A Crocodile"]*b, params, suppress_output=True)
                 except Exception as e:
-                    traceback.print_exc()
                     r = b
                 else:
                     l = b
