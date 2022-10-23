@@ -4,7 +4,6 @@ from mimetypes import init
 from typing import Callable, List, Tuple, Optional, Union
 
 import numpy as np
-from sdgrpcserver.pipeline.old_schedulers.scheduling_utils import OldSchedulerMixin
 import torch
 import torchvision
 import torchvision.transforms as T
@@ -22,6 +21,8 @@ from diffusers.utils import deprecate, logging
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 
+from sdgrpcserver import images
+from sdgrpcserver.pipeline.old_schedulers.scheduling_utils import OldSchedulerMixin
 from sdgrpcserver.pipeline.lpw_text_embedding import LPWTextEmbedding
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -33,6 +34,9 @@ class UnifiedMode(object):
 
     def generateLatents(self):
         raise NotImplementedError('Subclasses must implement')
+
+    def prepUnetInput(self, latent_model_input):
+        return latent_model_input, "unet"
 
     def latentStep(self, latents, i, t, steppos):
         return latents
@@ -76,9 +80,8 @@ class Txt2imgMode(UnifiedMode):
         else:
             return latents * self.scheduler.init_noise_sigma
 
-    def timestepsTensor(self):
-        return super().timestepsTensor(0)
-
+    def prepUnetInput(self, latent_model_input):
+        return latent_model_input, "unet"
 
 class Img2imgMode(UnifiedMode):
 
@@ -126,21 +129,44 @@ class Img2imgMode(UnifiedMode):
         # Done
         return tensor
 
-    def _buildInitialLatents(self):
-        init_image = self.init_image.to(device=self.device, dtype=self.latents_dtype)
-        init_latent_dist = self.pipeline.vae.encode(init_image).latent_dist
+    def _convertToLatents(self, image, mask=None):
+        """
+        Convert an RGB image in standard tensor (BCHW, 0..1) format
+        to latents, optionally with pre-masking
 
-        init_latents = torch.cat([
-            init_latent_dist.sample(generator=generator)
+        The output will have a batch for each generator / batch_total
+        
+        If passed, mask must be the same res as the image, and
+        is "black replace, white keep" format (0R1K)
+        """
+        if image.shape[0] != 1: 
+            print(
+                "Warning: image passed to convertToLatents has more than one batch. "
+                "This is probably a mistake"
+            )
+
+        if mask is not None and mask.shape[0] != 1: 
+            print(
+                "Warning: mask passed to convertToLatents has more than one batch. "
+                "This is probably a mistake"
+            )
+
+        image = image.to(device=self.device, dtype=self.latents_dtype)
+        if mask is not None: image = image * (mask > 0.5)
+
+        dist = self.pipeline.vae.encode(image).latent_dist
+
+        latents = torch.cat([
+            dist.sample(generator=generator)
             for generator in self.generators
         ], dim=0)
 
-        init_latents = 0.18215 * init_latents
+        latents = 0.18215 * latents
 
-        return init_latents
+        return latents
 
-        # expand init_latents for batch_size
-        return torch.cat([init_latents] * self.batch_total, dim=0)
+    def _buildInitialLatents(self):
+        return self._convertToLatents(self.init_image)
 
     def _getSchedulerNoiseTimestep(self, i, t = None):
         """Figure out the timestep to pass to scheduler.add_noise
@@ -177,28 +203,58 @@ class Img2imgMode(UnifiedMode):
 
 class MaskProcessorMixin(object):
 
-    def preprocess_mask(self, mask):
+    def preprocess_mask(self, mask, inputIs0K1R=True):
+        """
+        Load a mask from a PIL image
+        """
         mask = mask.convert("L")
-        w, h = mask.size
-        w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
-        mask = mask.resize((w // 8, h // 8), resample=PIL.Image.NEAREST)
         mask = np.array(mask).astype(np.float32) / 255.0
-        mask = np.tile(mask, (4, 1, 1))
-        mask = mask[None].transpose(0, 1, 2, 3)  # what does this step do?
-        mask = 1 - mask  # repaint white, keep black
-        mask = torch.from_numpy(mask)
-        return mask
+        return self.preprocess_mask_tensor(torch.from_numpy(mask), inputIs0K1R=inputIs0K1R)
 
-    def preprocess_mask_tensor(self, tensor):
+    def preprocess_mask_tensor(self, tensor, inputIs0K1R=True):
+        """
+        Preprocess a tensor in 1CHW 0..1 format into a mask in
+        11HW 0..1 0R1K format
+        """
+
         if tensor.ndim == 3: tensor = tensor[None, ...]
-        # Create 4 channels from the R channel
-        tensor = tensor[:, [0, 0, 0, 0]]
-        # Resize to 1/8th normal
-        tensor = T.functional.resize(tensor, [tensor.shape[2]//8, tensor.shape[3]//8], T.InterpolationMode.NEAREST)
-        # Invert
-        tensor = 1 - tensor
+        # Create a single channel, from whichever the first channel is (L or R)
+        tensor = tensor[:, [0]]
+        # Invert if input is 0K1R
+        if inputIs0K1R: tensor = 1 - tensor
         # Done
         return tensor
+
+    def mask_to_latent_mask(self, mask):
+        # Downsample by a factor of 1/8th
+        mask = T.functional.resize(mask, [mask.shape[2]//8, mask.shape[3]//8], T.InterpolationMode.NEAREST)
+        # And make 4 channel to match latent shape
+        mask = mask[:, [0, 0, 0, 0]]
+        # Done
+        return mask
+
+    def round_mask(self, mask, threshold=0.5):
+        """
+        Round mask to either 0 or 1 based on threshold (by default, evenly)
+        """
+        mask = mask.clone()
+        mask[mask >= threshold] = 1
+        mask[mask < 1] = 0
+        return mask
+
+    def round_mask_high(self, mask):
+        """
+        Round mask so anything above 0 is rounded up to 1
+        """
+        return self.round_mask(mask, 0.001)
+
+    def round_mask_low(self, mask):
+        """
+        Round mask so anything below 1 is rounded down to 0
+        """
+        return self.round_mask(mask, 0.999)
+
+
 
 class OriginalInpaintMode(Img2imgMode, MaskProcessorMixin):
 
@@ -226,6 +282,146 @@ class OriginalInpaintMode(Img2imgMode, MaskProcessorMixin):
         init_latents_proper = self.scheduler.add_noise(self.init_latents_orig, self.image_noise, torch.tensor([t]))
         return (init_latents_proper * self.mask) + (latents * (1 - self.mask))
 
+class RunwayInpaintMode(UnifiedMode):
+
+    def __init__(self, pipeline, generator, init_image, mask_image, latents_dtype, batch_total, num_inference_steps, strength, **kwargs):
+        if strength < 0 or strength > 1:
+            raise ValueError(f"The value of strength should in [0.0, 1.0] but is {strength}")
+        
+        super().__init__(**kwargs)
+
+        self.device = pipeline.device
+        self.scheduler = pipeline.scheduler
+        self.pipeline = pipeline
+
+        self.generators = generator if isinstance(generator, list) else [generator] * batch_total
+
+        if isinstance(init_image, PIL.Image.Image):
+            mask, masked_image = self._prepare_mask_and_masked_image(init_image, mask_image)
+        else:
+            mask, masked_image = self._prepare_mask_and_masked_image_tensor(init_image, mask_image)
+
+        height = mask_image.shape[2]
+        width = mask_image.shape[3]
+
+        self.latents_device = "cpu" if self.device.type == "mps" else self.device
+        self.latents_dtype = latents_dtype
+        self.num_channels_latents = self.pipeline.vae.config.latent_channels
+        self.latents_shape = (
+            batch_total, 
+            self.num_channels_latents, 
+            height // 8, 
+            width // 8
+        )
+
+        self.batch_total = batch_total
+        
+        self.offset = self.scheduler.config.get("steps_offset", 0)
+        self.init_timestep = int(num_inference_steps * strength) + self.offset
+        self.init_timestep = min(self.init_timestep, num_inference_steps)
+        self.t_start = max(num_inference_steps - self.init_timestep + self.offset, 0)
+
+
+        # -- Stage 2 prep --
+
+        # prepare mask and masked_image
+        mask = mask.to(device=self.device, dtype=self.latents_dtype)
+        masked_image = masked_image.to(device=self.device, dtype=self.latents_dtype)
+
+        # resize the mask to latents shape as we concatenate the mask to the latents
+        mask = torch.nn.functional.interpolate(mask, size=(height // 8, width // 8))
+
+        # encode the mask image into latents space so we can concatenate it to the latents
+        masked_image_latent_dist = self.pipeline.vae.encode(masked_image).latent_dist
+        
+        masked_image_latents = torch.cat([
+            masked_image_latent_dist.sample(generator=generator)
+            for generator in self.generators
+        ], dim=0)
+        
+        masked_image_latents = 0.18215 * masked_image_latents
+
+        # duplicate mask and masked_image_latents for each generation per prompt, using mps friendly method
+        mask = mask.repeat(batch_total, 1, 1, 1)
+        #masked_image_latents = masked_image_latents.repeat(num_images_per_prompt, 1, 1, 1)
+
+        do_classifier_free_guidance=True # TODO - not this
+
+        mask = torch.cat([mask] * 2) if do_classifier_free_guidance else mask
+        masked_image_latents = (
+            torch.cat([masked_image_latents] * 2) if do_classifier_free_guidance else masked_image_latents
+        )
+
+        num_channels_mask = mask.shape[1]
+        num_channels_masked_image = masked_image_latents.shape[1]
+
+        if self.num_channels_latents + num_channels_mask + num_channels_masked_image != self.pipeline.inpaint_unet.config.in_channels:
+            raise ValueError(
+                f"Incorrect configuration settings! The config of `pipeline.inpaint_unet`: {self.pipeline.inpaint_unet.config} expects"
+                f" {self.pipeline.inpaint_unet.config.in_channels} but received `num_channels_latents`: {self.num_channels_latents} +"
+                f" `num_channels_mask`: {num_channels_mask} + `num_channels_masked_image`: {num_channels_masked_image}"
+                f" = {self.num_channels_latents+num_channels_masked_image+num_channels_mask}. Please verify the config of"
+                " `pipeline.unet` or your `mask_image` or `image` input."
+            )
+
+        self.mask = mask
+        self.masked_image_latents = masked_image_latents
+
+
+
+
+    def _prepare_mask_and_masked_image(image, mask):
+        image = np.array(image.convert("RGB"))
+        image = image[None].transpose(0, 3, 1, 2)
+        image = torch.from_numpy(image).to(dtype=torch.float32) / 127.5 - 1.0
+
+        mask = np.array(mask.convert("L"))
+        mask = mask.astype(np.float32) / 255.0
+        mask = mask[None, None]
+        mask[mask < 0.5] = 0
+        mask[mask >= 0.5] = 1
+        mask = torch.from_numpy(mask)
+
+        masked_image = image * (mask < 0.5)
+
+        return mask, masked_image
+
+    def _prepare_mask_and_masked_image_tensor(self, image_tensor, mask_tensor):
+        # Make sure it's BCHW not just CHW
+        if image_tensor.ndim == 3: image_tensor = image_tensor[None, ...]
+        # Strip any alpha
+        image_tensor = image_tensor[:, [0,1,2]]
+        # Adjust to -1 .. 1
+        image_tensor = 2.0 * image_tensor - 1.0
+
+        # Make sure it's BCHW not just CHW
+        if mask_tensor.ndim == 3: mask_tensor = mask_tensor[None, ...]
+        # Ensure single channel
+        mask_tensor = mask_tensor[:, [0]]
+        # Harden
+        mask_tensor[mask_tensor < 0.5] = 0
+        mask_tensor[mask_tensor >= 0.5] = 1
+
+        masked_image_tensor = image_tensor * (mask_tensor < 0.5)
+
+        return mask_tensor, masked_image_tensor
+
+
+    def generateLatents(self):
+        latents = torch.cat([
+            torch.randn((1, *self.latents_shape[1:]), generator=generator, device=self.latents_device, dtype=self.latents_dtype) 
+            for generator in self.generators
+        ], dim=0)
+
+        # scale the initial noise by the standard deviation required by the scheduler
+        if isinstance(self.scheduler, OldSchedulerMixin): 
+            return latents * self.scheduler.sigmas[0]
+        else:
+            return latents * self.scheduler.init_noise_sigma
+
+    def prepUnetInput(self, latent_model_input):
+        return torch.cat([latent_model_input, self.mask, self.masked_image_latents], dim=1), "inpaint_unet"
+
 class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
 
     def __init__(self, mask_image, num_inference_steps, strength, **kwargs):
@@ -243,25 +439,27 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
 
         self.num_inference_steps = num_inference_steps
 
+        # Load mask in 1K0D, 1CHW L shape
         if isinstance(mask_image, PIL.Image.Image):
             self.mask = self.preprocess_mask(mask_image)
         else:
             self.mask = self.preprocess_mask_tensor(mask_image)
 
-        # check sizes TODO: init_latents isn't stored or available - how to check?
-        #if not self.mask.shape == self.init_latents.shape:
-        #    raise ValueError("The mask and init_image should be the same size!")
-
-
         self.mask = self.mask.to(device=self.device, dtype=self.latents_dtype)
-        self.mask = torch.cat([self.mask] * self.batch_total)
 
-        # Create a mask which is either 1 (for any pixels that aren't pure black) or 0 (for pure black)
-        self.high_mask = (self.mask * 100000).clamp(0, 1).round()
-        # Create a mask which is either 1 (or any pixels that are pure white) or 0 (for any pixels that aren't pure white)
-        self.low_mask = 1-((1-self.mask)*100000).clamp(0, 1).round()
-        # Create a mask which is scaled to allow protected-area depending on how close mask_scale is to 0
-        self.blend_mask = self.mask * self.mask_scale
+        # Remove any excluded pixels (0)
+        high_mask = self.round_mask_high(self.mask)
+        self.init_latents_orig = self._convertToLatents(self.init_image, high_mask)
+        #low_mask = self.round_mask_low(self.mask)
+        #blend_mask = self.mask * self.mask_scale
+
+        self.latent_mask = self.mask_to_latent_mask(self.mask)
+        self.latent_mask = torch.cat([self.latent_mask] * self.batch_total)
+
+        self.latent_high_mask = self.round_mask_high(self.latent_mask)
+        self.latent_low_mask = self.round_mask_low(self.latent_mask)
+        self.latent_blend_mask = self.latent_mask * self.mask_scale
+
 
     def _matchToSD(self, tensor, targetSD):
         # Normalise tensor to -1..1
@@ -306,6 +504,11 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         # 0 == to sampler requested std deviation, 1 == to original image distribution
         match_mode=2
 
+        def latent_mask_for_mode(mode):
+            if mode == 1: return self.latent_low_mask
+            elif mode == 2: return self.latent_mask
+            else: return self.latent_high_mask
+
         # Current theory: if we can match the noise to the image latents, we get a nice well scaled color blend between the two.
         # The nmask mostly adjusts for incorrect scale. With correct scale, nmask hurts more than it helps
 
@@ -316,7 +519,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         masked_latents = init_latents
 
         if lmask_mode > 0:
-            latent_mask = self.low_mask if lmask_mode == 1 else self.mask if lmask_mode == 2 else self.high_mask
+            latent_mask = latent_mask_for_mode(lmask_mode)
             masked_latents = masked_latents * latent_mask
 
         batch_noise = []
@@ -340,7 +543,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
 
             # Make the noise less of a component of the convolution compared to the latent in the unmasked portion
             if nmask_mode > 0:
-                noise_mask = self.low_mask if nmask_mode == 1 else self.mask if nmask_mode == 2 else self.high_mask
+                noise_mask = latent_mask_for_mode(nmask_mode)
                 noise = noise.mul(1-(noise_mask * noise_mask_factor))
 
             # Color the noise by the latent
@@ -359,13 +562,11 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         noise = torch.cat(batch_noise, dim=0)
 
         # And mix resulting noise into the black areas of the mask
-        return (init_latents * self.mask) + (noise * (1 - self.mask))
+        return (init_latents * self.latent_mask) + (noise * (1 - self.latent_mask))
 
     def generateLatents(self):
         # Build initial latents from init_image the same as for img2img
-        init_latents = self._buildInitialLatents()
-        # Save the original latents for re-application in latentStep, but only the portions that definitely have pixel data
-        self.init_latents_orig = init_latents * self.high_mask
+        init_latents = self._buildInitialLatents()       
         # If strength was >=1, filled exposed areas in mask with new, shaped noise
         if self.fill_with_shaped_noise: init_latents = self._fillWithShapedNoise(init_latents)
         # Add the initial noise
@@ -375,12 +576,36 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
 
     def latentStep(self, latents, i, t, steppos):
         # The type shifting here is due to note in Img2img._addInitialNoise
-        init_latents_proper = self.scheduler.add_noise(self.init_latents_orig.to(self.image_noise.dtype), self.image_noise, self._getSchedulerNoiseTimestep(i, t))       
+        init_latents_proper = self.scheduler.add_noise(self.init_latents_orig.to(self.image_noise.dtype), self.image_noise, self._getSchedulerNoiseTimestep(i, t))
         init_latents_proper = init_latents_proper.to(latents.dtype)
 
-        iteration_mask = self.blend_mask.gt(steppos).to(self.blend_mask.dtype)
+        iteration_mask = self.latent_blend_mask.gt(steppos).to(self.latent_blend_mask.dtype)
 
         return (init_latents_proper * iteration_mask) + (latents * (1 - iteration_mask))       
+
+
+class EnhancedRunwayInpaintMode(EnhancedInpaintMode):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        do_classifier_free_guidance=True # TODO - not this
+
+        inpaint_mask = 1 - self.latent_high_mask[:, [0]]
+        self.inpaint_mask = torch.cat([inpaint_mask] * 2) if do_classifier_free_guidance else inpaint_mask
+
+        self.masked_image_latents = self.init_latents_orig
+
+        self.masked_image_latents = (
+            torch.cat([self.masked_image_latents] * 2) if do_classifier_free_guidance else self.self.masked_image_latents
+        )
+
+    def prepUnetInput(self, latent_model_input):
+        return torch.cat([latent_model_input, self.inpaint_mask, self.masked_image_latents], dim=1), "inpaint_unet"
+
+    def latentStep(self, latents, i, t, steppos):
+        if False: return super().latentStep(latents, i, t, steppos)
+        return latents
 
 class DynamicModuleDiffusionPipeline(DiffusionPipeline):
 
@@ -390,7 +615,7 @@ class DynamicModuleDiffusionPipeline(DiffusionPipeline):
 
     def register_modules(self, **kwargs):
         self._modules = set(kwargs.keys())
-        self._modulesDyn = set(("vae", "text_encoder", "unet", "safety_checker"))
+        self._modulesDyn = set(("vae", "text_encoder", "unet", "inpaint_unet", "safety_checker"))
         self._modulesStat = self._modules - self._modulesDyn
 
         super().register_modules(**kwargs)
@@ -464,6 +689,15 @@ class DynamicModuleDiffusionPipeline(DiffusionPipeline):
         self._unet = value
 
     @property 
+    def inpaint_unet(self):
+        a = self.prepmodule("inpaint_unet", self._inpaint_unet)
+        return a
+    
+    @inpaint_unet.setter 
+    def inpaint_unet(self, value):
+        self._inpaint_unet = value
+
+    @property 
     def safety_checker(self):
         return self.prepmodule("safety_checker", self._safety_checker)
     
@@ -474,8 +708,9 @@ class DynamicModuleDiffusionPipeline(DiffusionPipeline):
 
 class NoisePredictor:
 
-    def __init__(self, pipeline, text_embeddings, do_classifier_free_guidance, guidance_scale):
+    def __init__(self, pipeline, mode, text_embeddings, do_classifier_free_guidance, guidance_scale):
         self.pipeline = pipeline
+        self.mode = mode
         self.text_embeddings = text_embeddings
         self.do_classifier_free_guidance = do_classifier_free_guidance
         self.guidance_scale = guidance_scale
@@ -483,6 +718,8 @@ class NoisePredictor:
     def step(self, latents, i, t, sigma = None):
         # expand the latents if we are doing classifier free guidance
         latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+
+        latent_model_input, unet_klass = self.mode.prepUnetInput(latent_model_input)
 
         if isinstance(self.pipeline.scheduler, OldSchedulerMixin): 
             if not sigma: sigma = self.pipeline.scheduler.sigmas[i] 
@@ -492,7 +729,7 @@ class NoisePredictor:
             latent_model_input = self.pipeline.scheduler.scale_model_input(latent_model_input, t)
 
         # predict the noise residual
-        noise_pred = self.pipeline.unet(latent_model_input, t, encoder_hidden_states=self.text_embeddings).sample
+        noise_pred = getattr(self.pipeline, unet_klass)(latent_model_input, t, encoder_hidden_states=self.text_embeddings).sample
 
         # perform guidance
         if self.do_classifier_free_guidance:
@@ -538,6 +775,55 @@ class BasicTextEmbedding():
 
         return (text_embeddings, uncond_embeddings)
 
+class UnifiedPipelinePrompt():
+    def __init__(self, prompts):
+        self._weighted = False
+        self._prompt = self.parse_prompt(prompts)
+
+    def check_tuples(self, list):
+        for item in list:
+            if not isinstance(item, tuple) or len(item) != 2 or not isinstance(item[0], str) or not isinstance(item[1], float):
+                raise ValueError(f"Expected a list of (text, weight) tuples, but got {item} of type {type(item)}")
+            if item[1] != 1.0:
+                self._weighted = True
+
+    def parse_single_prompt(self, prompt):
+        """Parse a single prompt - no lists allowed.
+        Prompt is either a text string, or a list of (text, weight) tuples"""
+
+        if isinstance(prompt, str):
+            return [(prompt, 1.0)]
+        elif isinstance(prompt, list) and isinstance(prompt[0], tuple):
+            self.check_tuples(prompt)
+            return prompt
+
+        raise ValueError(f"Expected a string or a list of tuples, but got {type(prompt)}")
+
+    def parse_prompt(self, prompts):
+        try:
+            return [self.parse_single_prompt(prompts)]
+        except:
+            if isinstance(prompts, list): return [self.parse_single_prompt(prompt) for prompt in prompts]
+
+            raise ValueError(
+                f"Expected a string, a list of strings, a list of (text, weight) tuples or "
+                f"a list of a list of tuples. Got {type(prompts)} instead."
+            )
+                
+    @property
+    def batch_size(self):
+        return len(self._prompt)
+    
+    @property
+    def weighted(self):
+        return self._weighted
+
+    def as_tokens(self):
+        return self._prompt
+
+    def as_unweighted_string(self):
+        return [" ".join([token[0] for token in prompt]) for prompt in self._prompt]
+
 class UnifiedPipeline(DynamicModuleDiffusionPipeline):
     r"""
     Pipeline for unified image generation using Stable Diffusion.
@@ -576,6 +862,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         scheduler: SchedulerMixin,
         safety_checker: StableDiffusionSafetyChecker,
         feature_extractor: CLIPFeatureExtractor,
+        inpaint_unet: Optional[UNet2DConditionModel] = None,
     ):
         super().__init__()
 
@@ -598,6 +885,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
             text_encoder=text_encoder,
             tokenizer=tokenizer,
             unet=unet,
+            inpaint_unet=inpaint_unet,
             scheduler=scheduler,
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
@@ -629,33 +917,6 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         """
         # set slice_size = `None` to disable `attention slicing`
         self.enable_attention_slicing(None)
-
-    def parse_prompts(self, prompts):
-
-        def check_tuples(list):
-            for item in list:
-                if not isinstance(item, tuple) or len(item) != 2 or not isinstance(item[0], str) or not isinstance(item[1], float):
-                    raise ValueError(f"Expected a list of (text, weight) tuples, but got {item} of type {type(item)}")
-
-        def parse_prompt(prompt):
-            if isinstance(prompt, str):
-                return [(prompt, 1.0)]
-            elif isinstance(prompt, list) and isinstance(prompt[0], tuple):
-                check_tuples(prompt)
-                return prompt
-
-            raise ValueError(f"Expected a string or a list of tuples, but got {type(prompt)}")
-
-        try:
-            return [parse_prompt(prompts)]
-        except:
-            if isinstance(prompts, list): return [parse_prompt(prompt) for prompt in prompts]
-
-            raise ValueError(
-                f"Expected a string, a list of strings, a list of (text, weight) tuples or "
-                f"a list of a list of tuples. Got {type(prompts)} instead."
-            )
-
 
     @torch.no_grad()
     def __call__(
@@ -740,16 +1001,16 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
             (nsfw) content, according to the `safety_checker`.
         """
 
-        prompt = self.parse_prompts(prompt)
-        batch_size = len(prompt)
+        prompt = UnifiedPipelinePrompt(prompt)
+        batch_size = prompt.batch_size
 
         # Match the negative prompt length to the batch_size
         if negative_prompt is None:
-            negative_prompt = [[("", 1.0)]] * batch_size
+            negative_prompt = UnifiedPipelinePrompt([[("", 1.0)]] * batch_size)
         else:
-            negative_prompt = self.parse_prompts(negative_prompt)
+            negative_prompt = UnifiedPipelinePrompt(negative_prompt)
 
-        if batch_size != len(negative_prompt):
+        if batch_size != negative_prompt.batch_size:
             raise ValueError(
                 f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"
                 f" {prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
@@ -787,12 +1048,12 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
 
-        text_embedding_calculator = LPWTextEmbedding(self, max_embeddings_multiples=max_embeddings_multiples)
+        text_embedding_calculator = BasicTextEmbedding(self) #LPWTextEmbedding(self, max_embeddings_multiples=max_embeddings_multiples)
 
         # get unconditional embeddings for classifier free guidance
         text_embeddings, uncond_embeddings = text_embedding_calculator.get_text_embeddings(
-            prompt=prompt,
-            uncond_prompt=negative_prompt if do_classifier_free_guidance else None,
+            prompt=prompt.as_tokens(),
+            uncond_prompt=negative_prompt.as_tokens() if do_classifier_free_guidance else None,
         )
 
         bs_embed, seq_len, _ = text_embeddings.shape
@@ -809,7 +1070,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         latents_dtype = text_embeddings.dtype
 
         # Calculate operating mode based on arguments
-        if mask_image != None: mode_class = EnhancedInpaintMode
+        if mask_image != None: mode_class = EnhancedRunwayInpaintMode
         elif init_image != None: mode_class = Img2imgMode
         else: mode_class = Txt2imgMode
 
@@ -830,6 +1091,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         # passed into a scheduler if they need to re-call
         noise_predictor = NoisePredictor(
             pipeline=self, 
+            mode=mode,
             text_embeddings=text_embeddings, 
             do_classifier_free_guidance=do_classifier_free_guidance, guidance_scale=guidance_scale
         )
@@ -868,6 +1130,15 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
             latents = mode.latentStep(latents, t_index, t, i / (timesteps_tensor.shape[0] + 1))
+
+            if False:
+                stage_latents = 1 / 0.18215 * latents
+                stage_image = self.vae.decode(stage_latents).sample
+                stage_image = (stage_image / 2 + 0.5).clamp(0, 1).cpu()
+
+                for j, pngBytes in enumerate(images.toPngBytes(stage_image)):
+                    with open(f"/tests/out/debug-{j}-{i}.png", "wb") as f:
+                        f.write(pngBytes)
 
             # call the callback, if provided
             if callback is not None and i % callback_steps == 0:

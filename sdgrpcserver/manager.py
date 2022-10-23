@@ -13,7 +13,7 @@ print(f"Using xformers: {'yes' if has_xformers() else 'no'}")
 if has_xformers(): attention.CrossAttention = MemoryEfficientCrossAttention
 
 from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler, PNDMScheduler
-from diffusers.models import AutoencoderKL
+from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from diffusers.configuration_utils import FrozenDict
 from diffusers.utils import deprecate
 
@@ -368,18 +368,24 @@ class EngineManager(object):
         for name, opts in engine.get("overrides", {}).items():
             if name == "vae":
                 extra_kwargs["vae"] = self.fromPretrained(AutoencoderKL, opts)
- 
+            elif name == "inpaint_unet":
+                extra_kwargs["inpaint_unet"] = self.fromPretrained(UNet2DConditionModel, opts, {"subfolder": "unet"})
+        
         if engine["class"] == "StableDiffusionPipeline":
+            pipeline=self.fromPretrained(StableDiffusionPipeline, engine, extra_kwargs)
+
             return PipelineWrapper(
                 id=engine["id"],
                 mode=self._mode,
-                pipeline=self.fromPretrained(StableDiffusionPipeline, engine, extra_kwargs)
+                pipeline=pipeline
             )
         elif engine["class"] == "UnifiedPipeline":
+            pipeline = self.fromPretrained(UnifiedPipeline, engine, extra_kwargs)
+
             return PipelineWrapper(
                 id=engine["id"],
                 mode=self._mode,
-                pipeline=self.fromPretrained(UnifiedPipeline, engine, extra_kwargs)
+                pipeline=pipeline
             )
     
     def loadPipelines(self):
