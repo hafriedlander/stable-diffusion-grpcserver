@@ -31,7 +31,7 @@ enabled_debug_latents = [
     # "initial"
     # "step",
     # "mask",
-    #"initnoise"
+    # "initnoise"
 ];
 
 def write_debug_latents(vae, label, i, latents):
@@ -532,8 +532,8 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         batch_noise = []
 
         for generator, split_latents in zip(self.generators, masked_latents.split(1)):
-            # Generate some noise TODO: This might affect the seed?
-            noise = torch.empty_like(split_latents)
+            # Generate some noise
+            noise = torch.zeros_like(split_latents)
             if noise_mode == 0 and noise_mode < 1: noise = noise.normal_(generator=generator, mean=split_latents.mean(), std=split_latents.std())
             elif noise_mode == 1 and noise_mode < 2: noise = noise.cauchy_(generator=generator, median=split_latents.median(), sigma=split_latents.std())
             elif noise_mode == 2:
@@ -555,11 +555,13 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
                 # of the channel. I wish there was a way to do this in PyTorch :shrug:
                 channels = []
                 for channel in split_latents.split(1, dim=1):
-                    good_pixels = channel.masked_select(latent_mask[0, 0].ge(0.5))
+                    good_pixels = channel.masked_select(latent_mask[[0], [0]].ge(0.5))
                     np_mixed = npgen.choice(good_pixels.cpu().numpy(), channel.shape)
                     channels.append(torch.from_numpy(np_mixed).to(noise.device).to(noise.dtype))
 
-                # We can't actually convolve with this noise, we're too close to 
+                # We can't actually convolve with this noise, it ends up flat
+                noise = torch.cat(channels, dim=1)
+                noise = self._matchToSD(noise, 1)
                 batch_noise.append(noise)
                 continue
 
