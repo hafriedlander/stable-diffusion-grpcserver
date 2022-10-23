@@ -31,6 +31,7 @@ enabled_debug_latents = [
     # "initial"
     # "step",
     # "mask",
+    #"initnoise"
 ];
 
 def write_debug_latents(vae, label, i, latents):
@@ -492,16 +493,20 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         return tensor * norm_range + norm_min
 
 
-    def _fillWithShapedNoise(self, init_latents):
+    def _fillWithShapedNoise(self, init_latents, noise_mode=0):
+        """
+        noise_mode sets the noise distribution prior to convolution with the latent
+
+        0: normal, matched to latent, 1: cauchy, matched to latent, 2: log_normal, 
+        3: standard normal (mean=0, std=1), 4: normal to scheduler SD
+        5: random shuffle (does not convolve afterwards)
+        """
+
         # HERE ARE ALL THE THINGS THAT GIVE BETTER OR WORSE RESULTS DEPENDING ON THE IMAGE:
         noise_mask_factor=1 # (1) How much to reduce noise during mask transition
         lmask_mode=3 # 3 (high_mask) seems consistently good. Options are 0 = none, 1 = low mask, 2 = mask as passed, 3 = high mask
         nmask_mode=0 # 1 or 3 seem good, 3 gives good blends slightly more often
         fft_norm_mode="ortho" # forward, backward or ortho. Doesn't seem to affect results too much
-
-        # 0 == normal, matched to latent, 1 == cauchy, matched to latent, 2 == log_normal, 3 == standard normal, mean=0, std=1
-        # 0 sometimes gives the best result, but sometimes it gives artifacts
-        noise_mode=0
 
         # 0 == to sampler requested std deviation, 1 == to original image distribution
         match_mode=2
@@ -542,6 +547,25 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
                     targetSD = self.scheduler.init_noise_sigma
 
                 noise = noise.normal_(generator=generator, mean=0, std=targetSD)
+            elif noise_mode == 5:
+                # Seed the numpy RNG from the batch generator, so it's consistent
+                npseed = torch.randint(low=0, high=torch.iinfo(torch.int32).max, size=[1], generator=generator, device=generator.device, dtype=torch.int32).cpu()
+                npgen = np.random.default_rng(npseed.numpy())
+                # Fill each channel with random pixels selected from the good portion
+                # of the channel. I wish there was a way to do this in PyTorch :shrug:
+                channels = []
+                for channel in split_latents.split(1, dim=1):
+                    good_pixels = channel.masked_select(latent_mask[0, 0].ge(0.5))
+                    np_mixed = npgen.choice(good_pixels.cpu().numpy(), channel.shape)
+                    channels.append(torch.from_numpy(np_mixed).to(noise.device).to(noise.dtype))
+
+                # We can't actually convolve with this noise, we're too close to 
+                batch_noise.append(noise)
+                continue
+
+            elif noise_mode == 6:
+                noise = torch.ones_like(split_latents)
+
 
             # Make the noise less of a component of the convolution compared to the latent in the unmasked portion
             if nmask_mode > 0:
@@ -571,6 +595,9 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         init_latents = self._buildInitialLatents()       
         # If strength was >=1, filled exposed areas in mask with new, shaped noise
         if self.fill_with_shaped_noise: init_latents = self._fillWithShapedNoise(init_latents)
+
+        write_debug_latents(self.pipeline.vae, "initnoise", 0, init_latents)
+
         # Add the initial noise
         init_latents = self._addInitialNoise(init_latents)
         # And return
@@ -602,6 +629,9 @@ class EnhancedRunwayInpaintMode(EnhancedInpaintMode):
         if do_classifier_free_guidance:
             self.inpaint_mask = torch.cat([self.inpaint_mask] * 2)
             self.masked_image_latents = torch.cat([self.masked_image_latents] * 2)
+
+    def _fillWithShapedNoise(self, init_latents):
+        return super()._fillWithShapedNoise(init_latents, noise_mode=5)
 
     def noisePred(self, latent_model_input, t, encoder_hidden_states):
         latent_model_input = torch.cat([latent_model_input, self.inpaint_mask, self.masked_image_latents], dim=1)
