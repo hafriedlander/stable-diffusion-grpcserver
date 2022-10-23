@@ -268,7 +268,7 @@ def main():
         "--vram_optimisation_level", "-V", type=int, default=os.environ.get("SD_VRAM_OPTIMISATION_LEVEL", 2), help="How much to trade off performance to reduce VRAM usage (0 = none, 2 = max)"
     )
     parser.add_argument(
-        "--nsfw_behaviour", "-N", type=str, default=os.environ.get("SD_NSFW_BEHAVIOUR", "block"), choices=["block", "flag"], help="What to do with images detected as NSFW"
+        "--nsfw_behaviour", "-N", type=str, default=os.environ.get("SD_NSFW_BEHAVIOUR", "block"), choices=["block", "flag", "ignore"], help="What to do with images detected as NSFW"
     )
     parser.add_argument(
         "--reload", action="store_true", help="Auto-reload on source change"

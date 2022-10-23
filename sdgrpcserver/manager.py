@@ -15,7 +15,7 @@ if has_xformers(): attention.CrossAttention = MemoryEfficientCrossAttention
 from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler, PNDMScheduler
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from diffusers.configuration_utils import FrozenDict
-from diffusers.utils import deprecate
+from diffusers.utils import deprecate, logging
 
 import generation_pb2
 
@@ -357,13 +357,24 @@ class EngineManager(object):
             if opts.get("has_fp16", True): extra_kwargs["revision"]="fp16"
             extra_kwargs["torch_dtype"]=torch.float16
 
-        return klass.from_pretrained(weight_path, use_auth_token=use_auth_token, **extra_kwargs)
+        # Supress warnings during pipeline load. Unfortunately there isn't a better 
+        # way to override the behaviour (beyond duplicating a huge function)
+        current_log_level = logging.get_verbosity()
+        logging.set_verbosity(logging.ERROR)
+
+        result = klass.from_pretrained(weight_path, use_auth_token=use_auth_token, **extra_kwargs)
+
+        logging.set_verbosity(current_log_level)
+
+        return result
 
     def buildPipeline(self, engine):
         extra_kwargs={}
 
         if self._nsfw == "flag":
             extra_kwargs["safety_checker"] = self.fromPretrained(FlagOnlySafetyChecker, engine, {"subfolder": "safety_checker"})
+        elif self._nsfw == "ignore":
+            extra_kwargs["safety_checker"] = None
 
         for name, opts in engine.get("overrides", {}).items():
             if name == "vae":
@@ -380,6 +391,9 @@ class EngineManager(object):
                 pipeline=pipeline
             )
         elif engine["class"] == "UnifiedPipeline":
+            if "inpaint_unet" not in extra_kwargs: 
+                extra_kwargs["inpaint_unet"] = None
+            
             pipeline = self.fromPretrained(UnifiedPipeline, engine, extra_kwargs)
 
             return PipelineWrapper(

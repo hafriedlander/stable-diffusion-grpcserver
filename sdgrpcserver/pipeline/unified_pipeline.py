@@ -27,6 +27,23 @@ from sdgrpcserver.pipeline.lpw_text_embedding import LPWTextEmbedding
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
+enabled_debug_latents = [
+    # "initial"
+    # "step",
+    # "mask",
+];
+
+def write_debug_latents(vae, label, i, latents):
+    if label not in enabled_debug_latents: return
+
+    stage_latents = 1 / 0.18215 * latents
+    stage_image = vae.decode(stage_latents).sample
+    stage_image = (stage_image / 2 + 0.5).clamp(0, 1).cpu()
+
+    for j, pngBytes in enumerate(images.toPngBytes(stage_image)):
+        with open(f"/tests/out/debug-{label}-{j}-{i}.png", "wb") as f:
+            f.write(pngBytes)
+
 class UnifiedMode(object):
 
     def __init__(self, **_):
@@ -35,8 +52,8 @@ class UnifiedMode(object):
     def generateLatents(self):
         raise NotImplementedError('Subclasses must implement')
 
-    def prepUnetInput(self, latent_model_input):
-        return latent_model_input, "unet"
+    def noisePred(self, latent_model_input, t, encoder_hidden_states):
+        return self.pipeline.unet(latent_model_input, t, encoder_hidden_states=encoder_hidden_states)
 
     def latentStep(self, latents, i, t, steppos):
         return latents
@@ -51,6 +68,7 @@ class Txt2imgMode(UnifiedMode):
 
         self.device = pipeline.device
         self.scheduler = pipeline.scheduler
+        self.pipeline = pipeline
 
         self.generators = generator if isinstance(generator, list) else [generator] * batch_total
 
@@ -79,9 +97,6 @@ class Txt2imgMode(UnifiedMode):
             return latents * self.scheduler.sigmas[0]
         else:
             return latents * self.scheduler.init_noise_sigma
-
-    def prepUnetInput(self, latent_model_input):
-        return latent_model_input, "unet"
 
 class Img2imgMode(UnifiedMode):
 
@@ -254,8 +269,6 @@ class MaskProcessorMixin(object):
         """
         return self.round_mask(mask, 0.999)
 
-
-
 class OriginalInpaintMode(Img2imgMode, MaskProcessorMixin):
 
     def __init__(self, mask_image, **kwargs):
@@ -284,7 +297,7 @@ class OriginalInpaintMode(Img2imgMode, MaskProcessorMixin):
 
 class RunwayInpaintMode(UnifiedMode):
 
-    def __init__(self, pipeline, generator, init_image, mask_image, latents_dtype, batch_total, num_inference_steps, strength, **kwargs):
+    def __init__(self, pipeline, generator, init_image, mask_image, latents_dtype, batch_total, num_inference_steps, strength, do_classifier_free_guidance, **kwargs):
         if strength < 0 or strength > 1:
             raise ValueError(f"The value of strength should in [0.0, 1.0] but is {strength}")
         
@@ -321,7 +334,6 @@ class RunwayInpaintMode(UnifiedMode):
         self.init_timestep = min(self.init_timestep, num_inference_steps)
         self.t_start = max(num_inference_steps - self.init_timestep + self.offset, 0)
 
-
         # -- Stage 2 prep --
 
         # prepare mask and masked_image
@@ -345,8 +357,6 @@ class RunwayInpaintMode(UnifiedMode):
         mask = mask.repeat(batch_total, 1, 1, 1)
         #masked_image_latents = masked_image_latents.repeat(num_images_per_prompt, 1, 1, 1)
 
-        do_classifier_free_guidance=True # TODO - not this
-
         mask = torch.cat([mask] * 2) if do_classifier_free_guidance else mask
         masked_image_latents = (
             torch.cat([masked_image_latents] * 2) if do_classifier_free_guidance else masked_image_latents
@@ -367,24 +377,16 @@ class RunwayInpaintMode(UnifiedMode):
         self.mask = mask
         self.masked_image_latents = masked_image_latents
 
-
-
-
     def _prepare_mask_and_masked_image(image, mask):
         image = np.array(image.convert("RGB"))
         image = image[None].transpose(0, 3, 1, 2)
-        image = torch.from_numpy(image).to(dtype=torch.float32) / 127.5 - 1.0
+        image = torch.from_numpy(image).to(dtype=torch.float32) / 255
 
         mask = np.array(mask.convert("L"))
         mask = mask.astype(np.float32) / 255.0
-        mask = mask[None, None]
-        mask[mask < 0.5] = 0
-        mask[mask >= 0.5] = 1
         mask = torch.from_numpy(mask)
 
-        masked_image = image * (mask < 0.5)
-
-        return mask, masked_image
+        return self._prepare_mask_and_masked_image_tensor(image, mask)
 
     def _prepare_mask_and_masked_image_tensor(self, image_tensor, mask_tensor):
         # Make sure it's BCHW not just CHW
@@ -406,7 +408,6 @@ class RunwayInpaintMode(UnifiedMode):
 
         return mask_tensor, masked_image_tensor
 
-
     def generateLatents(self):
         latents = torch.cat([
             torch.randn((1, *self.latents_shape[1:]), generator=generator, device=self.latents_device, dtype=self.latents_dtype) 
@@ -419,8 +420,9 @@ class RunwayInpaintMode(UnifiedMode):
         else:
             return latents * self.scheduler.init_noise_sigma
 
-    def prepUnetInput(self, latent_model_input):
-        return torch.cat([latent_model_input, self.mask, self.masked_image_latents], dim=1), "inpaint_unet"
+    def noisePred(self, latent_model_input, t, encoder_hidden_states):
+        latent_model_input = torch.cat([latent_model_input, self.mask, self.masked_image_latents], dim=1)
+        return self.pipeline.inpaint_unet(latent_model_input, t, encoder_hidden_states=encoder_hidden_states)
 
 class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
 
@@ -581,27 +583,29 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
 
         iteration_mask = self.latent_blend_mask.gt(steppos).to(self.latent_blend_mask.dtype)
 
+        write_debug_latents(self.pipeline.vae, "mask", i, self.init_latents_orig * iteration_mask)
+
         return (init_latents_proper * iteration_mask) + (latents * (1 - iteration_mask))       
 
 
 class EnhancedRunwayInpaintMode(EnhancedInpaintMode):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, do_classifier_free_guidance, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        do_classifier_free_guidance=True # TODO - not this
-
-        inpaint_mask = 1 - self.latent_high_mask[:, [0]]
-        self.inpaint_mask = torch.cat([inpaint_mask] * 2) if do_classifier_free_guidance else inpaint_mask
-
+        # Runway inpaint unet need mask in B1HW 0K1R format
+        self.inpaint_mask = 1 - self.latent_high_mask[:, [0]]
         self.masked_image_latents = self.init_latents_orig
 
-        self.masked_image_latents = (
-            torch.cat([self.masked_image_latents] * 2) if do_classifier_free_guidance else self.self.masked_image_latents
-        )
+        # Since these are passed into the unet, they need doubling
+        # just like the latents are if we are doing CFG
+        if do_classifier_free_guidance:
+            self.inpaint_mask = torch.cat([self.inpaint_mask] * 2)
+            self.masked_image_latents = torch.cat([self.masked_image_latents] * 2)
 
-    def prepUnetInput(self, latent_model_input):
-        return torch.cat([latent_model_input, self.inpaint_mask, self.masked_image_latents], dim=1), "inpaint_unet"
+    def noisePred(self, latent_model_input, t, encoder_hidden_states):
+        latent_model_input = torch.cat([latent_model_input, self.inpaint_mask, self.masked_image_latents], dim=1)
+        return self.pipeline.inpaint_unet(latent_model_input, t, encoder_hidden_states=encoder_hidden_states)
 
     def latentStep(self, latents, i, t, steppos):
         if False: return super().latentStep(latents, i, t, steppos)
@@ -628,7 +632,8 @@ class DynamicModuleDiffusionPipeline(DiffusionPipeline):
         if torch_device is None:
             return self
 
-        module_names, _ = self.extract_init_dict(dict(self.config))
+        #module_names, _ = self.extract_init_dict(dict(self.config))
+        #print(module_names)
 
         self._moduleDevice = torch.device(torch_device)
 
@@ -719,8 +724,6 @@ class NoisePredictor:
         # expand the latents if we are doing classifier free guidance
         latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
 
-        latent_model_input, unet_klass = self.mode.prepUnetInput(latent_model_input)
-
         if isinstance(self.pipeline.scheduler, OldSchedulerMixin): 
             if not sigma: sigma = self.pipeline.scheduler.sigmas[i] 
             # the model input needs to be scaled to match the continuous ODE formulation in K-LMS
@@ -729,7 +732,9 @@ class NoisePredictor:
             latent_model_input = self.pipeline.scheduler.scale_model_input(latent_model_input, t)
 
         # predict the noise residual
-        noise_pred = getattr(self.pipeline, unet_klass)(latent_model_input, t, encoder_hidden_states=self.text_embeddings).sample
+        noise_pred = self.mode.noisePred(latent_model_input, t, encoder_hidden_states=self.text_embeddings).sample
+
+        #noise_pred = getattr(self.pipeline, unet_klass)(latent_model_input, t, encoder_hidden_states=self.text_embeddings).sample
 
         # perform guidance
         if self.do_classifier_free_guidance:
@@ -1048,7 +1053,8 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
 
-        text_embedding_calculator = BasicTextEmbedding(self) #LPWTextEmbedding(self, max_embeddings_multiples=max_embeddings_multiples)
+        #text_embedding_calculator = BasicTextEmbedding(self)
+        text_embedding_calculator = LPWTextEmbedding(self, max_embeddings_multiples=max_embeddings_multiples)
 
         # get unconditional embeddings for classifier free guidance
         text_embeddings, uncond_embeddings = text_embedding_calculator.get_text_embeddings(
@@ -1070,7 +1076,9 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         latents_dtype = text_embeddings.dtype
 
         # Calculate operating mode based on arguments
-        if mask_image != None: mode_class = EnhancedRunwayInpaintMode
+        if mask_image != None: 
+            if self.inpaint_unet: mode_class = EnhancedRunwayInpaintMode
+            else: mode_class = EnhancedInpaintMode
         elif init_image != None: mode_class = Img2imgMode
         else: mode_class = Txt2imgMode
 
@@ -1078,11 +1086,13 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
             pipeline=self, 
             generator=generator,
             width=width, height=height,
-            init_image=init_image, mask_image=mask_image,
+            init_image=init_image, 
+            mask_image=mask_image,
             latents_dtype=latents_dtype,
             batch_total=batch_total,
             num_inference_steps=num_inference_steps,
-            strength=strength
+            strength=strength,
+            do_classifier_free_guidance=do_classifier_free_guidance
         ) 
 
         print(f"Mode {mode.__class__} with strength {strength}")
@@ -1098,6 +1108,8 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
 
         # Get the initial starting point - either pure random noise, or the source image with some noise depending on mode
         latents = mode.generateLatents()
+
+        write_debug_latents(self.vae, "initial", 0, latents)
 
         # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
         # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
@@ -1131,14 +1143,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
 
             latents = mode.latentStep(latents, t_index, t, i / (timesteps_tensor.shape[0] + 1))
 
-            if False:
-                stage_latents = 1 / 0.18215 * latents
-                stage_image = self.vae.decode(stage_latents).sample
-                stage_image = (stage_image / 2 + 0.5).clamp(0, 1).cpu()
-
-                for j, pngBytes in enumerate(images.toPngBytes(stage_image)):
-                    with open(f"/tests/out/debug-{j}-{i}.png", "wb") as f:
-                        f.write(pngBytes)
+            write_debug_latents(self.vae, "step", i, latents)
 
             # call the callback, if provided
             if callback is not None and i % callback_steps == 0:
@@ -1162,7 +1167,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
 
         numpyImage = image.cpu().permute(0, 2, 3, 1).numpy()
 
-        if run_safety_checker:
+        if run_safety_checker and self.safety_checker is not None:
             # run safety checker
             safety_cheker_input = self.feature_extractor(self.numpy_to_pil(numpyImage), return_tensors="pt").to(self.device)
             numpyImage, has_nsfw_concept = self.safety_checker(images=numpyImage, clip_input=safety_cheker_input.pixel_values.to(text_embeddings.dtype))
