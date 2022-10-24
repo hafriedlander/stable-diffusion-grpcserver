@@ -25,6 +25,7 @@ sys.path.append(generatedPath)
 
 import generation_pb2_grpc, dashboard_pb2_grpc, engines_pb2_grpc
 
+from sdgrpcserver.debug_recorder import DebugRecorder, DebugNullRecorder
 from sdgrpcserver.manager import EngineMode, BatchMode, EngineManager
 from sdgrpcserver.services.dashboard import DashboardServiceServicer
 from sdgrpcserver.services.generate import GenerationServiceServicer
@@ -297,6 +298,9 @@ def main():
     parser.add_argument(
         "--batch_max", type=int, default=os.environ.get("SD_BATCH_MAX", 1), help="A fixed maximum number of generations to run in a batch. Overriden by batch_points or batch_autodetect if provided."
     )
+    parser.add_argument(
+        "--enable_debug_recording", action="store_true", help="Enable collection of debug information for reporting with later. This collection is local only, until you deliberately choose to submit a sample."
+    )
     args = parser.parse_args()
 
     args.listen_to_all = args.listen_to_all or 'SD_LISTEN_TO_ALL' in os.environ
@@ -304,6 +308,7 @@ def main():
     args.reload = args.reload or 'SD_RELOAD' in os.environ
     args.localtunnel = args.localtunnel or 'SD_LOCALTUNNEL' in os.environ
     args.batch_autodetect = args.batch_autodetect or 'SD_BATCH_AUTODETECT' in os.environ
+    args.enable_debug_recording = args.enable_debug_recording or 'SD_ENABLE_DEBUG_RECORDING' in os.environ
 
     if args.localtunnel and not args.access_token:
         args.access_token = secrets.token_urlsafe(16)
@@ -311,6 +316,16 @@ def main():
     if args.reload:
         # start_reloader will only return in a monitored subprocess
         reloader = hupper.start_reloader('sdgrpcserver.server.main', reload_interval=10)
+
+    debug_recorder = DebugNullRecorder()
+
+    if args.enable_debug_recording:
+        debug_recorder = DebugRecorder()
+        print(
+            "You have enabled debug telemetry. "
+            f"This will keep a local recording of all generation actions in the last 10 minutes in the folder '{debug_recorder.storage_path}'. "
+            "See the README.md for how to submit a debug sample for troubleshooting."
+        )
 
     grpc = GrpcServer(args)
     grpc.start()
@@ -347,11 +362,11 @@ def main():
 
         print("Manager loaded")
 
-        generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(manager), grpc.grpc_server)
+        generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(manager, debug_recorder=debug_recorder), grpc.grpc_server)
         dashboard_pb2_grpc.add_DashboardServiceServicer_to_server(DashboardServiceServicer(), grpc.grpc_server)
         engines_pb2_grpc.add_EnginesServiceServicer_to_server(EnginesServiceServicer(manager), grpc.grpc_server)
 
-        generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(manager), http.grpc_server)
+        generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(manager, debug_recorder=debug_recorder), http.grpc_server)
         dashboard_pb2_grpc.add_DashboardServiceServicer_to_server(DashboardServiceServicer(), http.grpc_server)
         engines_pb2_grpc.add_EnginesServiceServicer_to_server(EnginesServiceServicer(manager), http.grpc_server)
 
