@@ -561,7 +561,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
 
                 # We can't actually convolve with this noise, it ends up flat
                 noise = torch.cat(channels, dim=1)
-                noise = self._matchToSD(noise, 1)
+                #noise = self._matchToSD(noise, 1)
                 batch_noise.append(noise)
                 continue
 
