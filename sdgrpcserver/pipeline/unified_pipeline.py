@@ -32,7 +32,7 @@ enabled_debug_latents = [
     # "step",
     # "mask",
     # "initnoise"
-];
+]
 
 def write_debug_latents(vae, label, i, latents):
     if label not in enabled_debug_latents: return
@@ -45,19 +45,61 @@ def write_debug_latents(vae, label, i, latents):
         with open(f"/tests/out/debug-{label}-{j}-{i}.png", "wb") as f:
             f.write(pngBytes)
 
+class NoisePredictor:
+
+    def __init__(self, pipeline, text_embeddings):
+        self.pipeline = pipeline
+        self.text_embeddings = text_embeddings
+
+    def __call__(self, unet, latents, i, t, sigma = None):
+        if isinstance(self.pipeline.scheduler, OldSchedulerMixin): 
+            if sigma is None: sigma = self.pipeline.scheduler.sigmas[i] 
+            # the model input needs to be scaled to match the continuous ODE formulation in K-LMS
+            latents = latents / ((sigma**2 + 1) ** 0.5)
+        else:
+            latents = self.pipeline.scheduler.scale_model_input(latents, t)
+
+        # predict the noise residual
+        noise_pred = unet(latents, t, encoder_hidden_states=self.text_embeddings).sample
+
+        return noise_pred
+
+class GuidedNoisePredictor(NoisePredictor):
+
+    def __init__(self, pipeline, text_embeddings, guidance_scale):
+        super().__init__(pipeline, text_embeddings)
+        self.guidance_scale = guidance_scale
+
+    def __call__(self, unet, latents, i, t, sigma = None):
+        # expand the latents if we are doing classifier free guidance
+        latents = torch.cat([latents] * 2)
+
+        noise_pred = super().__call__(unet, latents, i, t, sigma = sigma)
+
+        # perform guidance
+        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+        noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+        return noise_pred
+
+
 class UnifiedMode(object):
 
-    def __init__(self, **_):
+    def __init__(self, noise_predictor, **_):
         self.t_start = 0
+        self.noise_predictor = noise_predictor
 
     def generateLatents(self):
         raise NotImplementedError('Subclasses must implement')
 
-    def noisePred(self, latent_model_input, t, encoder_hidden_states):
+    def unet(self, latent_model_input, t, encoder_hidden_states):
         return self.pipeline.unet(latent_model_input, t, encoder_hidden_states=encoder_hidden_states)
 
     def latentStep(self, latents, i, t, steppos):
         return latents
+
+    def noise_predict(self, latents, i, t, sigma = None):
+        return self.noise_predictor(self.unet, latents, i, t, sigma = sigma)
 
 class Txt2imgMode(UnifiedMode):
 
@@ -421,7 +463,7 @@ class RunwayInpaintMode(UnifiedMode):
         else:
             return latents * self.scheduler.init_noise_sigma
 
-    def noisePred(self, latent_model_input, t, encoder_hidden_states):
+    def unet(self, latent_model_input, t, encoder_hidden_states):
         latent_model_input = torch.cat([latent_model_input, self.mask, self.masked_image_latents], dim=1)
         return self.pipeline.inpaint_unet(latent_model_input, t, encoder_hidden_states=encoder_hidden_states)
 
@@ -435,7 +477,10 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         # When strength > 1, we start allowing the protected area to change too. Remember that and then set strength
         # to 1 for parent class
         self.fill_with_shaped_noise = strength >= 1.0
-        self.mask_scale = min(2 - strength, 1)
+
+        self.shaped_noise_strength = min(2 - strength, 1)
+        self.mask_scale = 1
+
         strength = min(strength, 1)
 
         super().__init__(strength=strength, num_inference_steps=num_inference_steps, **kwargs)
@@ -493,7 +538,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         return tensor * norm_range + norm_min
 
 
-    def _fillWithShapedNoise(self, init_latents, noise_mode=0):
+    def _fillWithShapedNoise(self, init_latents, noise_mode=5):
         """
         noise_mode sets the noise distribution prior to convolution with the latent
 
@@ -559,9 +604,12 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
                     np_mixed = npgen.choice(good_pixels.cpu().numpy(), channel.shape)
                     channels.append(torch.from_numpy(np_mixed).to(noise.device).to(noise.dtype))
 
-                # We can't actually convolve with this noise, it ends up flat
-                noise = torch.cat(channels, dim=1)
-                #noise = self._matchToSD(noise, 1)
+                # In noise mode 5 we don't convolve. The pixel shuffled noise is already extremely similar to the original in tone. 
+                # We allow the user to request some portion is uncolored noise to allow outpaints that differ greatly from original tone
+                # (with an increasing risk of image discontinuity)
+                noise = noise.normal_(generator=generator)
+                noise = noise * (1-self.shaped_noise_strength) + torch.cat(channels, dim=1) * self.shaped_noise_strength
+
                 batch_noise.append(noise)
                 continue
 
@@ -635,7 +683,7 @@ class EnhancedRunwayInpaintMode(EnhancedInpaintMode):
     def _fillWithShapedNoise(self, init_latents):
         return super()._fillWithShapedNoise(init_latents, noise_mode=5)
 
-    def noisePred(self, latent_model_input, t, encoder_hidden_states):
+    def unet(self, latent_model_input, t, encoder_hidden_states):
         latent_model_input = torch.cat([latent_model_input, self.inpaint_mask, self.masked_image_latents], dim=1)
         return self.pipeline.inpaint_unet(latent_model_input, t, encoder_hidden_states=encoder_hidden_states)
 
@@ -741,39 +789,6 @@ class DynamicModuleDiffusionPipeline(DiffusionPipeline):
     @safety_checker.setter 
     def safety_checker(self, value):
         self._safety_checker = value
-
-
-class NoisePredictor:
-
-    def __init__(self, pipeline, mode, text_embeddings, do_classifier_free_guidance, guidance_scale):
-        self.pipeline = pipeline
-        self.mode = mode
-        self.text_embeddings = text_embeddings
-        self.do_classifier_free_guidance = do_classifier_free_guidance
-        self.guidance_scale = guidance_scale
-
-    def step(self, latents, i, t, sigma = None):
-        # expand the latents if we are doing classifier free guidance
-        latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
-
-        if isinstance(self.pipeline.scheduler, OldSchedulerMixin): 
-            if not sigma: sigma = self.pipeline.scheduler.sigmas[i] 
-            # the model input needs to be scaled to match the continuous ODE formulation in K-LMS
-            latent_model_input = latent_model_input / ((sigma**2 + 1) ** 0.5)
-        else:
-            latent_model_input = self.pipeline.scheduler.scale_model_input(latent_model_input, t)
-
-        # predict the noise residual
-        noise_pred = self.mode.noisePred(latent_model_input, t, encoder_hidden_states=self.text_embeddings).sample
-
-        #noise_pred = getattr(self.pipeline, unet_klass)(latent_model_input, t, encoder_hidden_states=self.text_embeddings).sample
-
-        # perform guidance
-        if self.do_classifier_free_guidance:
-            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-            noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-        return noise_pred
 
 class BasicTextEmbedding():
 
@@ -917,6 +932,10 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
             new_config["steps_offset"] = 1
             scheduler._internal_dict = FrozenDict(new_config)
 
+        # Grafted inpaint uses an inpaint_unet from a different model than the primary model 
+        # as guidance to produce a nicer inpaint that EnhancedInpaintMode otherwise can
+        self._grafted_inpaint = False
+
         self.register_modules(
             vae=vae,
             text_encoder=text_encoder,
@@ -927,6 +946,13 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
         )
+
+    def set_options(self, options):
+        for key, value in options.items():
+            if key == "grafted_inpaint": 
+                self._grafted_inpaint = bool(value)
+            else:
+                raise ValueError(f"Unknown option {key}: {value} passed to UnifiedPipeline")
 
     def enable_attention_slicing(self, slice_size: Optional[Union[str, int]] = "auto"):
         r"""
@@ -1107,12 +1133,26 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         # Get the latents dtype based on the text_embeddings dtype
         latents_dtype = text_embeddings.dtype
 
+        if do_classifier_free_guidance:
+            noise_predictor = GuidedNoisePredictor(self, text_embeddings, guidance_scale)
+        else:
+            noise_predictor = NoisePredictor(self, text_embeddings)
+
+        mode_class = None
+        graft_mode_class = None
+
         # Calculate operating mode based on arguments
         if mask_image != None: 
-            if self.inpaint_unet: mode_class = EnhancedRunwayInpaintMode
-            else: mode_class = EnhancedInpaintMode
-        elif init_image != None: mode_class = Img2imgMode
-        else: mode_class = Txt2imgMode
+            if self.inpaint_unet is not None: 
+                mode_class = EnhancedRunwayInpaintMode
+                if self._grafted_inpaint:
+                    graft_mode_class = EnhancedInpaintMode 
+            else:
+                mode_class = EnhancedInpaintMode
+        elif init_image != None: 
+            mode_class = Img2imgMode
+        else: 
+            mode_class = Txt2imgMode
 
         mode = mode_class(
             pipeline=self, 
@@ -1124,22 +1164,35 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
             batch_total=batch_total,
             num_inference_steps=num_inference_steps,
             strength=strength,
-            do_classifier_free_guidance=do_classifier_free_guidance
+            do_classifier_free_guidance=do_classifier_free_guidance,
+            noise_predictor=noise_predictor,
         ) 
 
-        print(f"Mode {mode.__class__} with strength {strength}")
+        print(f"Mode {mode_class} with strength {strength}")
 
-        # Build the noise predictor. We move this into it's own class so it can be
-        # passed into a scheduler if they need to re-call
-        noise_predictor = NoisePredictor(
-            pipeline=self, 
-            mode=mode,
-            text_embeddings=text_embeddings, 
-            do_classifier_free_guidance=do_classifier_free_guidance, guidance_scale=guidance_scale
-        )
+        graft_mode = None
+
+        if graft_mode_class:
+            graft_mode = graft_mode_class(
+                pipeline=self, 
+                generator=generator,
+                width=width, height=height,
+                init_image=init_image, 
+                mask_image=mask_image,
+                latents_dtype=latents_dtype,
+                batch_total=batch_total,
+                num_inference_steps=num_inference_steps,
+                strength=strength,
+                do_classifier_free_guidance=do_classifier_free_guidance,
+                noise_predictor=noise_predictor,
+            ) 
+
+            print(f"Graft mode {graft_mode_class}")
 
         # Get the initial starting point - either pure random noise, or the source image with some noise depending on mode
         latents = mode.generateLatents()
+        # We don't use the graft_mode initial latents, but the modes expect it to be called
+        if graft_mode is not None: graft_mode.generateLatents() 
 
         write_debug_latents(self.vae, "initial", 0, latents)
 
@@ -1154,7 +1207,6 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         extra_step_kwargs = {}
         if accepts_eta: extra_step_kwargs["eta"] = eta
         if accepts_generator: extra_step_kwargs["generator"] = generator[0] if isinstance(generator, list) else generator
-        if accepts_noise_predictor: extra_step_kwargs["noise_predictor"] = noise_predictor.step
 
         t_start = mode.t_start
 
@@ -1163,17 +1215,34 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         for i, t in enumerate(self.progress_bar(timesteps_tensor)):
             t_index = t_start + i
 
-            # predict the noise residual
-            noise_pred = noise_predictor.step(latents, t_index, t)
+            outputs = []
+            for m in [mode, graft_mode]:
+                if not m: continue
 
-            # compute the previous noisy sample x_t -> x_t-1
+                # predict the noise residual
+                noise_pred = m.noise_predict(latents, t_index, t)
 
-            if isinstance(self.scheduler, OldSchedulerMixin): 
-                latents = self.scheduler.step(noise_pred, t_index, latents, **extra_step_kwargs).prev_sample
-            else:
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+                # compute the previous noisy sample x_t -> x_t-1
+                if accepts_noise_predictor: extra_step_kwargs["noise_predictor"] = m.noise_predict
 
-            latents = mode.latentStep(latents, t_index, t, i / (timesteps_tensor.shape[0] + 1))
+                if isinstance(self.scheduler, OldSchedulerMixin): 
+                    output = self.scheduler.step(noise_pred, t_index, latents, **extra_step_kwargs).prev_sample
+                else:
+                    output = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+
+                output = m.latentStep(output, t_index, t, i / (timesteps_tensor.shape[0] + 1))
+
+                outputs.append(output)
+
+            if len(outputs) == 1:
+                latents = outputs[0]
+
+            elif len(outputs) == 2:
+                randmap = torch.rand(latents.shape, dtype=latents.dtype, generator=generator[0], device=generator[0].device).to(latents.device)
+
+                # Linear blend between base and graft
+                p = max(0, t/1000)
+                latents = torch.where(randmap >= p, outputs[1], outputs[0])
 
             write_debug_latents(self.vae, "step", i, latents)
 
@@ -1186,7 +1255,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
 
         image = (image / 2 + 0.5).clamp(0, 1)
 
-        if strength <= 1 and outmask_image != None:
+        if outmask_image != None:
             outmask = torch.cat([outmask_image] * batch_total)
             outmask = outmask[:, [0,1,2]]
             outmask = outmask.to(self.device)

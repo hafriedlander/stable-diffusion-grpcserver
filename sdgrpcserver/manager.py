@@ -396,6 +396,9 @@ class EngineManager(object):
             
             pipeline = self.fromPretrained(UnifiedPipeline, engine, extra_kwargs)
 
+            pipeline_options = engine.get('options', False)
+            if pipeline_options: pipeline.set_options(pipeline_options)
+
             return PipelineWrapper(
                 id=engine["id"],
                 mode=self._mode,
