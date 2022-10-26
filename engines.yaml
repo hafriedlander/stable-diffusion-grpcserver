@@ -19,6 +19,27 @@
       model: "stabilityai/sd-vae-ft-ema"
       local_model: "./sd-vae-ft-ema"
       has_fp16: False
+- id: "stable-diffusion-v1-5-clip"
+  enabled: True
+  visible: True
+  name: "Stable Diffusion V1.5 CLIP guided"
+  description: "Stable Diffusion using the RunwayML model, CLIP guidance and our Unified pipeline"
+  class: "UnifiedPipeline"
+  model: "runwayml/stable-diffusion-v1-5"
+  local_model: "./stable-diffusion-v1-5"
+  local_model_fp16: "./stable-diffusion-v1-5-fp16"
+  use_auth_token: True
+  # It's important CLIP guided models don't borrow unet or vae from anyone
+  borrow:
+    "stable-diffusion-v1-5": [ "feature_extractor", "safety_checker", "scheduler", "text_encoder", "tokenizer", "inpaint_unet"]
+  overrides:
+    clip_model:
+      model: "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
+      has_fp16: False
+    vae: 
+      model: "stabilityai/sd-vae-ft-ema"
+      local_model: "./sd-vae-ft-ema"
+      has_fp16: False
 - id: "waifu-diffusion-v1-3"
   enabled: True
   visible: True

@@ -10,12 +10,12 @@ import torchvision.transforms as T
 
 import PIL
 from tqdm.auto import tqdm
-from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
+from transformers import CLIPFeatureExtractor, CLIPModel, CLIPTextModel, CLIPTokenizer
 
 from diffusers.configuration_utils import FrozenDict
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from diffusers.pipeline_utils import DiffusionPipeline
-from diffusers.schedulers import LMSDiscreteScheduler
+from diffusers.schedulers import LMSDiscreteScheduler, PNDMScheduler
 from diffusers.schedulers.scheduling_utils import SchedulerMixin
 from diffusers.utils import deprecate, logging
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
@@ -82,6 +82,133 @@ class GuidedNoisePredictor(NoisePredictor):
 
         return noise_pred
 
+class MakeCutouts(torch.nn.Module):
+    def __init__(self, cut_size, cut_power=1.0):
+        super().__init__()
+
+        self.cut_size = cut_size
+        self.cut_power = cut_power
+
+    def forward(self, pixel_values, num_cutouts):
+        sideY, sideX = pixel_values.shape[2:4]
+        max_size = min(sideX, sideY)
+        min_size = min(sideX, sideY, self.cut_size)
+        cutouts = []
+        for _ in range(num_cutouts):
+            size = int(torch.rand([]) ** self.cut_power * (max_size - min_size) + min_size)
+            offsetx = torch.randint(0, sideX - size + 1, ())
+            offsety = torch.randint(0, sideY - size + 1, ())
+            cutout = pixel_values[:, :, offsety : offsety + size, offsetx : offsetx + size]
+            cutouts.append(torch.nn.functional.adaptive_avg_pool2d(cutout, self.cut_size))
+        return torch.cat(cutouts)
+
+
+def spherical_dist_loss(x, y):
+    x = torch.nn.functional.normalize(x, dim=-1)
+    y = torch.nn.functional.normalize(y, dim=-1)
+    return (x - y).norm(dim=-1).div(2).arcsin().pow(2).mul(2)
+
+class ClipGuidedNoisePredictor(GuidedNoisePredictor):
+
+    def __init__(self, text_embeddings_clip, clip_guidance_scale, num_cutouts, use_cutouts, **kwargs):
+        super().__init__(**kwargs)
+
+        self.text_embeddings_clip = text_embeddings_clip
+        self.clip_guidance_scale = clip_guidance_scale
+        self.num_cutouts = num_cutouts
+        self.use_cutouts = use_cutouts
+    
+        self.normalize = T.Normalize(mean=self.pipeline.feature_extractor.image_mean, std=self.pipeline.feature_extractor.image_std)
+        self.make_cutouts = MakeCutouts(self.pipeline.feature_extractor.size)
+
+
+    def __call__(self, unet, latents, i, t, sigma = None):
+        noise_pred = super().__call__(unet, latents, i, t, sigma = sigma)
+
+        text_embeddings_for_guidance = (
+            self.text_embeddings.chunk(2)[1]
+        )
+
+        return self.cond_fn(
+            unet,
+            latents,
+            t,
+            i,
+            text_embeddings_for_guidance,
+            noise_pred,
+            self.text_embeddings_clip,
+            self.clip_guidance_scale,
+            self.num_cutouts,
+            self.use_cutouts,
+        )
+
+    @torch.enable_grad()
+    def cond_fn(
+        self,
+        unet,
+        latents,
+        timestep,
+        index,
+        text_embeddings,
+        noise_pred_original,
+        text_embeddings_clip,
+        clip_guidance_scale,
+        num_cutouts,
+        use_cutouts=True,
+    ):
+        latents = latents.detach().requires_grad_()
+
+        if isinstance(self.pipeline.scheduler, OldSchedulerMixin):
+            sigma = self.pipeline.scheduler.sigmas[index]
+            latent_model_input = latents / ((sigma**2 + 1) ** 0.5)
+        else:
+            latent_model_input = latents        
+
+        # predict the noise residual
+        noise_pred = unet(latent_model_input, timestep, encoder_hidden_states=text_embeddings).sample
+
+        if isinstance(self.pipeline.scheduler, PNDMScheduler):
+            alpha_prod_t = self.pipeline.scheduler.alphas_cumprod[timestep]
+            beta_prod_t = 1 - alpha_prod_t
+            # compute predicted original sample from predicted noise also called
+            # "predicted x_0" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
+            pred_original_sample = (latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
+
+            fac = torch.sqrt(beta_prod_t)
+            sample = pred_original_sample * (fac) + latents * (1 - fac)
+        elif isinstance(self.pipeline.scheduler, OldSchedulerMixin):
+            # And calculate the output
+            sample = latents - sigma * noise_pred
+        else:
+            raise ValueError(f"scheduler type {type(self.pipeline.scheduler)} not supported")
+
+        sample = 1 / 0.18215 * sample
+        image = self.pipeline.vae.decode(sample).sample
+        image = (image / 2 + 0.5).clamp(0, 1)
+
+        if use_cutouts:
+            image = self.make_cutouts(image, num_cutouts)
+        else:
+            image = T.Resize(self.pipeline.feature_extractor.size)(image)
+        image = self.normalize(image).to(latents.dtype)
+
+        image_embeddings_clip = self.pipeline.clip_model.get_image_features(image)
+        image_embeddings_clip = image_embeddings_clip / image_embeddings_clip.norm(p=2, dim=-1, keepdim=True)
+
+        if use_cutouts:
+            dists = spherical_dist_loss(image_embeddings_clip, text_embeddings_clip)
+            dists = dists.view([num_cutouts, sample.shape[0], -1])
+            loss = dists.sum(2).mean(0).sum() * clip_guidance_scale
+        else:
+            loss = spherical_dist_loss(image_embeddings_clip, text_embeddings_clip).mean() * clip_guidance_scale
+
+        grads = -torch.autograd.grad(loss, latents)[0]
+
+        if isinstance(self.pipeline.scheduler, PNDMScheduler):
+            return noise_pred_original - torch.sqrt(beta_prod_t) * grads
+        else:
+            latents = latents.detach() + grads * (sigma**2)
+            return noise_pred_original, latents
 
 class UnifiedMode(object):
 
@@ -876,6 +1003,12 @@ class UnifiedPipelinePrompt():
     def as_unweighted_string(self):
         return [" ".join([token[0] for token in prompt]) for prompt in self._prompt]
 
+
+def set_requires_grad(model, value):
+    for param in model.parameters():
+        param.requires_grad = value
+
+
 class UnifiedPipeline(DynamicModuleDiffusionPipeline):
     r"""
     Pipeline for unified image generation using Stable Diffusion.
@@ -914,6 +1047,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         scheduler: SchedulerMixin,
         safety_checker: StableDiffusionSafetyChecker,
         feature_extractor: CLIPFeatureExtractor,
+        clip_model: Optional[CLIPModel] = None,
         inpaint_unet: Optional[UNet2DConditionModel] = None,
     ):
         super().__init__()
@@ -935,7 +1069,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         # Grafted inpaint uses an inpaint_unet from a different model than the primary model 
         # as guidance to produce a nicer inpaint that EnhancedInpaintMode otherwise can
         self._grafted_inpaint = False
-        self._graft_factor = 0.7
+        self._graft_factor = 0.8
 
         self.register_modules(
             vae=vae,
@@ -946,7 +1080,15 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
             scheduler=scheduler,
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
+            clip_model=clip_model
         )
+
+        if self.clip_model is not None:
+            set_requires_grad(self.text_encoder, False)
+            set_requires_grad(self.clip_model, False)
+
+            set_requires_grad(self.unet, True)
+            set_requires_grad(self.vae, True)
 
     def set_options(self, options):
         for key, value in options.items():
@@ -1007,6 +1149,10 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         run_safety_checker: bool = True,
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
+        clip_guidance_scale: Optional[float] = 100,
+        clip_prompt: Optional[Union[str, List[str]]] = None,
+        num_cutouts: Optional[int] = 4,
+        use_cutouts: Optional[bool] = False,
         **kwargs,
     ):
         r"""
@@ -1133,13 +1279,43 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
             uncond_embeddings = uncond_embeddings.view(bs_embed * num_images_per_prompt, seq_len, -1)
             text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
 
+        if self.clip_model is not None and clip_guidance_scale > 0:
+            clip_text_input = self.tokenizer(
+                clip_prompt if clip_prompt is not None else prompt.as_unweighted_string(),
+                padding="max_length",
+                max_length=self.tokenizer.model_max_length,
+                truncation=True,
+                return_tensors="pt",
+            ).input_ids.to(self.device)
+
+            text_embeddings_clip = self.clip_model.get_text_features(clip_text_input)
+            text_embeddings_clip = text_embeddings_clip / text_embeddings_clip.norm(p=2, dim=-1, keepdim=True)
+            # duplicate text embeddings clip for each generation per prompt
+            text_embeddings_clip = text_embeddings_clip.repeat_interleave(num_images_per_prompt, dim=0)
+
+            noise_predictor = ClipGuidedNoisePredictor(
+                pipeline=self, 
+                text_embeddings=text_embeddings,
+                guidance_scale=guidance_scale,
+                text_embeddings_clip=text_embeddings_clip, 
+                clip_guidance_scale=clip_guidance_scale, 
+                num_cutouts=num_cutouts, 
+                use_cutouts=use_cutouts,
+            )
+
+        elif do_classifier_free_guidance:
+            noise_predictor = GuidedNoisePredictor(
+                pipeline=self, 
+                text_embeddings=text_embeddings, 
+                guidance_scale=guidance_scale)
+        else:
+            noise_predictor = NoisePredictor(
+                pipeline=self, 
+                text_embeddings=text_embeddings
+            )
+
         # Get the latents dtype based on the text_embeddings dtype
         latents_dtype = text_embeddings.dtype
-
-        if do_classifier_free_guidance:
-            noise_predictor = GuidedNoisePredictor(self, text_embeddings, guidance_scale)
-        else:
-            noise_predictor = NoisePredictor(self, text_embeddings)
 
         mode_class = None
         graft_mode_class = None
@@ -1156,9 +1332,6 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
             mode_class = Img2imgMode
         else: 
             mode_class = Txt2imgMode
-
-        blendpow=strength
-        strength=1.0
 
         mode = mode_class(
             pipeline=self, 
@@ -1227,6 +1400,8 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
 
                 # predict the noise residual
                 noise_pred = m.noise_predict(latents, t_index, t)
+                # TODO: kind of a hack, deal with CLIP predictor returning latents too
+                if isinstance(noise_pred, tuple): noise_pred, latents = noise_pred
 
                 # compute the previous noisy sample x_t -> x_t-1
                 if accepts_noise_predictor: extra_step_kwargs["noise_predictor"] = m.noise_predict
@@ -1235,6 +1410,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
                     output = self.scheduler.step(noise_pred, t_index, latents, **extra_step_kwargs).prev_sample
                 else:
                     output = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+
 
                 output = m.latentStep(output, t_index, t, i / (timesteps_tensor.shape[0] + 1))
 
@@ -1248,7 +1424,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
 
                 # Linear blend between base and graft
                 p = max(0, t/1000)
-                p = p ** blendpow
+                p = p ** self._graft_factor
                 latents = torch.where(randmap >= p, outputs[1], outputs[0])
 
             write_debug_latents(self.vae, "step", i, latents)

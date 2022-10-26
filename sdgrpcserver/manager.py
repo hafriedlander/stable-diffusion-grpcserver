@@ -15,6 +15,7 @@ from sdgrpcserver.pipeline.fastattention import has_xformers, MemoryEfficientCro
 print(f"Using xformers: {'yes' if has_xformers() else 'no'}")
 if has_xformers(): attention.CrossAttention = MemoryEfficientCrossAttention
 
+from transformers import CLIPFeatureExtractor, CLIPModel
 from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler, PNDMScheduler
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from diffusers.configuration_utils import FrozenDict
@@ -417,7 +418,9 @@ class EngineManager(object):
 
         raise EnvironmentError("\n".join(failures))
 
-    def fromPretrained(self, klass, opts, extra_kwargs = {}):
+    def fromPretrained(self, klass, opts, extra_kwargs = None):
+        if extra_kwargs is None: extra_kwargs = {}
+
         use_auth_token=self._token if opts.get("use_auth_token", False) else False
 
         weight_path=self._getWeightPath(opts)
@@ -454,6 +457,9 @@ class EngineManager(object):
                 extra_kwargs["vae"] = self.fromPretrained(AutoencoderKL, opts)
             elif name == "inpaint_unet":
                 extra_kwargs["inpaint_unet"] = self.fromPretrained(UNet2DConditionModel, {**opts, "subfolder": "unet"})
+            elif name == "clip_model":
+                extra_kwargs["clip_model"] = self.fromPretrained(CLIPModel, opts)
+                extra_kwargs["feature_extractor"] = self.fromPretrained(CLIPFeatureExtractor, opts)
         
         pipeline = None
 
@@ -463,6 +469,8 @@ class EngineManager(object):
         elif engine["class"] == "UnifiedPipeline":
             if "inpaint_unet" not in extra_kwargs: 
                 extra_kwargs["inpaint_unet"] = None
+            if "clip_model" not in extra_kwargs: 
+                extra_kwargs["clip_model"] = None
             
             pipeline = self.fromPretrained(UnifiedPipeline, engine, extra_kwargs)
 
@@ -487,7 +495,7 @@ class EngineManager(object):
             engineid = engine["id"]
             if engine.get("default", False): self._default = engineid
 
-            print("  "+engineid)
+            print("  -"+engineid+"...")
 
             self._internal_pipelines[engineid] = pipeline = self.buildPipeline(engine)
 
