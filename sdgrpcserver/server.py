@@ -250,57 +250,69 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    parser.add_argument(
-        "--enginecfg", "-E", type=str, default=os.environ.get("SD_ENGINECFG", "./engines.yaml"), help="Path to the engines.yaml file"
-    )
-    parser.add_argument(
+    generation_opts = parser.add_argument_group('generation')
+    networking_opts = parser.add_argument_group('networking')
+    util_opts = parser.add_argument_group('utility')
+    batch_opts = parser.add_argument_group('generation batch control')
+
+    networking_opts.add_argument(
         "--listen_to_all", "-L", action='store_true', help="Accept requests from the local network, not just localhost" 
     )
-    parser.add_argument(
+    networking_opts.add_argument(
         "--grpc_port", type=int, default=os.environ.get("SD_GRPC_PORT", 50051), help="Set the port for GRPC to run on"
     )
-    parser.add_argument(
+    networking_opts.add_argument(
         "--http_port", type=int, default=os.environ.get("SD_HTTP_PORT", 5000), help="Set the port for HTTP (GRPC-WEB and static files if configured) to run on"
     )
-    parser.add_argument(
-        "--enable_mps", action="store_true", help="Use MPS on MacOS where available"
-    )
-    parser.add_argument(
-        "--vram_optimisation_level", "-V", type=int, default=os.environ.get("SD_VRAM_OPTIMISATION_LEVEL", 2), help="How much to trade off performance to reduce VRAM usage (0 = none, 2 = max)"
-    )
-    parser.add_argument(
-        "--nsfw_behaviour", "-N", type=str, default=os.environ.get("SD_NSFW_BEHAVIOUR", "block"), choices=["block", "flag", "ignore"], help="What to do with images detected as NSFW"
-    )
-    parser.add_argument(
-        "--reload", action="store_true", help="Auto-reload on source change"
-    )
-    parser.add_argument(
-        "--weight_root", "-W", type=str, default=os.environ.get("SD_WEIGHT_ROOT", "./weights"), help="Path that local weight in engine.yaml are relative to"
-    )
-    parser.add_argument(
-        "--http_file_root", type=str, default=os.environ.get("SD_HTTP_FILE_ROOT", ""), help="Set this to the root of a filestructure to serve that via the HTTP server (in addition to the GRPC-WEB handler)"
-    )
-    parser.add_argument(
+    networking_opts.add_argument(
         "--access_token", type=str, default=os.environ.get("SD_ACCESS_TOKEN", None), help="Set a single access token that must be provided to access this server" 
     )
-    parser.add_argument(
+    networking_opts.add_argument(
         "--localtunnel", action="store_true", help="Expose HTTP to public internet over localtunnel.me. If you don't specify an access token, setting this option will add one for you."
     )
-    parser.add_argument(
+
+    generation_opts.add_argument(
+        "--enginecfg", "-E", type=str, default=os.environ.get("SD_ENGINECFG", "./engines.yaml"), help="Path to the engines.yaml file"
+    )
+    generation_opts.add_argument(
+        "--weight_root", "-W", type=str, default=os.environ.get("SD_WEIGHT_ROOT", "./weights"), help="Path that local weights in engine.yaml are relative to"
+    )
+    generation_opts.add_argument(
+        "--refresh_models", "-r", type=str, default=os.environ.get("SD_REFRESH_MODELS", None), help="'*' or a comma-seperated list of model path globs to refresh even if a local cache exists (missing models will always be downloaded)"
+    )
+    generation_opts.add_argument(
+        "--vram_optimisation_level", "-V", type=int, default=os.environ.get("SD_VRAM_OPTIMISATION_LEVEL", 2), help="How much to trade off performance to reduce VRAM usage (0 = none, 2 = max)"
+    )
+    generation_opts.add_argument(
+        "--nsfw_behaviour", "-N", type=str, default=os.environ.get("SD_NSFW_BEHAVIOUR", "block"), choices=["block", "flag", "ignore"], help="What to do with images detected as NSFW"
+    )
+    generation_opts.add_argument(
+        "--enable_mps", action="store_true", help="Use MPS on MacOS where available"
+    )
+
+    batch_opts.add_argument(
         "--batch_autodetect", action="store_true", help="Determine the maximum batch size automatically"
     )
-    parser.add_argument(
-        "--batch_autodetect_margin", type=float, default=os.environ.get("SD_BATCH_AUTODETECT_MARGIN", 0.2), help="The % of memory that should be reserved when autodetecting batch max"
+    batch_opts.add_argument(
+        "--batch_autodetect_margin", type=float, default=os.environ.get("SD_BATCH_AUTODETECT_MARGIN", 0.2), help="The fraction of memory that should be reserved when autodetecting batch max"
     )
-    parser.add_argument(
+    batch_opts.add_argument(
         "--batch_points", type=str, default=os.environ.get("SD_BATCH_POINTS", None), help="A JSON string of (pixels, batch_max) points, usually the output of running batch_autodetect"
     )
-    parser.add_argument(
+    batch_opts.add_argument(
         "--batch_max", type=int, default=os.environ.get("SD_BATCH_MAX", 1), help="A fixed maximum number of generations to run in a batch. Overriden by batch_points or batch_autodetect if provided."
     )
-    parser.add_argument(
+
+    util_opts.add_argument(
+        "--reload", action="store_true", help="Auto-reload on source change"
+    )
+    util_opts.add_argument(
+        "--http_file_root", type=str, default=os.environ.get("SD_HTTP_FILE_ROOT", ""), help="Set this to the root of a filestructure to serve that via the HTTP server (in addition to the GRPC-WEB handler)"
+    )
+    util_opts.add_argument(
         "--enable_debug_recording", action="store_true", help="Enable collection of debug information for reporting with later. This collection is local only, until you deliberately choose to submit a sample."
     )
+
     args = parser.parse_args()
 
     args.listen_to_all = args.listen_to_all or 'SD_LISTEN_TO_ALL' in os.environ
@@ -355,6 +367,7 @@ def main():
         manager = EngineManager(
             engines, 
             weight_root=args.weight_root,
+            refresh_models= re.split('\s*,\s*', args.refresh_models.strip()) if args.refresh_models else None,
             mode=EngineMode(vram_optimisation_level=args.vram_optimisation_level, enable_cuda=True, enable_mps=args.enable_mps), 
             batchMode=BatchMode(autodetect=args.batch_autodetect, points=args.batch_points, simplemax=args.batch_max, safety_margin=args.batch_autodetect_margin),
             nsfw_behaviour=args.nsfw_behaviour

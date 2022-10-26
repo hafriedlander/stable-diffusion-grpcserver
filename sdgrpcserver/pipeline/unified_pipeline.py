@@ -935,6 +935,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         # Grafted inpaint uses an inpaint_unet from a different model than the primary model 
         # as guidance to produce a nicer inpaint that EnhancedInpaintMode otherwise can
         self._grafted_inpaint = False
+        self._graft_factor = 0.7
 
         self.register_modules(
             vae=vae,
@@ -951,6 +952,8 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         for key, value in options.items():
             if key == "grafted_inpaint": 
                 self._grafted_inpaint = bool(value)
+            elif key == "graft_factor": 
+                self._graft_factor = float(value)
             else:
                 raise ValueError(f"Unknown option {key}: {value} passed to UnifiedPipeline")
 
@@ -1154,6 +1157,9 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         else: 
             mode_class = Txt2imgMode
 
+        blendpow=strength
+        strength=1.0
+
         mode = mode_class(
             pipeline=self, 
             generator=generator,
@@ -1242,6 +1248,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
 
                 # Linear blend between base and graft
                 p = max(0, t/1000)
+                p = p ** blendpow
                 latents = torch.where(randmap >= p, outputs[1], outputs[0])
 
             write_debug_latents(self.vae, "step", i, latents)

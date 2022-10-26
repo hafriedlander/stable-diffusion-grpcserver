@@ -1,8 +1,11 @@
 
+from functools import cache
 import os, warnings, traceback, math, json
+from fnmatch import fnmatch
 from types import SimpleNamespace as SN
 
 import torch
+import huggingface_hub
 
 from tqdm.auto import tqdm
 
@@ -318,19 +321,24 @@ class PipelineWrapper(object):
 
 class EngineManager(object):
 
-    def __init__(self, engines, weight_root="./weights", mode=EngineMode(), nsfw_behaviour="block", batchMode=BatchMode()):
+    def __init__(self, engines, weight_root="./weights", refresh_models=None, mode=EngineMode(), nsfw_behaviour="block", batchMode=BatchMode()):
         self.engines = engines
         self._default = None
+
         self._pipelines = {}
+        self._internal_pipelines = {}
+
         self._activeId = None
         self._active = None
 
         self._weight_root = weight_root
+        self._refresh_models = refresh_models
 
         self._mode = mode
         self._batchMode = batchMode
         self._nsfw = nsfw_behaviour
         self._token = os.environ.get("HF_API_TOKEN", True)
+
 
     @property
     def mode(self): return self._mode
@@ -338,24 +346,83 @@ class EngineManager(object):
     @property
     def batchMode(self): return self._batchMode
 
-    def _getWeightPath(self, remote_path, local_path):
+    def _getWeightPath(self, opts):
+        usefp16 = self.mode.fp16 and opts.get("has_fp16", True)
+
+        local_path = opts.get("local_model_fp16" if usefp16 else "local_model", None)
+        model_path = opts.get("model", None)
+        subfolder = opts.get("subfolder", None)
+        use_auth_token=self._token if opts.get("use_auth_token", False) else False
+
+        # Keep a list of the things we tried that failed, so we can report them all in one go later
+        # in the case that we weren't able to load it any way at all
+        failures = ["Loading model failed, because:"]
+
         if local_path:
             test_path = local_path if os.path.isabs(local_path) else os.path.join(self._weight_root, local_path)
             test_path = os.path.normpath(test_path)
-            if os.path.isdir(test_path): return test_path
-        return remote_path
+            if os.path.isdir(test_path): 
+                return test_path
+            else:
+                failures.append(f"    - Local path '{test_path}' doesn't exist")
+        else:
+            failures.append("    - No local path for " + ("fp16" if usefp16 else "fp32") + " model was provided")
+            
+
+        if model_path:
+            # We always download the file ourselves, rather than passing model path through to from_pretrained
+            # This lets us control the behaviour if the model fails to download
+            extra_kwargs={}
+            if subfolder: extra_kwargs["allow_patterns"]=f"{subfolder}*"
+            if use_auth_token: extra_kwargs["use_auth_token"]=use_auth_token
+
+            cache_path = None
+            attempt_download = False
+
+            try:
+                # Try getting the cached path without connecting to internet
+                cache_path = huggingface_hub.snapshot_download(
+                    model_path, 
+                    repo_type="model", 
+                    local_files_only=True,
+                    **extra_kwargs
+                )
+            except FileNotFoundError:
+                attempt_download = True
+            except:
+                failures.append("    - Couldn't query local HuggingFace cache. Error was:")
+                failures.append(traceback.format_exc())
+
+            if self._refresh_models:
+                attempt_download = attempt_download or any((True for pattern in self._refresh_models if fnmatch(model_path, pattern)))
+
+            if attempt_download:
+                try:
+                    cache_path = huggingface_hub.snapshot_download(
+                        model_path, 
+                        repo_type="model", 
+                        **extra_kwargs
+                    )
+                except:
+                    if cache_path: 
+                        print(f"Couldn't refresh cache for {model_path}. Using existing cache.")
+                    else:
+                        failures.append("    - Downloading from HuggingFace failed. Error was:")
+                        failures.append(traceback.format_exc())
+            
+            if cache_path: return cache_path
+
+        else:
+            failures.append("    - No remote model name was provided")
+
+        raise EnvironmentError("\n".join(failures))
 
     def fromPretrained(self, klass, opts, extra_kwargs = {}):
         use_auth_token=self._token if opts.get("use_auth_token", False) else False
 
-        if self.mode.fp16 and opts.get("has_fp16", True):
-           weight_path=self._getWeightPath(opts.get("model", None), opts.get("local_model_fp16", None))
-        else:
-           weight_path=self._getWeightPath(opts.get("model", None), opts.get("local_model", None))
-
-        if self.mode.fp16:
-            if opts.get("has_fp16", True): extra_kwargs["revision"]="fp16"
-            extra_kwargs["torch_dtype"]=torch.float16
+        weight_path=self._getWeightPath(opts)
+        if self.mode.fp16: extra_kwargs["torch_dtype"]=torch.float16
+        if opts.get('subfolder', None): extra_kwargs['subfolder'] = opts.get('subfolder')
 
         # Supress warnings during pipeline load. Unfortunately there isn't a better 
         # way to override the behaviour (beyond duplicating a huge function)
@@ -371,8 +438,14 @@ class EngineManager(object):
     def buildPipeline(self, engine):
         extra_kwargs={}
 
+        borrow = engine.get("borrow", None)
+        if borrow:
+            for lender, modules in borrow.items():
+                pipeline = self._internal_pipelines[lender]
+                for module in modules: extra_kwargs[module] = getattr(pipeline, module)
+
         if self._nsfw == "flag":
-            extra_kwargs["safety_checker"] = self.fromPretrained(FlagOnlySafetyChecker, engine, {"subfolder": "safety_checker"})
+            extra_kwargs["safety_checker"] = self.fromPretrained(FlagOnlySafetyChecker, {**engine, "subfolder": "safety_checker"})
         elif self._nsfw == "ignore":
             extra_kwargs["safety_checker"] = None
 
@@ -380,42 +453,49 @@ class EngineManager(object):
             if name == "vae":
                 extra_kwargs["vae"] = self.fromPretrained(AutoencoderKL, opts)
             elif name == "inpaint_unet":
-                extra_kwargs["inpaint_unet"] = self.fromPretrained(UNet2DConditionModel, opts, {"subfolder": "unet"})
+                extra_kwargs["inpaint_unet"] = self.fromPretrained(UNet2DConditionModel, {**opts, "subfolder": "unet"})
         
-        if engine["class"] == "StableDiffusionPipeline":
-            pipeline=self.fromPretrained(StableDiffusionPipeline, engine, extra_kwargs)
+        pipeline = None
 
-            return PipelineWrapper(
-                id=engine["id"],
-                mode=self._mode,
-                pipeline=pipeline
-            )
+        if engine["class"] == "StableDiffusionPipeline":
+           pipeline = self.fromPretrained(StableDiffusionPipeline, engine, extra_kwargs)
+
         elif engine["class"] == "UnifiedPipeline":
             if "inpaint_unet" not in extra_kwargs: 
                 extra_kwargs["inpaint_unet"] = None
             
             pipeline = self.fromPretrained(UnifiedPipeline, engine, extra_kwargs)
 
-            pipeline_options = engine.get('options', False)
-            if pipeline_options: pipeline.set_options(pipeline_options)
+        else:
+            raise Exception(f'Unknown engine class "{engine["class"]}"')
 
-            return PipelineWrapper(
-                id=engine["id"],
-                mode=self._mode,
-                pipeline=pipeline
-            )
-    
+        if engine.get("options", False):
+            try:
+                pipeline.set_options(engine.get("options"))
+            except:
+                raise ValueError(f"Engine {engine['id']} has options, but created pipeline rejected them")
+        
+        return pipeline
+
     def loadPipelines(self):
+
+        print("Loading engines...")
+
         for engine in self.engines:
             if not engine.get("enabled", False): continue
 
-            pipe=self.buildPipeline(engine)
+            engineid = engine["id"]
+            if engine.get("default", False): self._default = engineid
 
-            if pipe:
-                self._pipelines[pipe.id] = pipe
-                if engine.get("default", False): self._default = pipe
-            else:
-                raise Exception(f'Unknown engine class "{engine["class"]}"')
+            print("  "+engineid)
+
+            self._internal_pipelines[engineid] = pipeline = self.buildPipeline(engine)
+
+            self._pipelines[engineid] = PipelineWrapper(
+                id=engineid,
+                mode=self._mode,
+                pipeline=pipeline
+            )
 
         if self.batchMode.autodetect:
             self.batchMode.run_autodetect(self)
@@ -430,7 +510,7 @@ class EngineManager(object):
         TODO: Better activate / deactivate logic. Right now we just keep a max of one pipeline active.
         """
 
-        if id is None: id = self._default.id;
+        if id is None: id = self._default
 
         # If we're already active, just return it
         if self._active and id == self._active.id: return self._active
