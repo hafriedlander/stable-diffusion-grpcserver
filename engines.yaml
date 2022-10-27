@@ -34,7 +34,9 @@
     "stable-diffusion-v1-5": [ "feature_extractor", "safety_checker", "scheduler", "text_encoder", "tokenizer", "inpaint_unet"]
   overrides:
     clip_model:
-      model: "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
+      model: "laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
+      #model: "laion/CLIP-ViT-L-14-laion2B-s32B-b82K"
+      #model: "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
       has_fp16: False
     vae: 
       model: "stabilityai/sd-vae-ft-ema"

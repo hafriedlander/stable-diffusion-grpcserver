@@ -24,6 +24,11 @@ from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionS
 from sdgrpcserver import images
 from sdgrpcserver.pipeline.old_schedulers.scheduling_utils import OldSchedulerMixin
 from sdgrpcserver.pipeline.lpw_text_embedding import LPWTextEmbedding
+from sdgrpcserver.pipeline.structured_text_embedding import StructuredTextEmbedding
+
+from sdgrpcserver.pipeline.attention_replacer import replace_cross_attention
+from sdgrpcserver.pipeline.models.memory_efficient_cross_attention import has_xformers, MemoryEfficientCrossAttention
+from sdgrpcserver.pipeline.models.structured_cross_attention import StructuredCrossAttention
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -118,7 +123,10 @@ class ClipGuidedNoisePredictor(GuidedNoisePredictor):
         self.num_cutouts = num_cutouts
         self.use_cutouts = use_cutouts
     
+        print(self.pipeline.feature_extractor.image_mean)
+
         self.normalize = T.Normalize(mean=self.pipeline.feature_extractor.image_mean, std=self.pipeline.feature_extractor.image_std)
+        self.normalizeB = T.Normalize(mean=self.pipeline.feature_extractor.image_mean[2], std=self.pipeline.feature_extractor.image_std[2])
         self.make_cutouts = MakeCutouts(self.pipeline.feature_extractor.size)
 
 
@@ -140,6 +148,7 @@ class ClipGuidedNoisePredictor(GuidedNoisePredictor):
             self.clip_guidance_scale,
             self.num_cutouts,
             self.use_cutouts,
+            sigma
         )
 
     @torch.enable_grad()
@@ -155,11 +164,12 @@ class ClipGuidedNoisePredictor(GuidedNoisePredictor):
         clip_guidance_scale,
         num_cutouts,
         use_cutouts=True,
+        sigma = None
     ):
         latents = latents.detach().requires_grad_()
 
         if isinstance(self.pipeline.scheduler, OldSchedulerMixin):
-            sigma = self.pipeline.scheduler.sigmas[index]
+            sigma = self.pipeline.scheduler.sigmas[index] if sigma is None else sigma
             latent_model_input = latents / ((sigma**2 + 1) ** 0.5)
         else:
             latent_model_input = latents        
@@ -184,6 +194,8 @@ class ClipGuidedNoisePredictor(GuidedNoisePredictor):
 
         sample = 1 / 0.18215 * sample
         image = self.pipeline.vae.decode(sample).sample
+        #image = image[:, [2]]
+        #print(image.shape)
         image = (image / 2 + 0.5).clamp(0, 1)
 
         if use_cutouts:
@@ -804,14 +816,18 @@ class EnhancedRunwayInpaintMode(EnhancedInpaintMode):
         # Since these are passed into the unet, they need doubling
         # just like the latents are if we are doing CFG
         if do_classifier_free_guidance:
-            self.inpaint_mask = torch.cat([self.inpaint_mask] * 2)
-            self.masked_image_latents = torch.cat([self.masked_image_latents] * 2)
+            self.inpaint_mask_cfg = torch.cat([self.inpaint_mask] * 2)
+            self.masked_image_latents_cfg = torch.cat([self.masked_image_latents] * 2)
 
     def _fillWithShapedNoise(self, init_latents):
         return super()._fillWithShapedNoise(init_latents, noise_mode=5)
 
     def unet(self, latent_model_input, t, encoder_hidden_states):
-        latent_model_input = torch.cat([latent_model_input, self.inpaint_mask, self.masked_image_latents], dim=1)
+        if latent_model_input.shape[0] == self.inpaint_mask.shape[0]:
+            latent_model_input = torch.cat([latent_model_input, self.inpaint_mask, self.masked_image_latents], dim=1)
+        else:
+            latent_model_input = torch.cat([latent_model_input, self.inpaint_mask_cfg, self.masked_image_latents_cfg], dim=1)
+
         return self.pipeline.inpaint_unet(latent_model_input, t, encoder_hidden_states=encoder_hidden_states)
 
     def latentStep(self, latents, i, t, steppos):
@@ -923,7 +939,6 @@ class BasicTextEmbedding():
         self.pipe = pipe
     
     def _get_embeddedings(self, strings, label):
-        strings = [string[0][0] for string in strings]
         tokenizer = self.pipe.tokenizer
 
         # get prompt text embeddings
@@ -949,8 +964,8 @@ class BasicTextEmbedding():
 
     def get_text_embeddings(self, prompt, uncond_prompt):
         """Prompt and negative a both expected to be lists of strings, and matching in length"""
-        text_embeddings = self._get_embeddedings(prompt, "prompt")
-        uncond_embeddings = self._get_embeddedings(uncond_prompt, "negative prompt") if uncond_prompt else None
+        text_embeddings = self._get_embeddedings(prompt.as_unweighted_string(), "prompt")
+        uncond_embeddings = self._get_embeddedings(uncond_prompt.as_unweighted_string(), "negative prompt") if uncond_prompt else None
 
         return (text_embeddings, uncond_embeddings)
 
@@ -1070,6 +1085,12 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         # as guidance to produce a nicer inpaint that EnhancedInpaintMode otherwise can
         self._grafted_inpaint = False
         self._graft_factor = 0.8
+
+        replace_cross_attention(target=unet, crossattention=StructuredCrossAttention, name="unet")
+
+        # if has_xformers():
+        #     print("Using xformers")
+        #     replace_cross_attention(target=unet, crossattention=MemoryEfficientCrossAttention, name="unet")
 
         self.register_modules(
             vae=vae,
@@ -1260,23 +1281,40 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
 
-        #text_embedding_calculator = BasicTextEmbedding(self)
-        text_embedding_calculator = LPWTextEmbedding(self, max_embeddings_multiples=max_embeddings_multiples)
+        text_embedding_calculator = BasicTextEmbedding(self)
 
         # get unconditional embeddings for classifier free guidance
         text_embeddings, uncond_embeddings = text_embedding_calculator.get_text_embeddings(
-            prompt=prompt.as_tokens(),
-            uncond_prompt=negative_prompt.as_tokens() if do_classifier_free_guidance else None,
+            prompt=prompt,
+            uncond_prompt=negative_prompt if do_classifier_free_guidance else None,
         )
 
-        bs_embed, seq_len, _ = text_embeddings.shape
-        text_embeddings = text_embeddings.repeat(1, num_images_per_prompt, 1)
-        text_embeddings = text_embeddings.view(bs_embed * num_images_per_prompt, seq_len, -1)
+        # Get the latents dtype based on the text_embeddings dtype
+        latents_dtype = text_embeddings.dtype
+
+        #text_embedding_calculator = LPWTextEmbedding(self, max_embeddings_multiples=max_embeddings_multiples)
+        text_embedding_calculator = StructuredTextEmbedding(self, "extend_seq")
+
+        # get unconditional embeddings for classifier free guidance
+        text_embeddings, _ = text_embedding_calculator.get_text_embeddings(
+            prompt=prompt,
+            uncond_prompt=negative_prompt if do_classifier_free_guidance else None,
+        )
+
+        # TODO: StructuredTextEmbedding with anything except "none" is breaking Num_images_per_prompt
+
+        #bs_embed, seq_len, _ = text_embeddings.shape
+        #text_embeddings = text_embeddings.repeat(1, num_images_per_prompt, 1)
+        #text_embeddings = text_embeddings.view(bs_embed * num_images_per_prompt, seq_len, -1)
 
         if do_classifier_free_guidance:
-            bs_embed, seq_len, _ = uncond_embeddings.shape
-            uncond_embeddings = uncond_embeddings.repeat(1, num_images_per_prompt, 1)
-            uncond_embeddings = uncond_embeddings.view(bs_embed * num_images_per_prompt, seq_len, -1)
+            #bs_embed, seq_len, _ = uncond_embeddings.shape
+            #uncond_embeddings = uncond_embeddings.repeat(1, num_images_per_prompt, 1)
+            #uncond_embeddings = uncond_embeddings.view(bs_embed * num_images_per_prompt, seq_len, -1)
+
+            #if struct_attention == "align_seq":
+            #text_embeddings = (uncond_embeddings, text_embeddings)
+            #else:
             text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
 
         if self.clip_model is not None and clip_guidance_scale > 0:
@@ -1314,8 +1352,6 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
                 text_embeddings=text_embeddings
             )
 
-        # Get the latents dtype based on the text_embeddings dtype
-        latents_dtype = text_embeddings.dtype
 
         mode_class = None
         graft_mode_class = None

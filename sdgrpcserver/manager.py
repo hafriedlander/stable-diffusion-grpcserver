@@ -9,12 +9,6 @@ import huggingface_hub
 
 from tqdm.auto import tqdm
 
-# Patch attention to use MemoryEfficientCrossAttention if xformers is available
-from diffusers.models import attention
-from sdgrpcserver.pipeline.fastattention import has_xformers, MemoryEfficientCrossAttention
-print(f"Using xformers: {'yes' if has_xformers() else 'no'}")
-if has_xformers(): attention.CrossAttention = MemoryEfficientCrossAttention
-
 from transformers import CLIPFeatureExtractor, CLIPModel
 from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler, PNDMScheduler
 from diffusers.models import AutoencoderKL, UNet2DConditionModel

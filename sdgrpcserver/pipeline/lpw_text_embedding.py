@@ -358,8 +358,8 @@ class LPWTextEmbedding():
     def get_text_embeddings(self, prompt, uncond_prompt):
         return get_weighted_text_embeddings(
             pipe=self.pipe,
-            prompt=prompt,
-            uncond_prompt=uncond_prompt,
+            prompt=prompt.as_tokens(),
+            uncond_prompt=uncond_prompt.as_tokens() if uncond_prompt is not None else None,
             max_embeddings_multiples=self.max_embeddings_multiples,
         )
 
