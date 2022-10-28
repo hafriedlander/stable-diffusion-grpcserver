@@ -1,3 +1,9 @@
+# Mostly from https://github.com/shunk031/training-free-structured-diffusion-guidance
+# 
+# Changes:
+#   - Extracted out from the TFSDGPipeline into it's own class
+#   - Methods added to make it a sdgrpcserver.TextEmbedding compatible class
+
 import inspect
 from dataclasses import dataclass
 from typing import List, Optional, Union, Literal
@@ -50,12 +56,11 @@ def get_stanza_singleton():
 
 
 class StructuredTextEmbedding:
-    def __init__(self, pipe, struct_attention: STRUCT_ATTENTION_TYPE = "none",):
+    def __init__(self, pipe, struct_attention: STRUCT_ATTENTION_TYPE):
         self.pipe = pipe
+        self.struct_attention = struct_attention
 
         self.nlp = get_stanza_singleton()
-
-        self.struct_attention = struct_attention
 
     def preprocess_prompt(self, prompt: str) -> str:
         return prompt.lower().strip().strip(".").strip()

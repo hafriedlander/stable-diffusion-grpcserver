@@ -20,7 +20,7 @@ import torch
 
 SCHEDULER_CONFIG_NAME = "scheduler_config.json"
 
-class OldSchedulerMixin:
+class KSchedulerMixin:
     """
     Mixin containing common functions for the schedulers.
     """

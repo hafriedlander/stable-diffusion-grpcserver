@@ -21,12 +21,12 @@ from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipeline
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 
 from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
-from sdgrpcserver.pipeline.old_schedulers.scheduling_utils import OldSchedulerMixin
-from sdgrpcserver.pipeline.old_schedulers.scheduling_euler_discrete import EulerDiscreteScheduler
-from sdgrpcserver.pipeline.old_schedulers.scheduling_euler_ancestral_discrete import EulerAncestralDiscreteScheduler
-from sdgrpcserver.pipeline.old_schedulers.scheduling_dpm2_discrete import DPM2DiscreteScheduler
-from sdgrpcserver.pipeline.old_schedulers.scheduling_dpm2_ancestral_discrete import DPM2AncestralDiscreteScheduler
-from sdgrpcserver.pipeline.old_schedulers.scheduling_heun_discrete import HeunDiscreteScheduler
+from sdgrpcserver.pipeline.kschedulers.scheduling_utils import KSchedulerMixin
+from sdgrpcserver.pipeline.kschedulers.scheduling_euler_discrete import EulerDiscreteScheduler
+from sdgrpcserver.pipeline.kschedulers.scheduling_euler_ancestral_discrete import EulerAncestralDiscreteScheduler
+from sdgrpcserver.pipeline.kschedulers.scheduling_dpm2_discrete import DPM2DiscreteScheduler
+from sdgrpcserver.pipeline.kschedulers.scheduling_dpm2_ancestral_discrete import DPM2AncestralDiscreteScheduler
+from sdgrpcserver.pipeline.kschedulers.scheduling_heun_discrete import HeunDiscreteScheduler
 
 
 class ProgressBarWrapper(object):
@@ -217,7 +217,7 @@ class PipelineWrapper(object):
             ))
 
     def _prepScheduler(self, scheduler):
-        if isinstance(scheduler, OldSchedulerMixin):
+        if isinstance(scheduler, KSchedulerMixin):
             scheduler = scheduler.set_format("pt")
 
         if hasattr(scheduler.config, "steps_offset") and scheduler.config.steps_offset != 1:

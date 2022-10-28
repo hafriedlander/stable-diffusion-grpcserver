@@ -22,9 +22,9 @@ from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 
 from sdgrpcserver import images
-from sdgrpcserver.pipeline.old_schedulers.scheduling_utils import OldSchedulerMixin
-from sdgrpcserver.pipeline.lpw_text_embedding import LPWTextEmbedding
-from sdgrpcserver.pipeline.structured_text_embedding import StructuredTextEmbedding
+from sdgrpcserver.pipeline.kschedulers.scheduling_utils import KSchedulerMixin
+from sdgrpcserver.pipeline.text_embedding.lpw_text_embedding import LPWTextEmbedding
+from sdgrpcserver.pipeline.text_embedding.structured_text_embedding import StructuredTextEmbedding, KeyValueTensors
 
 from sdgrpcserver.pipeline.attention_replacer import replace_cross_attention
 from sdgrpcserver.pipeline.models.memory_efficient_cross_attention import has_xformers, MemoryEfficientCrossAttention
@@ -57,7 +57,7 @@ class NoisePredictor:
         self.text_embeddings = text_embeddings
 
     def __call__(self, unet, latents, i, t, sigma = None):
-        if isinstance(self.pipeline.scheduler, OldSchedulerMixin): 
+        if isinstance(self.pipeline.scheduler, KSchedulerMixin): 
             if sigma is None: sigma = self.pipeline.scheduler.sigmas[i] 
             # the model input needs to be scaled to match the continuous ODE formulation in K-LMS
             latents = latents / ((sigma**2 + 1) ** 0.5)
@@ -168,7 +168,7 @@ class ClipGuidedNoisePredictor(GuidedNoisePredictor):
     ):
         latents = latents.detach().requires_grad_()
 
-        if isinstance(self.pipeline.scheduler, OldSchedulerMixin):
+        if isinstance(self.pipeline.scheduler, KSchedulerMixin):
             sigma = self.pipeline.scheduler.sigmas[index] if sigma is None else sigma
             latent_model_input = latents / ((sigma**2 + 1) ** 0.5)
         else:
@@ -186,7 +186,7 @@ class ClipGuidedNoisePredictor(GuidedNoisePredictor):
 
             fac = torch.sqrt(beta_prod_t)
             sample = pred_original_sample * (fac) + latents * (1 - fac)
-        elif isinstance(self.pipeline.scheduler, OldSchedulerMixin):
+        elif isinstance(self.pipeline.scheduler, KSchedulerMixin):
             # And calculate the output
             sample = latents - sigma * noise_pred
         else:
@@ -275,7 +275,7 @@ class Txt2imgMode(UnifiedMode):
         latents = latents.to(self.device)
 
         # scale the initial noise by the standard deviation required by the scheduler
-        if isinstance(self.scheduler, OldSchedulerMixin): 
+        if isinstance(self.scheduler, KSchedulerMixin): 
             return latents * self.scheduler.sigmas[0]
         else:
             return latents * self.scheduler.init_noise_sigma
@@ -375,7 +375,7 @@ class Img2imgMode(UnifiedMode):
           - otherwise look up the timestep in the scheduler
           - either way, return a tensor * batch_total on our device
         """
-        if isinstance(self.scheduler, OldSchedulerMixin): 
+        if isinstance(self.scheduler, KSchedulerMixin): 
             return torch.tensor(i)
         else:
             timesteps = t if t != None else self.scheduler.timesteps[i]
@@ -597,7 +597,7 @@ class RunwayInpaintMode(UnifiedMode):
         ], dim=0)
 
         # scale the initial noise by the standard deviation required by the scheduler
-        if isinstance(self.scheduler, OldSchedulerMixin): 
+        if isinstance(self.scheduler, KSchedulerMixin): 
             return latents * self.scheduler.sigmas[0]
         else:
             return latents * self.scheduler.init_noise_sigma
@@ -659,7 +659,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         return tensor * targetSD / sd
 
     def _matchToSamplerSD(self, tensor):
-        if isinstance(self.scheduler, OldSchedulerMixin): 
+        if isinstance(self.scheduler, KSchedulerMixin): 
             targetSD = self.scheduler.sigmas[0]
         else:
             targetSD = self.scheduler.init_noise_sigma
@@ -725,7 +725,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
                 noise = noise - noise.mean()
             elif noise_mode == 3: noise = noise.normal_(generator=generator)
             elif noise_mode == 4:
-                if isinstance(self.scheduler, OldSchedulerMixin):
+                if isinstance(self.scheduler, KSchedulerMixin):
                     targetSD = self.scheduler.sigmas[0]
                 else:
                     targetSD = self.scheduler.init_noise_sigma
@@ -1293,13 +1293,20 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         latents_dtype = text_embeddings.dtype
 
         #text_embedding_calculator = LPWTextEmbedding(self, max_embeddings_multiples=max_embeddings_multiples)
-        text_embedding_calculator = StructuredTextEmbedding(self, "extend_seq")
+        text_embedding_calculator = StructuredTextEmbedding(self, "align_seq")
 
         # get unconditional embeddings for classifier free guidance
         text_embeddings, _ = text_embedding_calculator.get_text_embeddings(
             prompt=prompt,
             uncond_prompt=negative_prompt if do_classifier_free_guidance else None,
         )
+
+
+        if isinstance(text_embeddings, KeyValueTensors):
+            print(text_embeddings.k.shape)
+            print(text_embeddings.v.shape)
+
+        print(uncond_embeddings.shape)
 
         # TODO: StructuredTextEmbedding with anything except "none" is breaking Num_images_per_prompt
 
@@ -1442,7 +1449,7 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
                 # compute the previous noisy sample x_t -> x_t-1
                 if accepts_noise_predictor: extra_step_kwargs["noise_predictor"] = m.noise_predict
 
-                if isinstance(self.scheduler, OldSchedulerMixin): 
+                if isinstance(self.scheduler, KSchedulerMixin): 
                     output = self.scheduler.step(noise_pred, t_index, latents, **extra_step_kwargs).prev_sample
                 else:
                     output = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample

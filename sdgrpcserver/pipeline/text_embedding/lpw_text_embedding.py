@@ -1,3 +1,7 @@
+
+# Copied mostly completely from https://github.com/huggingface/diffusers/blob/main/examples/community/lpw_stable_diffusion.py
+# Minimal modifications to allow copy/pasting in the case of updates
+
 import inspect
 import re
 from typing import Callable, List, Optional, Union

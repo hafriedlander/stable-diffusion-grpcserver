@@ -21,10 +21,10 @@ from scipy import integrate
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.schedulers.scheduling_utils import SchedulerOutput
-from .scheduling_utils import OldSchedulerMixin
+from .scheduling_utils import KSchedulerMixin
 
 
-class HeunDiscreteScheduler(OldSchedulerMixin, ConfigMixin):
+class HeunDiscreteScheduler(KSchedulerMixin, ConfigMixin):
     """
     Implements Algorithm 2 (Heun steps) from Karras et al. (2022).
     for discrete beta schedules. Based on the original k-diffusion implementation by

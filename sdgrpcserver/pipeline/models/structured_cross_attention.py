@@ -1,9 +1,15 @@
+# Mostly from https://github.com/shunk031/training-free-structured-diffusion-guidance
+# 
+# Changes:
+#   - _attention changed to _sliced_attention to match Diffusers new(?) argument structure
+
+
 from typing import Optional, Tuple
 
 import torch as th
 from diffusers.models.attention import CrossAttention
 
-from sdgrpcserver.pipeline.structured_text_embedding import KeyValueTensors
+from sdgrpcserver.pipeline.text_embedding.structured_text_embedding import KeyValueTensors
 
 class StructuredCrossAttention(CrossAttention):
     def __init__(
@@ -80,11 +86,6 @@ class StructuredCrossAttention(CrossAttention):
         k = self.reshape_heads_to_batch_dim(k)
         v = self.reshape_heads_to_batch_dim(v)
 
-        # if self._slice_size is None or q.shape[0] // self._slice_size == 1:
-        #     hidden_states = self._attention(q, k, v)
-        # else:
-        #     hidden_states = self._sliced_attention(q, k, v, sequence_length, dim)
-
         hidden_states = self._sliced_attention(q, k, v, sequence_length, dim)
 
         return hidden_states
@@ -106,11 +107,6 @@ class StructuredCrossAttention(CrossAttention):
         q = self.reshape_heads_to_batch_dim(q)
         k = self.reshape_heads_to_batch_dim(k)
         v = self.reshape_heads_to_batch_dim(v)
-
-        # if self._slice_size is None or q.shape[0] // self._slice_size == 1:
-        #     hidden_states = self._attention(q, k, v)
-        # else:
-        #     hidden_states = self._sliced_attention(q, k, v, sequence_length, dim)
 
         hidden_states = self._sliced_attention(q, k, v, sequence_length, dim)
 
