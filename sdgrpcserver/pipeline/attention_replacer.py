@@ -1,6 +1,7 @@
 # Originally from https://github.com/shunk031/training-free-structured-diffusion-guidance/blob/main/tfsdg/utils/replace_layer.py
 
 import inspect
+import torch
 import torch.nn as nn
 from diffusers.models.attention import CrossAttention
 
@@ -30,6 +31,7 @@ def replace_cross_attention(target: nn.Module, crossattention: nn.Module, name: 
                 ca_kwargs["struct_attention"] = (attr_str == "attn2")
 
             ca = crossattention(**ca_kwargs)
+            ca.to(device=target_attr.to_q.weight.device, dtype=target_attr.to_q.weight.dtype)
 
             original_params = list(target_attr.parameters())
             proposed_params = list(ca.parameters())

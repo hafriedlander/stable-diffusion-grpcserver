@@ -2,23 +2,12 @@
 # Copied mostly completely from https://github.com/huggingface/diffusers/blob/main/examples/community/lpw_stable_diffusion.py
 # Minimal modifications to allow copy/pasting in the case of updates
 
-import inspect
-import re
-from typing import Callable, List, Optional, Union
-
-import numpy as np
+import inspect, re
+from typing import List, Optional, Union
 import torch
 
-import PIL
-from diffusers.configuration_utils import FrozenDict
-from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from diffusers.pipeline_utils import DiffusionPipeline
-from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
-from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
-from diffusers.schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
-from diffusers.utils import deprecate, logging
-from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
-
+from .text_embedding import TextEmbedding
 
 re_attention = re.compile(
     r"""
@@ -353,13 +342,13 @@ def get_weighted_text_embeddings(
         return text_embeddings, uncond_embeddings
     return text_embeddings, None
 
-class LPWTextEmbedding():
+class LPWTextEmbedding(TextEmbedding):
 
     def __init__(self, pipe, max_embeddings_multiples, **kwargs):
-        self.pipe = pipe
+        super().__init__(pipe, **kwargs)
         self.max_embeddings_multiples = max_embeddings_multiples
 
-    def get_text_embeddings(self, prompt, uncond_prompt):
+    def get_embeddings(self, prompt, uncond_prompt = None):
         return get_weighted_text_embeddings(
             pipe=self.pipe,
             prompt=prompt.as_tokens(),

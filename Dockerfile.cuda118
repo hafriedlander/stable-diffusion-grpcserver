@@ -76,6 +76,29 @@ RUN /bin/micromamba -r /env -n sd-grpc-server run python setup.py install
 
 
 
+FROM buildpytorch AS deepspeed
+
+WORKDIR /
+RUN git clone https://github.com/openai/triton.git;
+
+WORKDIR /triton
+RUN git checkout -b v1.0 tags/v1.0
+
+WORKDIR /triton/python
+RUN /bin/micromamba -r /env -n sd-grpc-server run pip install cmake
+RUN apt install -y zlib1g-dev libtinfo-dev 
+RUN /bin/micromamba -r /env -n sd-grpc-server run pip install .
+
+WORKDIR /
+RUN git clone https://github.com/microsoft/DeepSpeed.git
+
+WORKDIR /DeepSpeed
+RUN git checkout -b v0.7.4 tags/v0.7.4
+RUN apt install -y libaio-dev
+
+ENV DS_BUILD_OPS=1
+ENV TORCH_CUDA_ARCH_LIST="8.9"
+RUN /bin/micromamba -r /env -n sd-grpc-server run pip install .
 
 
 
@@ -88,8 +111,8 @@ RUN apt install -y git
 
 # Copy core python environment from pytorchbuild
 RUN mkdir -p /env
-COPY --from=buildpytorch /bin/micromamba /bin
-COPY --from=buildpytorch /env /env/
+COPY --from=deepspeed /bin/micromamba /bin
+COPY --from=deepspeed /env /env/
 
 
 
@@ -159,6 +182,7 @@ ENV PATH      $NVM_DIR/versions/node/v$NODE_VERSION/bin:$PATH
 RUN npm install -g localtunnel
 
 # Now we can copy everything we need
+COPY nonfree /nonfree/
 COPY sdgrpcserver /sdgrpcserver/
 COPY server.py .
 

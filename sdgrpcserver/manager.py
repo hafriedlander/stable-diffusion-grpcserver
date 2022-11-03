@@ -2,9 +2,12 @@
 from functools import cache
 import os, warnings, traceback, math, json
 from fnmatch import fnmatch
+from copy import deepcopy
 from types import SimpleNamespace as SN
 
 import torch
+from torch.profiler import profile, record_function, ProfilerActivity
+
 import huggingface_hub
 
 from tqdm.auto import tqdm
@@ -435,11 +438,19 @@ class EngineManager(object):
     def buildPipeline(self, engine):
         extra_kwargs={}
 
-        borrow = engine.get("borrow", None)
-        if borrow:
-            for lender, modules in borrow.items():
+        share = engine.get("share", None)
+        if share:
+            for lender, modules in share.items():
                 pipeline = self._internal_pipelines[lender]
-                for module in modules: extra_kwargs[module] = getattr(pipeline, module)
+                for module in modules: 
+                    extra_kwargs[module] = getattr(pipeline, module)
+
+        copy_from = engine.get("copy_from", None)
+        if copy_from:
+            for lender, modules in copy_from.items():
+                pipeline = self._internal_pipelines[lender]
+                for module in modules: 
+                    extra_kwargs[module] = deepcopy(getattr(pipeline, module))
 
         if self._nsfw == "flag":
             extra_kwargs["safety_checker"] = self.fromPretrained(FlagOnlySafetyChecker, {**engine, "subfolder": "safety_checker"})

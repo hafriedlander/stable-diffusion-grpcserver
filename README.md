@@ -1,5 +1,31 @@
 An implementation of a server for the Stability AI API
 
+# Features
+
+## Standard Stable Diffusion features
+
+- Create an image from just a text prompt (txt2img)
+- Create an image from an existing image and a text prompt (img2img)
+- Fill in a hole in an image, or extend an image (inpainting)
+
+## Enhancements
+
+- Enhanced inpainting and outpainting, including Grafted Inpainting
+  - When used with the standard Stable Diffusion V1.5 model, results are more consistent to the existing image
+  - When used with a model such as Waifu Diffusion that does not have an inpaint model, can either "graft"
+    the model on top of the Stable Diffusion inpainting or work in an exclusive model-independant model
+- Custom CLIP guidance allows using newer CLIP models to more accurately follow prompts
+  - Faster and better results than the standard Diffusers version
+- Negative prompting and weighting of parts of a promt (send multiple `Prompt` objects with `text` and any positive or negative `weight`)
+- All K_Diffusion schedulers available, and working correctly (including DPM2, DPM2 Ancestral and Heun
+- Can load multiple pipelines, such as Stable and Waifu Diffusion, and swap between them as needed
+- Adjustable NSFW behaviour
+- Potentially lower memory requirements using a variety of model offloading techniques
+- Cancel over API (using GRPC cancel will abort the currently in progress generation)
+- Various performance optimisations
+  + XFormers support, if installed
+  + ToMe support, if nonfree code included (recommend XFormers instead where available, but ToMe doesn't have complicated dependancies)
+  
 # Installation
 
 ## Colab (coming soon)
@@ -114,19 +140,6 @@ set HF_API_TOKEN={your huggingface token}
 sdgrpcserver
 ```
 
-# Features
-
-- Txt2Img and Img2Img from Stability-AI/Stability-SDK, specifying a prompt
-- Can load multiple pipelines, such as Stable and Waifu Diffusion, and swap between them as needed
-- Mid and Low VRAM modes for larger generated images at the expense of some performance
-- Adjustable NSFW behaviour
-- Significantly enhanced masked painting:
-  - When Strength < 1, uses normal diffusers inpainting (with improved mask gradient handling)
-  - When Strength >= 1 and <= 2, uses seamless outpainting algorithm. 
-    Strength above 1 acts as a boost - the higher the value, the more even areas protected by a mask are allowed to change
-- All K_Diffusion schedulers available
-- Cancel over API (using GRPC cancel will abort the currently in progress generation)
-- Negative prompting (send a `Prompt` object with `text` and a negative `weight`)
 
 # Thanks to / Credits:
 
@@ -151,16 +164,23 @@ Extra features to add
     - Ping back progress notices
     - Allow cancellation requests
     - Specify negative prompts
-- CLIP guided generation https://github.com/huggingface/diffusers/pull/561
 - Community features: 
   - Prompt calculation https://github.com/pharmapsychotic/clip-interrogator/blob/main/clip_interrogator.ipynb
   - Prompt suggestion https://huggingface.co/spaces/Gustavosta/MagicPrompt-Stable-Diffusion
   - Prompt compositing https://github.com/energy-based-model/Compositional-Visual-Generation-with-Composable-Diffusion-Models-PyTorch
   - Automasking https://github.com/ThstereforeGames/txt2mask
-  - Other schedulers (needs custom pipeline for some). https://github.com/huggingface/diffusers/commit/489894e4d9272dec88fa3a64a8161aeab471fc18
   - Huge seeds
-- Other thoughts
-  - Figure out how to just suppress NSFW filtering altogether (takes VRAM, if you're not interested)
 
+
+# License
+
+The main codebase is distributed under Apache-2.0. Dependancies are all compatible with that license, except as noted here:
+
+- The nonfree directory contains code under some license that is more restrictive than Apache-2.0. Check the individual
+  projects for license details. To fully comply with the Apache-2.0 license, remove this folder before release.
+  + ToMe
+  + Codeformer
+- The Docker images contain a bunch of software under various open source licenses. The docker images tagged 'noncomm'
+  include the nonfree folder, and so cannot be used commercially.
 
 [![Stable Cabal Logo](stablecabal.png)](https://www.stablecabal.org/)

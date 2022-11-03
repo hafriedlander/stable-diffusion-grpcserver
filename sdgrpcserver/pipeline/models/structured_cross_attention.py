@@ -11,6 +11,8 @@ from diffusers.models.attention import CrossAttention
 
 from sdgrpcserver.pipeline.text_embedding.structured_text_embedding import KeyValueTensors
 
+from einops.layers.torch import Reduce
+
 class StructuredCrossAttention(CrossAttention):
     def __init__(
         self,
@@ -23,6 +25,9 @@ class StructuredCrossAttention(CrossAttention):
     ) -> None:
         super().__init__(query_dim, context_dim, heads, dim_head, dropout)
         self.struct_attention = struct_attention
+
+        self.max_pooling_layer = Reduce(f"b c h w -> 1 c h w", 'max')
+
 
     def struct_qkv(
         self,
@@ -63,13 +68,41 @@ class StructuredCrossAttention(CrossAttention):
         context_v: th.Tensor,
         mask: Optional[th.Tensor] = None,
     ) -> None:
-        assert uc_context.size(0) == context_k.size(0) == context_v.size(0)
+        h = self.heads
+        assert uc_context.size(0) == context_k[0].size(0) == context_v[0].size(0)
+        true_bs = uc_context.size(0)*h
 
-        # true_bs = uc_context.size(0) * self.heads
-        # kv_tensors = self.get_kv(uc_context)
+        k_uc = self.to_k(uc_context)
+        v_uc = self.to_v(uc_context)
 
-        raise NotImplementedError
+        k_c = [self.to_k(c_k) for c_k in context_k]
+        v_c = [self.to_v(c_v) for c_v in context_v]
+                
+        q = self.reshape_heads_to_batch_dim(q)
+        k_uc = self.reshape_heads_to_batch_dim(k_uc)
+        v_uc = self.reshape_heads_to_batch_dim(v_uc)
 
+        k_c = [self.reshape_heads_to_batch_dim(k) for k in k_c]
+        v_c = [self.reshape_heads_to_batch_dim(v) for v in v_c]
+
+        q_uc = q[:true_bs]
+        q_c = q[true_bs:]
+
+        sim_uc = th.matmul(q_uc, k_uc.transpose(-1, -2)) * self.scale
+        sim_c = [th.matmul(q_c, k.transpose(-1, -2)) * self.scale for k in k_c]
+
+        attn_uc = sim_uc.softmax(dim=-1)
+        attn_c = [sim.softmax(dim=-1) for sim in sim_c]
+
+        out_uc = th.matmul(attn_uc, v_uc)
+        out_c = [th.matmul(attn, v) for attn, v in zip(attn_c, v_c)]
+
+        out_c = sum(out_c) / len(v_c)
+
+        out = th.cat([out_uc, out_c])
+
+        return self.reshape_batch_dim_to_heads(out)
+        
     def normal_qkv(
         self,
         q: th.Tensor,
@@ -134,6 +167,7 @@ class StructuredCrossAttention(CrossAttention):
             else:
                 uc_context = context[0]
                 c_full_seq = context[1].k[0].unsqueeze(dim=0)
+                print("n", c_full_seq.shape)
                 out = self.normal_qkv(
                     q=q, context=th.cat((uc_context, c_full_seq), dim=0), mask=mask
                 )

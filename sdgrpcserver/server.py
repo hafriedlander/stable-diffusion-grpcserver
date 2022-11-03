@@ -13,6 +13,8 @@ from twisted.web.wsgi import WSGIResource
 from twisted.internet import reactor, endpoints, protocol
 from twisted.web.resource import ForbiddenResource
 
+import torch
+
 import grpc
 import hupper
 from sdgrpcserver.sonora.wsgi import grpcWSGI
@@ -22,6 +24,11 @@ from wsgicors import CORS
 # TODO: Move to https://github.com/danielgtaylor/python-betterproto
 generatedPath = os.path.join(os.path.dirname(__file__), "generated")
 sys.path.append(generatedPath)
+
+# Inject the nonfree projects if they exist
+nonfree_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "nonfree")
+if os.path.exists(nonfree_path):
+    sys.path.append(os.path.join(nonfree_path, "ToMe"))
 
 import generation_pb2_grpc, dashboard_pb2_grpc, engines_pb2_grpc
 
@@ -254,6 +261,7 @@ def main():
     networking_opts = parser.add_argument_group('networking')
     util_opts = parser.add_argument_group('utility')
     batch_opts = parser.add_argument_group('generation batch control')
+    debug_opts = parser.add_argument_group('debugging')
 
     networking_opts.add_argument(
         "--listen_to_all", "-L", action='store_true', help="Accept requests from the local network, not just localhost" 
@@ -312,6 +320,10 @@ def main():
     util_opts.add_argument(
         "--enable_debug_recording", action="store_true", help="Enable collection of debug information for reporting with later. This collection is local only, until you deliberately choose to submit a sample."
     )
+    
+    debug_opts.add_argument(
+        "--vram_fraction", type=float, default=os.environ.get("SD_VRAM_FRACTION", 1.0), help="The fraction of memory that we should restrict ourselves to"
+    )
 
     args = parser.parse_args()
 
@@ -360,6 +372,8 @@ def main():
         sys.exit(0)
 
     prevHandler = signal.signal(signal.SIGINT, shutdown_reactor_handler)
+
+    torch.cuda.set_per_process_memory_fraction(args.vram_fraction)
 
     with open(os.path.normpath(args.enginecfg), 'r') as cfg:
         engines = yaml.load(cfg, Loader=Loader)

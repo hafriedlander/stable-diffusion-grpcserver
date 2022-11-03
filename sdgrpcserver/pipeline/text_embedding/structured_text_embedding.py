@@ -15,10 +15,15 @@ import torch
 from nltk.tree import Tree
 from transformers.tokenization_utils import BatchEncoding
 
+import traceback
+
+from .text_embedding import TextEmbedding
+
 STRUCT_ATTENTION_TYPE = Literal["extend_str", "extend_seq", "align_seq", "none"]
 
 @dataclass
 class KeyValueTensors(object):
+    dtype: torch.dtype
     k: torch.Tensor
     v: torch.Tensor
 
@@ -55,11 +60,11 @@ def get_stanza_singleton():
 
 
 
-class StructuredTextEmbedding:
-    def __init__(self, pipe, struct_attention: STRUCT_ATTENTION_TYPE):
-        self.pipe = pipe
-        self.struct_attention = struct_attention
+class StructuredTextEmbedding(TextEmbedding):
+    def __init__(self, pipe, struct_attention: STRUCT_ATTENTION_TYPE, **kwargs):
+        super().__init__(pipe, **kwargs)
 
+        self.struct_attention = struct_attention
         self.nlp = get_stanza_singleton()
 
     def preprocess_prompt(self, prompt: str) -> str:
@@ -231,29 +236,26 @@ class StructuredTextEmbedding:
         return c
 
     def align_seq(self, nps: List[str], spans: List[Span]) -> KeyValueTensors:
-
         input_ids = self.tokenize(nps).input_ids
         nps_length = [len(ids) - 2 for ids in input_ids]
         enc_output = self.pipe.text_encoder(input_ids.to(self.pipe.device))
         c = enc_output.last_hidden_state
 
         # shape: (num_nps, model_max_length, hidden_dim)
-        k_c = torch.stack(
-            [c[0]]
-            + [
-                self._align_sequence(c[0].clone(), seq, span, nps_length[0] + 1)
-                for seq, span in zip(c[1:], spans[1:])
-            ]
-        )
+        k_c = [c[0]] + [
+            self._align_sequence(c[0].clone(), seq, span, nps_length[0] + 1)
+            for seq, span in zip(c[1:], spans[1:])
+        ]
         # shape: (num_nps, model_max_length, hidden_dim)
-        v_c = torch.stack(
-            [c[0]]
-            + [
-                self._align_sequence(c[0].clone(), seq, span, nps_length[0] + 1)
-                for seq, span in zip(c[1:], spans[1:])
-            ]
-        )
-        return KeyValueTensors(k=k_c, v=v_c)
+        v_c =[c[0]] + [
+            self._align_sequence(c[0].clone(), seq, span, nps_length[0] + 1)
+            for seq, span in zip(c[1:], spans[1:])
+        ]
+
+        k_c = [k.unsqueeze(0) for k in k_c]
+        v_c = [v.unsqueeze(0) for v in v_c]
+
+        return KeyValueTensors(k=k_c, v=v_c, dtype=k_c[0].dtype)
 
     def apply_text_encoder(
         self,
@@ -279,7 +281,7 @@ class StructuredTextEmbedding:
         else:
             raise ValueError(f"Invalid type of struct attention: {struct_attention}")
 
-    def get_text_embeddings(self, prompt, uncond_prompt):
+    def get_text_embeddings(self, prompt):
         preprocessed_prompt = self.preprocess_prompt(prompt.as_unweighted_string()[0])
 
         doc = self.nlp(preprocessed_prompt)
@@ -294,4 +296,22 @@ class StructuredTextEmbedding:
             spans=all_nps.spans,
         )
 
-        return text_embeddings, None
+        return text_embeddings
+
+    def get_uncond_embeddings(self, prompt):
+        text_input = self.tokenize(prompt.as_unweighted_string())
+        return self.pipe.text_encoder(text_input.input_ids.to(self.pipe.device))[0]        
+
+    def repeat(self, embedding, count):
+        if isinstance(embedding, list):
+            res = [self.repeat(nps, count) for nps in embedding]
+            return res
+
+        if isinstance(embedding, KeyValueTensors):
+            return KeyValueTensors(
+                k=self.repeat(embedding.k, count),
+                v=self.repeat(embedding.v, count),
+                dtype=embedding.dtype
+            )
+        
+        return super().repeat(embedding, count)

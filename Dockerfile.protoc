@@ -1,0 +1,11 @@
+FROM python:3
+
+RUN pip install grpcio==1.49.1
+RUN pip install grpcio-tools==1.49.1
+
+COPY docker_support/build_protoc.sh /
+
+RUN mkdir /src
+WORKDIR /src
+
+CMD [ "/build_protoc.sh" ]
