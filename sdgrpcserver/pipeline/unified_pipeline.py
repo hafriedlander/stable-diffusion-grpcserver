@@ -1070,10 +1070,17 @@ class UnifiedPipeline(DiffusionPipeline):
                 self._graft_factor = float(value)
             elif key == "xformers" and value:
                 if has_xformers():
-                    if getattr(self.unet, 'r', False):
-                        raise EnvironmentError('If using xformers and tome on the same pipeline, to need to enable xformers _first_')
-                    replace_cross_attention(target=self.unet, crossattention=MemoryEfficientCrossAttention, name="unet")
-                    if self.inpaint_unet: replace_cross_attention(target=self.inpaint_unet, crossattention=MemoryEfficientCrossAttention, name="inpaint_unet")      
+                    using_tome = bool(getattr(self.unet, 'r', False))
+                    if using_tome: raise EnvironmentError(
+                        'If using xformers and tome on the same pipeline, to need to enable xformers _first_'
+                    )
+
+                    if value == "reversible":
+                        replace_cross_attention(target=self.unet, crossattention=MemoryEfficientCrossAttention, name="unet")
+                        if self.inpaint_unet: replace_cross_attention(target=self.inpaint_unet, crossattention=MemoryEfficientCrossAttention, name="inpaint_unet")      
+                    else:
+                        self.unet.set_use_memory_efficient_attention_xformers(True)
+                        if self.inpaint_unet: self.inpaint_unet.set_use_memory_efficient_attention_xformers(True)      
                 else:
                     print("Warning: you asked for XFormers, but XFormers is not installed")
             elif key == "tome" and bool(value):
