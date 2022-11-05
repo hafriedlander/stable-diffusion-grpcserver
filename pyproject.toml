@@ -21,7 +21,7 @@ dependencies = [
   "scipy ~= 1.9.1",
   "ftfy ~= 6.1.1",
   "transformers ~= 4.22.1",
-  "diffusers ~= 0.6.0",
+  "diffusers ~= 0.7.1",
   "accelerate ~= 0.13.2",
   # For ToMe
   "timm ~= 0.6.11",

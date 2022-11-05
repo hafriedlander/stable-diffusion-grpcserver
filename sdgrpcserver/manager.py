@@ -1,22 +1,23 @@
 
 from functools import cache
-import os, warnings, traceback, math, json
+import os, warnings, traceback, math, json, importlib, inspect
 from fnmatch import fnmatch
 from copy import deepcopy
 from types import SimpleNamespace as SN
 
 import torch
-from torch.profiler import profile, record_function, ProfilerActivity
-
+import accelerate
 import huggingface_hub
 
 from tqdm.auto import tqdm
 
-from transformers import CLIPFeatureExtractor, CLIPModel
-from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler, PNDMScheduler
+from transformers import PreTrainedModel, CLIPFeatureExtractor, CLIPModel
+
+from diffusers import pipelines, ModelMixin, ConfigMixin, StableDiffusionPipeline, LMSDiscreteScheduler, PNDMScheduler
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from diffusers.configuration_utils import FrozenDict
 from diffusers.utils import deprecate, logging
+from diffusers.pipeline_utils import DiffusionPipeline
 
 import generation_pb2
 
@@ -82,8 +83,8 @@ class EngineMode(object):
         return self.device == "cuda" and self._vramO > 1
 
     @property
-    def module_mode(self):
-        return "one" if self.device == "cuda" and self._vramO > 2 else "all"
+    def cpu_offload(self):
+        return True if self.device == "cuda" and self._vramO > 2 else False
 
 
 class BatchMode:
@@ -156,7 +157,6 @@ class BatchMode:
 
         torch.cuda.set_per_process_memory_fraction(1.0)
 
-
 class PipelineWrapper(object):
 
     def __init__(self, id, mode, pipeline):
@@ -166,7 +166,10 @@ class PipelineWrapper(object):
         self._pipeline = pipeline
 
         self._pipeline.enable_attention_slicing(1 if self.mode.attention_slice else None)
-        self._pipeline.set_module_mode(self.mode.module_mode)
+
+        if self.mode.cpu_offload:
+            for key, value in self._pipeline.__dict__.items():
+                if isinstance(value, torch.nn.Module): accelerate.cpu_offload(value, self.mode.device)
 
         self._plms = self._prepScheduler(PNDMScheduler(
                 beta_start=0.00085, 
@@ -245,13 +248,28 @@ class PipelineWrapper(object):
     @property
     def mode(self): return self._mode
 
+    def pipeline_to(self, torch_device):
+        """
+        The `to` method on DiffusionPipeline prints a warning when float16 modules are moved
+        to the CPU, but we do that when a pipeline is deactivated. So just use this instead,
+        which is the same but with no warning
+        """
+        module_names, _ = self._pipeline.extract_init_dict(dict(self._pipeline.config))
+        for name in module_names.keys():
+            module = getattr(self._pipeline, name)
+            if isinstance(module, torch.nn.Module):
+                module.to(torch_device)
+
     def activate(self):
         # Pipeline.to is in-place, so we move to the device on activate, and out again on deactivate
-        self._pipeline.to(self.mode.device)
-        
+        if not self.mode.cpu_offload: 
+            self.pipeline_to(self.mode.device)
+
     def deactivate(self):
-        self._pipeline.to("cpu", forceAll=True)
-        if self.mode.device == "cuda": torch.cuda.empty_cache()
+        if not self.mode.cpu_offload:
+            self.pipeline_to("cpu")
+            if self.mode.device == "cuda": torch.cuda.empty_cache()
+            print(self._pipeline.device)
 
     def generate(
         self, 
@@ -268,7 +286,7 @@ class PipelineWrapper(object):
     ):
         generator=None
 
-        latents_device = "cpu" if self._pipeline.device.type == "mps" else self._pipeline.device
+        latents_device = "cpu" if self.mode.device == "mps" else self.mode.device
 
         if isinstance(params.seed, list):
             generator = [torch.Generator(latents_device).manual_seed(seed) for seed in params.seed] 
@@ -323,8 +341,8 @@ class EngineManager(object):
         self.engines = engines
         self._default = None
 
+        self._models = {}
         self._pipelines = {}
-        self._internal_pipelines = {}
 
         self._activeId = None
         self._active = None
@@ -336,7 +354,6 @@ class EngineManager(object):
         self._batchMode = batchMode
         self._nsfw = nsfw_behaviour
         self._token = os.environ.get("HF_API_TOKEN", True)
-
 
     @property
     def mode(self): return self._mode
@@ -415,42 +432,145 @@ class EngineManager(object):
 
         raise EnvironmentError("\n".join(failures))
 
-    def fromPretrained(self, klass, opts, extra_kwargs = None):
-        if extra_kwargs is None: extra_kwargs = {}
+    def _fromLoaded(self, klass, opts, extra_kwargs):
+        parts = opts["model"][1:].split("/")
+        local_model = self.loadModel(parts.pop(0))
+        if parts: local_model = getattr(local_model, parts.pop(0))
 
-        use_auth_token=self._token if opts.get("use_auth_token", False) else False
+        if isinstance(local_model, klass): 
+            return deepcopy(local_model)
 
+        if isinstance(local_model, SN) and issubclass(klass, DiffusionPipeline):
+            available = local_model.__dict__
+            expected_modules = set(inspect.signature(klass.__init__).parameters.keys()) - set(["self"])
+            modules = {k: deepcopy(getattr(local_model, k)) for k in expected_modules if hasattr(local_model, k)}
+            modules = {**modules, **extra_kwargs}
+            return klass(**modules)
+        
+        raise ValueError(f"Error loading {model} - {local_model.__class__} is not an instance of {klass}")
+
+    def _fromWeights(self, klass, opts, extra_kwargs):
         weight_path=self._getWeightPath(opts)
         if self.mode.fp16: extra_kwargs["torch_dtype"]=torch.float16
         if opts.get('subfolder', None): extra_kwargs['subfolder'] = opts.get('subfolder')
+
+        # Work around from_pretrained not understanding Optional models
+        if klass is UnifiedPipeline:
+            if "inpaint_unet" not in extra_kwargs: 
+                extra_kwargs["inpaint_unet"] = None
+            if "clip_model" not in extra_kwargs: 
+                extra_kwargs["clip_model"] = None
 
         # Supress warnings during pipeline load. Unfortunately there isn't a better 
         # way to override the behaviour (beyond duplicating a huge function)
         current_log_level = logging.get_verbosity()
         logging.set_verbosity(logging.ERROR)
 
-        result = klass.from_pretrained(weight_path, use_auth_token=use_auth_token, **extra_kwargs)
+        result = klass.from_pretrained(weight_path, **extra_kwargs)
 
         logging.set_verbosity(current_log_level)
 
         return result
 
-    def buildPipeline(self, engine):
+    def fromPretrained(self, klass, opts, extra_kwargs = None):
+        if extra_kwargs is None: extra_kwargs = {}
+
+        model = opts.get("model", None)
+        is_local = model and len(model) > 1 and model[0] == "@"
+
+        # Handle copying a local model
+        if is_local: return self._fromLoaded(klass, opts, extra_kwargs)
+        else: return self._fromWeights(klass, opts, extra_kwargs)
+
+    def _nakedFromLoaded(self, opts):
+        local_model = self.loadModel(opts["model"][1:])
+        if not isinstance(local_model, SN): raise ValueError(f"{model} is not a pipeline, it's a {local_model}")
+        return deepcopy(local_model)
+
+    def _nakedFromWeights(self, opts):
+        weight_path = self._getWeightPath(opts)
+        config_dict = DiffusionPipeline.get_config_dict(weight_path)
+
+        whitelist = opts.get("whitelist", None)
+        if isinstance(whitelist, str): whitelist = [whitelist]
+        if whitelist: whitelist = set(whitelist)
+        blacklist = opts.get("blacklist", None)
+        if isinstance(blacklist, str): blacklist = [blacklist]
+        if blacklist: blacklist = set(blacklist)
+
+        pipeline = {}
+        for name, (library_name, class_name) in [item for item in config_dict.items() if item[0][0] != "_"]:
+            if whitelist and name not in whitelist: continue
+            if blacklist and name in blacklist: continue
+
+            # This is mostly from DiffusersPipeline.from_preloaded. Why is that method _so long_?
+            is_pipeline_module = hasattr(pipelines, library_name)
+
+            if is_pipeline_module:
+                pipeline_module = getattr(pipelines, library_name)
+                class_obj = getattr(pipeline_module, class_name)
+            else:
+                # else we just import it from the library.
+                library = importlib.import_module(library_name)
+                class_obj = getattr(library, class_name)
+
+            load_method_names = ['from_pretrained', 'from_config']
+            load_candidates = [getattr(class_obj, name, None) for name in load_method_names]
+            load_method = [m for m in load_candidates if m is not None][0]
+            
+            loading_kwargs = {}
+
+            if self.mode.fp16 and issubclass(class_obj, torch.nn.Module):
+                loading_kwargs["torch_dtype"]=torch.float16
+
+            is_diffusers_model = issubclass(class_obj, ModelMixin)
+            is_transformers_model = issubclass(class_obj, PreTrainedModel)
+
+            if is_diffusers_model or is_transformers_model:
+                loading_kwargs["low_cpu_mem_usage"] = True
+
+            # check if the module is in a subdirectory
+            if os.path.isdir(os.path.join(weight_path, name)):
+                loaded_sub_model = load_method(os.path.join(weight_path, name), **loading_kwargs)
+            else:
+                # else load from the root directory
+                loaded_sub_model = load_method(weight_path, **loading_kwargs)
+
+            pipeline[name] = loaded_sub_model
+
+        return SN(**pipeline)
+
+    def buildModel(self, opts, name = None):
+        if name is None: name = opts["type"]
+
+        if name == "vae":
+            return self.fromPretrained(AutoencoderKL, opts)
+        elif name == "unet" or name == "inpaint_unet":
+            return self.fromPretrained(UNet2DConditionModel, opts)
+        elif name == "clip_model":
+            return self.fromPretrained(CLIPModel, opts)
+        elif name == "feature_extractor":
+            return self.fromPretrained(CLIPFeatureExtractor, opts)
+        else:
+            raise ValueError(f"Unknown model {name}")   
+
+    def buildNakedPipeline(self, opts, extras = None):
+        model = opts.get("model", None)
+        is_local = model and len(model) > 1 and model[0] == "@"
+
+        if is_local:
+            pipeline = self._nakedFromLoaded(opts)
+        else:
+            pipeline = self._nakedFromWeights(opts)
+        
+        if extras:
+            args = {**pipeline.__dict__, **extras}
+            return SN(**args)
+        else:
+            return pipeline
+
+    def buildPipeline(self, engine, naked = False):
         extra_kwargs={}
-
-        share = engine.get("share", None)
-        if share:
-            for lender, modules in share.items():
-                pipeline = self._internal_pipelines[lender]
-                for module in modules: 
-                    extra_kwargs[module] = getattr(pipeline, module)
-
-        copy_from = engine.get("copy_from", None)
-        if copy_from:
-            for lender, modules in copy_from.items():
-                pipeline = self._internal_pipelines[lender]
-                for module in modules: 
-                    extra_kwargs[module] = deepcopy(getattr(pipeline, module))
 
         if self._nsfw == "flag":
             extra_kwargs["safety_checker"] = self.fromPretrained(FlagOnlySafetyChecker, {**engine, "subfolder": "safety_checker"})
@@ -458,51 +578,81 @@ class EngineManager(object):
             extra_kwargs["safety_checker"] = None
 
         for name, opts in engine.get("overrides", {}).items():
-            if name == "vae":
-                extra_kwargs["vae"] = self.fromPretrained(AutoencoderKL, opts)
-            elif name == "inpaint_unet":
-                extra_kwargs["inpaint_unet"] = self.fromPretrained(UNet2DConditionModel, {**opts, "subfolder": "unet"})
-            elif name == "clip_model":
-                extra_kwargs["clip_model"] = self.fromPretrained(CLIPModel, opts)
-                extra_kwargs["feature_extractor"] = self.fromPretrained(CLIPFeatureExtractor, opts)
+            if isinstance(opts, str): opts = { "model": opts }
+
+            if name == "clip":
+                extra_kwargs["clip_model"] = self.buildModel({**opts, "model": opts["model"] + "/clip_model"}, "clip_model")
+                extra_kwargs["feature_extractor"] = self.buildModel({**opts, "model": opts["model"] + "/feature_extractor"}, "feature_extractor")
+            else:
+                extra_kwargs[name] = self.buildModel(opts, name)
+
+        if naked:
+            return self.buildNakedPipeline(engine, extra_kwargs)
         
-        pipeline = None
-
-        if engine["class"] == "StableDiffusionPipeline":
-           pipeline = self.fromPretrained(StableDiffusionPipeline, engine, extra_kwargs)
-
-        elif engine["class"] == "UnifiedPipeline":
-            if "inpaint_unet" not in extra_kwargs: 
-                extra_kwargs["inpaint_unet"] = None
-            if "clip_model" not in extra_kwargs: 
-                extra_kwargs["clip_model"] = None
-            
-            pipeline = self.fromPretrained(UnifiedPipeline, engine, extra_kwargs)
-
         else:
-            raise Exception(f'Unknown engine class "{engine["class"]}"')
+            pipeline = None
 
-        if engine.get("options", False):
-            try:
-                pipeline.set_options(engine.get("options"))
-            except:
-                raise ValueError(f"Engine {engine['id']} has options, but created pipeline rejected them")
-        
-        return pipeline
+            klass = engine.get("class", "UnifiedPipeline")
+
+            if klass == "StableDiffusionPipeline":
+                pipeline = self.fromPretrained(StableDiffusionPipeline, engine, extra_kwargs)
+
+            elif klass == "UnifiedPipeline":
+                pipeline = self.fromPretrained(UnifiedPipeline, engine, extra_kwargs)
+
+            else:
+                raise Exception(f'Unknown engine class "{klass}"')
+
+            if engine.get("options", False):
+                try:
+                    pipeline.set_options(engine.get("options"))
+                except:
+                    raise ValueError(f"Engine {engine['id']} has options, but created pipeline rejected them")
+            
+            return pipeline
+
+    def loadModel(self, modelid):
+        if modelid in self._models:
+            return self._models[modelid]
+
+        for engine in self.engines:
+            if not engine.get("enabled", True): continue
+
+            otherid = engine.get("model_id", None)
+            if otherid is not None and otherid == modelid:
+                print(f"    - Model {modelid}...")
+
+                type = engine.get("type", "pipeline")
+                if type == "pipeline": 
+                    self._models[modelid] = self.buildPipeline(engine, naked=True)
+                elif type == "clip":
+                    self._models[modelid] = SN(
+                        clip_model = self.buildModel(engine, "clip_model"),
+                        feature_extractor = self.buildModel(engine, "feature_extractor"),
+                    )
+                else:
+                    self._models[modelid] = self.buildModel(engine)
+
+                return self._models[modelid]
+
+        raise EnvironmentError(f"Model {modelid} referenced does not exist")
 
     def loadPipelines(self):
 
         print("Loading engines...")
 
         for engine in self.engines:
-            if not engine.get("enabled", False): continue
+            if not engine.get("enabled", True): continue
+
+            # Models are loaded on demand (so we don't load models that aren't referenced)
+            modelid = engine.get("model_id", None)
+            if modelid is not None: continue
 
             engineid = engine["id"]
             if engine.get("default", False): self._default = engineid
 
-            print("  -"+engineid+"...")
-
-            self._internal_pipelines[engineid] = pipeline = self.buildPipeline(engine)
+            print(f"  - Engine {engineid}...")
+            pipeline = self.buildPipeline(engine)
 
             self._pipelines[engineid] = PipelineWrapper(
                 id=engineid,

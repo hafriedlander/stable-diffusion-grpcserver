@@ -1,14 +1,13 @@
 import inspect, traceback, math
 import time
 from mimetypes import init
-from typing import Callable, List, Tuple, Optional, Union
+from typing import Callable, List, Tuple, Optional, Union, Literal
 
 import numpy as np
 import torch
 
 import torchvision
 import torchvision.transforms as T
-import accelerate
 
 from torch.profiler import profile, record_function, ProfilerActivity
 
@@ -37,7 +36,7 @@ from sdgrpcserver.resize_right import resize_right
 
 try:
     from nonfree import tome_patcher
-catch:
+except:
     tome_patcher = None
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -161,17 +160,20 @@ class ApproximateDecoder:
         """Get an RGB JPEG representation of the latent data."""
         return torch.einsum('...lhw,lr -> ...rhw', latents, self.latent_rgb_factors)
 
+CLIP_NO_CUTOUTS_TYPE = Literal[False, True, "vae", "approx"]
+
 class ClipGuidedNoisePredictor:
 
-    def __init__(self, pipeline, text_embeddings, guidance_scale, text_embeddings_clip, clip_guidance_scale, num_cutouts, use_cutouts, generator, **kwargs):
+    def __init__(self, pipeline, text_embeddings, guidance_scale, text_embeddings_clip, clip_guidance_scale, vae_cutouts, approx_cutouts, no_cutouts, generator, **kwargs):
         self.pipeline = pipeline
         self.guidance_scale = guidance_scale
         self.text_embeddings_u, self.text_embeddings_g = text_embeddings.chunk(2)
 
         self.text_embeddings_clip = text_embeddings_clip
         self.clip_guidance_scale = clip_guidance_scale
-        self.num_cutouts = num_cutouts
-        self.use_cutouts = use_cutouts
+        self.vae_cutouts = vae_cutouts
+        self.approx_cutouts = approx_cutouts
+        self.no_cutouts = no_cutouts
 
         self.normalize = T.Normalize(mean=self.pipeline.feature_extractor.image_mean, std=self.pipeline.feature_extractor.image_std)
         self.normalizeB = T.Normalize(mean=self.pipeline.feature_extractor.image_mean[2], std=self.pipeline.feature_extractor.image_std[2])
@@ -207,14 +209,18 @@ class ClipGuidedNoisePredictor:
             self.text_embeddings_g,
             self.text_embeddings_clip,
             self.clip_guidance_scale,
-            self.num_cutouts,
-            self.use_cutouts,
+            self.vae_cutouts,
+            self.approx_cutouts,
+            self.no_cutouts,
             sigma
         )
 
         noise_pred_orig = noise_pred_u + self.guidance_scale * (noise_pred_g - noise_pred_u)
 
         if isinstance(self.pipeline.scheduler, PNDMScheduler):
+            # Todo: Don't duplicate this bit from cond_fn
+            alpha_prod_t = self.pipeline.scheduler.alphas_cumprod[t]
+            beta_prod_t = 1 - alpha_prod_t
             return noise_pred_orig - torch.sqrt(beta_prod_t) * grads
         else:
             latents = latents + grads * (sigma**2)
@@ -230,20 +236,13 @@ class ClipGuidedNoisePredictor:
         text_embeddings_g,
         text_embeddings_clip,
         clip_guidance_scale,
-        num_cutouts,
-        use_cutouts,
+        vae_cutouts,
+        approx_cutouts,
+        no_cutouts,
         sigma
     ):
         latents = latents.detach().requires_grad_()
         resized_latents = latents
-
-        # if num_cutouts is false, should be use the vae (or a quick approximation)
-        use_vae = True
-
-        # If num_cutouts is true, number of cutouts that should use the vae
-        vae_cutouts = num_cutouts // 2 #
-        # vae_cutouts = min(num_cutouts, math.floor((num_cutouts+1) * (1-timestep/1000)))
-        approx_cutouts = num_cutouts - vae_cutouts
 
         if isinstance(self.pipeline.scheduler, KSchedulerMixin):
             latent_model_input = resized_latents / ((sigma**2 + 1) ** 0.5)
@@ -272,7 +271,16 @@ class ClipGuidedNoisePredictor:
         # For VAE we crop / resize _before_ VAE to limit size of grads. 
         # For Approximation we crop / resize after fake-VAE to try and maximise signal (since the approximation doesn't include an automatic 8x upscale)
 
-        if use_cutouts:
+        if no_cutouts:
+            if no_cutouts == "approx":
+                image = self.approx_decoder(sample)
+                image = T.Resize(self.pipeline.feature_extractor.size)(image)
+            else:
+                sample = T.Resize(self.pipeline.feature_extractor.size // 8)(sample)
+                sample = 1 / 0.18215 * sample
+                image = self.pipeline.vae.decode(sample).sample
+
+        else:
             image = None
 
             if approx_cutouts:
@@ -286,31 +294,17 @@ class ClipGuidedNoisePredictor:
                 image2 = self.pipeline.vae.decode(sample2).sample
                 image = torch.cat([image, image2]) if image is not None else image2
 
-        else:
-            if use_vae:
-                sample = T.Resize(self.pipeline.feature_extractor.size // 8)(sample)
-                sample = 1 / 0.18215 * sample
-                image = self.pipeline.vae.decode(sample).sample
-            else:
-                image = self.approx_decoder(sample)
-                image = T.Resize(self.pipeline.feature_extractor.size)(image)
-
         image = (image / 2 + 0.5).clamp(0, 1)
-
-        # for j, pngBytes in enumerate(images.toPngBytes(image.cpu())):
-        #     with open(f"/tests/out/debug-{timestep}-{j}.png", "wb") as f:
-        #         f.write(pngBytes)
-
         image = self.normalize(image)
 
         image_embeddings_clip = self.pipeline.clip_model.get_image_features(image)
 
-        if use_cutouts:
-            dists = spherical_dist_loss(image_embeddings_clip, text_embeddings_clip)
-            dists = dists.view([num_cutouts, latents.shape[0], -1])
-            loss = dists.sum(2).mean(0).sum() * clip_guidance_scale
+        if no_cutouts:
+            loss = spherical_dist_loss(image_embeddings_clip, text_embeddings_clip).mean() * (clip_guidance_scale * 100)
         else:
-            loss = spherical_dist_loss(image_embeddings_clip, text_embeddings_clip).mean() * clip_guidance_scale
+            dists = spherical_dist_loss(image_embeddings_clip, text_embeddings_clip)
+            dists = dists.view([vae_cutouts+approx_cutouts, latents.shape[0], -1])
+            loss = dists.sum(2).mean(0).sum() * (clip_guidance_scale * 100)
 
         grads = -torch.autograd.grad(loss, latents)[0]
         return grads, noise_pred_g
@@ -348,7 +342,6 @@ class Txt2imgMode(UnifiedMode):
 
         self.generators = generator if isinstance(generator, list) else [generator] * batch_total
 
-        self.latents_device = "cpu" if self.device.type == "mps" else self.device
         self.latents_dtype = latents_dtype
         self.latents_shape = (
             batch_total, 
@@ -362,7 +355,7 @@ class Txt2imgMode(UnifiedMode):
         # for 1-to-1 results reproducibility with the CompVis implementation.
         # However this currently doesn't work in `mps`.
         latents = torch.cat([
-            torch.randn((1, *self.latents_shape[1:]), generator=generator, device=self.latents_device, dtype=self.latents_dtype) 
+            torch.randn((1, *self.latents_shape[1:]), generator=generator, device=generator.device, dtype=self.latents_dtype) 
             for generator in self.generators
         ], dim=0)
         
@@ -452,6 +445,7 @@ class Img2imgMode(UnifiedMode):
             for generator in self.generators
         ], dim=0)
 
+        latents = latents.to(self.device)
         latents = 0.18215 * latents
 
         return latents
@@ -479,10 +473,12 @@ class Img2imgMode(UnifiedMode):
         # NOTE: We run K_LMS in float32, because it seems to have problems with float16
         noise_dtype=torch.float32 if isinstance(self.scheduler, LMSDiscreteScheduler) else self.latents_dtype
 
-        self.image_noise = torch.cat([
-            torch.randn((1, *latents.shape[1:]), generator=generator, device=self.device, dtype=noise_dtype)
+        image_noise = torch.cat([
+            torch.randn((1, *latents.shape[1:]), generator=generator, device=generator.device, dtype=noise_dtype)
             for generator in self.generators
         ])
+
+        self.image_noise = image_noise.to(self.device)
 
         result = self.scheduler.add_noise(latents.to(noise_dtype), self.image_noise, self._getSchedulerNoiseTimestep(self.t_start))
         return result.to(self.latents_dtype) # Old schedulers return float32, and we force K_LMS into float32, but we need to return float16
@@ -593,7 +589,6 @@ class RunwayInpaintMode(UnifiedMode):
         height = mask_image.shape[2]
         width = mask_image.shape[3]
 
-        self.latents_device = "cpu" if self.device.type == "mps" else self.device
         self.latents_dtype = latents_dtype
         self.num_channels_latents = self.pipeline.vae.config.latent_channels
         self.latents_shape = (
@@ -686,9 +681,11 @@ class RunwayInpaintMode(UnifiedMode):
 
     def generateLatents(self):
         latents = torch.cat([
-            torch.randn((1, *self.latents_shape[1:]), generator=generator, device=self.latents_device, dtype=self.latents_dtype) 
+            torch.randn((1, *self.latents_shape[1:]), generator=generator, device=generator.device, dtype=self.latents_dtype) 
             for generator in self.generators
         ], dim=0)
+
+        latents = latents.to(self.device)
 
         # scale the initial noise by the standard deviation required by the scheduler
         if isinstance(self.scheduler, KSchedulerMixin): 
@@ -840,7 +837,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
                 # In noise mode 5 we don't convolve. The pixel shuffled noise is already extremely similar to the original in tone. 
                 # We allow the user to request some portion is uncolored noise to allow outpaints that differ greatly from original tone
                 # (with an increasing risk of image discontinuity)
-                noise = noise.normal_(generator=generator)
+                noise = noise.to(generator.device).normal_(generator=generator).to(noise.device)
                 noise = noise * (1-self.shaped_noise_strength) + torch.cat(channels, dim=1) * self.shaped_noise_strength
 
                 batch_noise.append(noise)
@@ -928,131 +925,6 @@ class EnhancedRunwayInpaintMode(EnhancedInpaintMode):
         if False: return super().latentStep(latents, i, t, steppos)
         return latents
 
-class DynamicModuleDiffusionPipeline2(DiffusionPipeline):
-    def __init__(self, *args, **kwargs):
-        self._moduleMode = "all"
-        self._moduleDevice = torch.device("cpu")
-
-    def register_modules(self, **kwargs):
-        self._modules = set(kwargs.keys())
-        self._modulesDyn = set(("vae", "text_encoder", "unet", "inpaint_unet", "safety_checker", "clip_model"))
-        self._modulesStat = self._modules - self._modulesDyn
-
-        super().register_modules(**kwargs)
-
-    def set_module_mode(self, mode):
-        for name in self._modulesDyn:
-            module = getattr(self, name, None)
-            if module is not None: accelerate.cpu_offload(module, "cuda")
-
-    def to(self, torch_device, forceAll=False):
-        if torch_device is None:
-            return self
-
-        self._moduleDevice = torch.device(torch_device)
-        return self
-
-    @property
-    def device(self) -> torch.device:
-        return self._moduleDevice
-
-
-class DynamicModuleDiffusionPipeline(DiffusionPipeline):
-
-    def __init__(self, *args, **kwargs):
-        self._moduleMode = "all"
-        self._moduleDevice = torch.device("cpu")
-
-    def register_modules(self, **kwargs):
-        self._modules = set(kwargs.keys())
-        self._modulesDyn = set(("vae", "text_encoder", "unet", "inpaint_unet", "safety_checker"))
-        self._modulesStat = self._modules - self._modulesDyn
-
-        super().register_modules(**kwargs)
-
-    def set_module_mode(self, mode):
-        self._moduleMode = mode
-        self.to(self._moduleDevice)
-
-    def to(self, torch_device, forceAll=False):
-        if torch_device is None:
-            return self
-
-        self._moduleDevice = torch.device(torch_device)
-
-        moveNow = self._modules if (self._moduleMode == "all" or forceAll) else self._modulesStat
-
-        for name in moveNow:
-            module = getattr(self, f"_{name}" if name in self._modulesDyn else name)
-            if isinstance(module, torch.nn.Module):
-                module.to(torch_device)
-        
-        return self
-
-    @property
-    def device(self) -> torch.device:
-        return self._moduleDevice
-
-    def prepmodule(self, name, module):
-        if self._moduleMode == "all":
-            return module
-
-        # We assume if this module is on a device of the right type we put it there
-        # (How else would it get there?)
-        if self._moduleDevice.type == module.device.type:
-            return module
-
-        if name in self._modulesStat:
-            return module
-
-        for name in self._modulesDyn:
-            other = getattr(self, f"_{name}")
-            if other is not module: other.to("cpu")
-        
-        module.to(self._moduleDevice)
-        return module
-
-    @property 
-    def vae(self):
-        return self.prepmodule("vae", self._vae)
-    
-    @vae.setter 
-    def vae(self, value):
-        self._vae = value
-
-    @property 
-    def text_encoder(self):
-        return self.prepmodule("text_encoder", self._text_encoder)
-    
-    @text_encoder.setter 
-    def text_encoder(self, value):
-        self._text_encoder = value
-
-    @property 
-    def unet(self):
-        return self.prepmodule("unet", self._unet)
-    
-    @unet.setter 
-    def unet(self, value):
-        self._unet = value
-
-    @property 
-    def inpaint_unet(self):
-        a = self.prepmodule("inpaint_unet", self._inpaint_unet)
-        return a
-    
-    @inpaint_unet.setter 
-    def inpaint_unet(self, value):
-        self._inpaint_unet = value
-
-    @property 
-    def safety_checker(self):
-        return self.prepmodule("safety_checker", self._safety_checker)
-    
-    @safety_checker.setter 
-    def safety_checker(self, value):
-        self._safety_checker = value
-
 class UnifiedPipelinePrompt():
     def __init__(self, prompts):
         self._weighted = False
@@ -1101,11 +973,8 @@ class UnifiedPipelinePrompt():
 
     def as_unweighted_string(self):
         return [" ".join([token[0] for token in prompt]) for prompt in self._prompt]
-
-
-
-
-class UnifiedPipeline(DynamicModuleDiffusionPipeline):
+        
+class UnifiedPipeline(DiffusionPipeline):
     r"""
     Pipeline for unified image generation using Stable Diffusion.
 
@@ -1180,12 +1049,18 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
             clip_model=clip_model
         )
 
+        self.clip_defaults = {
+            "vae_cutouts": 2,
+            "approx_cutouts": 2,
+            "no_cutouts": False,
+            "guidance_scale": 1.0
+        }
+
         if self.clip_model is not None:
             set_requires_grad(self.text_encoder, False)
             set_requires_grad(self.clip_model, False)
-
             set_requires_grad(self.unet, False)
-            set_requires_grad(self.vae, True)
+            set_requires_grad(self.vae, False)
 
     def set_options(self, options):
         for key, value in options.items():
@@ -1195,16 +1070,15 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
                 self._graft_factor = float(value)
             elif key == "xformers" and value:
                 if has_xformers():
-                    print("Using xformers")
                     if getattr(self.unet, 'r', False):
                         raise EnvironmentError('If using xformers and tome on the same pipeline, to need to enable xformers _first_')
                     replace_cross_attention(target=self.unet, crossattention=MemoryEfficientCrossAttention, name="unet")
-                    if self.inpaint_unet: replace_cross_attention(target=self.inpaint_unet, crossattention=MemoryEfficientCrossAttention, name="inpaint_unet")
+                    if self.inpaint_unet: replace_cross_attention(target=self.inpaint_unet, crossattention=MemoryEfficientCrossAttention, name="inpaint_unet")      
                 else:
                     print("Warning: you asked for XFormers, but XFormers is not installed")
             elif key == "tome" and bool(value):
+                print("Warning: ToMe isn't finished, and shouldn't be used")
                 if tome_patcher:
-                    print("Using ToMe")
                     tome_patcher.apply_tome(self.unet)
                     self.unet.r = int(value)
                 else:
@@ -1214,11 +1088,23 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
                 replace_cross_attention(target=self.unet, crossattention=StructuredCrossAttention, name="unet")
                 if self.inpaint_unet: replace_cross_attention(target=self.inpaint_unet, crossattention=StructuredCrossAttention, name="inpaint_unet")
                 self._structured_diffusion = True
-            elif key == "clip_unet_grad":
-                print(bool(value))
-                set_requires_grad(self.unet, bool(value))
+            elif key == "clip":
+                for subkey, subval in value.items():
+                    if subkey == "unet_grad":
+                        set_requires_grad(self.unet, bool(subval))
+                    elif subkey == "vae_grad":
+                        set_requires_grad(self.vae, bool(subval))
+                    elif subkey == "vae_cutouts":
+                        self.clip_defaults["vae_cutouts"] = int(subval)
+                    elif subkey == "approx_cutouts":
+                        self.clip_defaults["approx_cutouts"] = int(subval)
+                    elif subkey == "no_cutouts":
+                        self.clip_defaults["no_cutouts"] = bool(subval)
+                    elif subkey == "guidance_scale": 
+                        self.clip_defaults["guidance_scale"] = float(subval)
+                    else:
+                        raise ValueError(f"Unknown option {subkey}: {subval} passed as part of clip settings")
             elif key == "clip_vae_grad":
-                print(bool(value))
                 set_requires_grad(self.vae, bool(value))
             else:
                 raise ValueError(f"Unknown option {key}: {value} passed to UnifiedPipeline")
@@ -1273,10 +1159,11 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         run_safety_checker: bool = True,
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
-        clip_guidance_scale: Optional[float] = 100,
+        clip_guidance_scale: Optional[float] = None,
         clip_prompt: Optional[Union[str, List[str]]] = None,
-        num_cutouts: Optional[int] = 4,
-        use_cutouts: Optional[bool] = True,
+        vae_cutouts: Optional[int] = None,
+        approx_cutouts: Optional[int] = None,
+        no_cutouts: Optional[Union[str, bool]] = None,
         **kwargs,
     ):
         r"""
@@ -1337,6 +1224,13 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
             (nsfw) content, according to the `safety_checker`.
         """
 
+        # Set defaults for clip
+        if clip_guidance_scale is None: clip_guidance_scale = self.clip_defaults["guidance_scale"]
+        if vae_cutouts is None: vae_cutouts = self.clip_defaults["vae_cutouts"]
+        if approx_cutouts is None: approx_cutouts = self.clip_defaults["approx_cutouts"]
+        if no_cutouts is None: no_cutouts = self.clip_defaults["no_cutouts"]
+
+        # Parse prompt and calculate batch size
         prompt = UnifiedPipelinePrompt(prompt)
         batch_size = prompt.batch_size
 
@@ -1391,7 +1285,6 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
             prompt=prompt,
             uncond_prompt=negative_prompt if do_classifier_free_guidance else None,
         )
-        print(1, text_embeddings.shape)
         latents_dtype = text_embeddings.dtype
 
         if self._structured_diffusion:
@@ -1437,8 +1330,9 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
                 guidance_scale=guidance_scale,
                 text_embeddings_clip=text_embeddings_clip, 
                 clip_guidance_scale=clip_guidance_scale, 
-                num_cutouts=num_cutouts, 
-                use_cutouts=use_cutouts,
+                vae_cutouts=vae_cutouts,
+                approx_cutouts=approx_cutouts,
+                no_cutouts=no_cutouts,
                 generator=generator,
             )
 
@@ -1554,11 +1448,11 @@ class UnifiedPipeline(DynamicModuleDiffusionPipeline):
         if outmask_image != None:
             outmask = torch.cat([outmask_image] * batch_total)
             outmask = outmask[:, [0,1,2]]
-            outmask = outmask.to(self.device)
+            outmask = outmask.to(image.device)
 
             source =  torch.cat([init_image] * batch_total)
             source = source[:, [0,1,2]]
-            source = source.to(self.device)
+            source = source.to(image.device)
 
             image = source * (1-outmask) + image * outmask
 
