@@ -164,6 +164,7 @@ class PipelineWrapper(object):
         self._mode = mode
 
         self._pipeline = pipeline
+        self._previous = None
 
         self._pipeline.enable_attention_slicing(1 if self.mode.attention_slice else None)
 
@@ -248,28 +249,36 @@ class PipelineWrapper(object):
     @property
     def mode(self): return self._mode
 
-    def pipeline_to(self, torch_device):
-        """
-        The `to` method on DiffusionPipeline prints a warning when float16 modules are moved
-        to the CPU, but we do that when a pipeline is deactivated. So just use this instead,
-        which is the same but with no warning
-        """
+    def activate(self):
+        if self.mode.cpu_offload: return
+
+        if self._previous is not None: 
+            raise Exception("Activate called without previous deactivate")
+
+        self._previous = {}
+
         module_names, _ = self._pipeline.extract_init_dict(dict(self._pipeline.config))
         for name in module_names.keys():
             module = getattr(self._pipeline, name)
             if isinstance(module, torch.nn.Module):
-                module.to(torch_device)
-
-    def activate(self):
-        # Pipeline.to is in-place, so we move to the device on activate, and out again on deactivate
-        if not self.mode.cpu_offload: 
-            self.pipeline_to(self.mode.device)
+                self._previous[name] = module
+                setattr(self._pipeline, name, deepcopy(module).to(self.mode.device))
 
     def deactivate(self):
-        if not self.mode.cpu_offload:
-            self.pipeline_to("cpu")
-            if self.mode.device == "cuda": torch.cuda.empty_cache()
-            print(self._pipeline.device)
+        if self.mode.cpu_offload: return
+
+        if self._previous is None: 
+            raise Exception("Deactivate called without previous activate")
+
+        module_names, _ = self._pipeline.extract_init_dict(dict(self._pipeline.config))
+        for name in module_names.keys():
+            module = self._previous.get(name, None)
+            if module and isinstance(module, torch.nn.Module):
+                setattr(self._pipeline, name, module)
+                
+        self._previous = None
+        
+        if self.mode.device == "cuda": torch.cuda.empty_cache()
 
     def generate(
         self, 
@@ -334,6 +343,28 @@ class PipelineWrapper(object):
         )
 
         return images
+
+def clone_model(model, share_parameters=True, share_buffers=True):
+    """
+    Copies a model so you get a different set of instances, but they share
+    all their parameters and buffers
+    """
+
+    # Start by deep cloning the model
+    clone = deepcopy(model)
+
+    # If this isn't actually a model, return the deepcopy as is
+    if not isinstance(model, torch.nn.Module): return clone
+
+    for (_, source), (_, dest) in zip(model.named_modules(), clone.named_modules()):
+        if share_parameters:
+            for name, param in source.named_parameters(recurse=False):
+                dest.register_parameter(name, param)
+        if share_buffers:
+            for name, buf in source.named_buffers(recurse=False):
+                dest.register_buffer(name, buf)
+
+    return clone
 
 class EngineManager(object):
 
@@ -438,12 +469,12 @@ class EngineManager(object):
         if parts: local_model = getattr(local_model, parts.pop(0))
 
         if isinstance(local_model, klass): 
-            return deepcopy(local_model)
+            return clone_model(local_model)
 
         if isinstance(local_model, SN) and issubclass(klass, DiffusionPipeline):
             available = local_model.__dict__
             expected_modules = set(inspect.signature(klass.__init__).parameters.keys()) - set(["self"])
-            modules = {k: deepcopy(getattr(local_model, k)) for k in expected_modules if hasattr(local_model, k)}
+            modules = {k: clone_model(getattr(local_model, k)) for k in expected_modules if hasattr(local_model, k)}
             modules = {**modules, **extra_kwargs}
             return klass(**modules)
         
@@ -485,7 +516,7 @@ class EngineManager(object):
     def _nakedFromLoaded(self, opts):
         local_model = self.loadModel(opts["model"][1:])
         if not isinstance(local_model, SN): raise ValueError(f"{model} is not a pipeline, it's a {local_model}")
-        return deepcopy(local_model)
+        return local_model
 
     def _nakedFromWeights(self, opts):
         weight_path = self._getWeightPath(opts)
@@ -662,7 +693,6 @@ class EngineManager(object):
 
         if self.batchMode.autodetect:
             self.batchMode.run_autodetect(self)
-
 
     def getStatus(self):
         return {engine["id"]: engine["id"] in self._pipelines for engine in self.engines if engine.get("enabled", True)}
