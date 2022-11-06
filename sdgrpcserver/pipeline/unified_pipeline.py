@@ -102,25 +102,31 @@ class GuidedNoisePredictor(NoisePredictor):
         return noise_pred
 
 class MakeCutouts(torch.nn.Module):
-    def __init__(self, cut_size, cut_power=1.0, generator=None):
+    def __init__(self, cut_size, cut_power=1.0, generators=None):
         super().__init__()
 
         self.cut_size = cut_size
         self.cut_power = cut_power
-        self.generator = generator
+        self.generators = generators
 
     def forward(self, pixel_values, num_cutouts):
         sideY, sideX = pixel_values.shape[2:4]
         max_size = min(sideX, sideY)
         min_size = min(sideX, sideY, self.cut_size)
         cutouts = []
-        for _ in range(num_cutouts):
-            size = int(torch.rand([], generator=self.generator, device=self.generator.device) ** self.cut_power * (max_size - min_size) + min_size)
-            offsetx = torch.randint(0, sideX - size + 1, (), generator=self.generator, device=self.generator.device)
-            offsety = torch.randint(0, sideY - size + 1, (), generator=self.generator, device=self.generator.device)
-            cutout = pixel_values[:, :, offsety : offsety + size, offsetx : offsetx + size]
 
-            cutouts.append(resize_right.resize(cutout, out_shape=(self.cut_size, self.cut_size), pad_mode='reflect').to(cutout.dtype))
+        # To maintain batch-independance, we split out per batch, since each batch has a different generator
+        # This also keeps the output grouped by batch (b1c1, b1c2, b1c3, ..., b2c1, b2c2, ...) whereas otherwise
+        # it would be grouped by cutout (b1c1, b2c1, b3c1, ....., b1c2, b2c2, ...)
+        for generator, batch_pixels in zip(self.generators, pixel_values.split(1)):
+            for _ in range(num_cutouts):
+                size = int(torch.rand([], generator=generator, device=generator.device) ** self.cut_power * (max_size - min_size) + min_size)
+                offsetx = torch.randint(0, sideX - size + 1, (), generator=generator, device=generator.device)
+                offsety = torch.randint(0, sideY - size + 1, (), generator=generator, device=generator.device)
+                cutout = batch_pixels[:, :, offsety : offsety + size, offsetx : offsetx + size]
+
+                cutouts.append(resize_right.resize(cutout, out_shape=(self.cut_size, self.cut_size), pad_mode='reflect').to(cutout.dtype))
+        
         return torch.cat(cutouts)
 
 
@@ -178,8 +184,8 @@ class ClipGuidedNoisePredictor:
         self.normalize = T.Normalize(mean=self.pipeline.feature_extractor.image_mean, std=self.pipeline.feature_extractor.image_std)
         self.normalizeB = T.Normalize(mean=self.pipeline.feature_extractor.image_mean[2], std=self.pipeline.feature_extractor.image_std[2])
 
-        self.make_cutouts = MakeCutouts(self.pipeline.feature_extractor.size // 8, generator=generator[0])
-        self.make_cutouts_rgb = MakeCutouts(self.pipeline.feature_extractor.size, generator=generator[0])
+        self.make_cutouts = MakeCutouts(self.pipeline.feature_extractor.size // 8, generators=generator)
+        self.make_cutouts_rgb = MakeCutouts(self.pipeline.feature_extractor.size, generators=generator)
 
         self.approx_decoder = ApproximateDecoder(device = self.pipeline.device, dtype = text_embeddings.dtype)
 
@@ -241,6 +247,9 @@ class ClipGuidedNoisePredictor:
         no_cutouts,
         sigma
     ):
+        num_cutouts = vae_cutouts + approx_cutouts
+        batch_total = latents.shape[0]
+
         latents = latents.detach().requires_grad_()
         resized_latents = latents
 
@@ -249,7 +258,7 @@ class ClipGuidedNoisePredictor:
         else:
             latent_model_input = resized_latents        
 
-        # # predict the noise residual
+        # predict the noise residual
         noise_pred_g = unet(latent_model_input, timestep, encoder_hidden_states=text_embeddings_g).sample
 
         if isinstance(self.pipeline.scheduler, PNDMScheduler):
@@ -292,7 +301,19 @@ class ClipGuidedNoisePredictor:
                 sample2 = self.make_cutouts(sample, vae_cutouts)
                 sample2 = 1 / 0.18215 * sample2
                 image2 = self.pipeline.vae.decode(sample2).sample
-                image = torch.cat([image, image2]) if image is not None else image2
+
+                if image is None:
+                    image = image2
+                else:
+                    # image and image2 are batch-grouped. We need to interleave them so they are still batch groups after
+                    # [b1c1, b1c2, b2c1, b2c2] + [b1c3, b1c4, b2c3, b2c4] => [b1c1, b1c2, b1c3, b1c4, b2c1, b2c2, b2c3, b2c4]
+                    # First, split into 5D b cut c h w tensors
+                    image = image.view(batch_total, approx_cutouts, *image.shape[-3:])
+                    image2 = image.view(batch_total, vae_cutouts, *image2.shape[-3:])
+                    # Now stack on the cut dimension, so we get a 6D tensor b cutgroup cut c h w
+                    image = torch.stack([image, image2], dim=1)
+                    # Then collapse down into 4D b*cut c h w
+                    image = image.view(batch_total * num_cutouts, *image.shape[-3:])
 
         image = (image / 2 + 0.5).clamp(0, 1)
         image = self.normalize(image)
@@ -302,8 +323,9 @@ class ClipGuidedNoisePredictor:
         if no_cutouts:
             loss = spherical_dist_loss(image_embeddings_clip, text_embeddings_clip).mean() * (clip_guidance_scale * 100)
         else:
-            dists = spherical_dist_loss(image_embeddings_clip, text_embeddings_clip)
-            dists = dists.view([vae_cutouts+approx_cutouts, latents.shape[0], -1])
+            text_embeddings_input = text_embeddings_clip.repeat_interleave(num_cutouts, dim=0)
+            dists = spherical_dist_loss(image_embeddings_clip, text_embeddings_input)
+            dists = dists.view([num_cutouts, latents.shape[0], -1])
             loss = dists.sum(2).mean(0).sum() * (clip_guidance_scale * 100)
 
         grads = -torch.autograd.grad(loss, latents)[0]
@@ -1265,10 +1287,21 @@ class UnifiedPipeline(DiffusionPipeline):
 
         if batch_size != negative_prompt.batch_size:
             raise ValueError(
-                f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"
-                f" {prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
-                " the batch size of `prompt`."
+                f"negative_prompt has batch size {negative_prompt.batch_size}, but " 
+                f"prompt has batch size {batch_size}. They need to match."
             )
+
+        if clip_guidance_scale > 0:
+            if clip_prompt is None:
+                clip_prompt = prompt
+            else:
+                clip_prompt = UnifiedPipelinePrompt(clip_prompt)
+
+            if batch_size != clip_prompt.batch_size:
+                raise ValueError(
+                    f"clip_prompt has batch size {clip_prompt.batch_size}, but " 
+                    f"prompt has batch size {batch_size}. They need to match."
+                )
 
         batch_total = batch_size * num_images_per_prompt
 
@@ -1333,9 +1366,12 @@ class UnifiedPipeline(DiffusionPipeline):
             else:
                 text_embeddings = (uncond_embeddings, text_embeddings)
 
+        # Batch structure for 2 per prompt, 3 prompts, guided is:
+        # p1u p1u p2u p2u p3u p3u p1g p1g p2g p2g p3g p3g
+
         if self.clip_model is not None and clip_guidance_scale > 0:
             clip_text_input = self.tokenizer(
-                clip_prompt if clip_prompt is not None else prompt.as_unweighted_string(),
+                clip_prompt.as_unweighted_string(),
                 padding="max_length",
                 max_length=self.tokenizer.model_max_length,
                 truncation=True,
