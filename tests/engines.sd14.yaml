@@ -1,0 +1,11 @@
+- id: "testengine"
+  default: True
+  enabled: True
+  visible: True
+  name: "Test Engine"
+  description: "Test Engine"
+  class: "UnifiedPipeline"
+  model: "CompVis/stable-diffusion-v1-4"
+  use_auth_token: True
+  local_model: "./stable-diffusion-v1-4"
+  local_model_fp16: "./stable-diffusion-v1-4-fp16"

@@ -1,36 +1,9 @@
-
+from test_harness import TestHarness, VRAMUsageMonitor, ALGORITHMS
 import os, sys, re, time
 
 import torch
 
-import yaml
-try:
-    from yaml import CLoader as Loader, CDumper as Dumper
-except ImportError:
-    from yaml import Loader, Dumper
-
-basePath = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-sys.path.append(basePath)
-
-from sdgrpcserver.server import main
-from sdgrpcserver.services.generate import GenerationServiceServicer
-from sdgrpcserver.manager import EngineMode, EngineManager
-
-from VRAMUsageMonitor import VRAMUsageMonitor
-
 import generation_pb2, generation_pb2_grpc
-
-algorithms = {
-    "ddim": generation_pb2.SAMPLER_DDIM,
-    "plms": generation_pb2.SAMPLER_DDPM,
-    "k_euler": generation_pb2.SAMPLER_K_EULER,
-    "k_euler_ancestral": generation_pb2.SAMPLER_K_EULER_ANCESTRAL,
-    "k_heun": generation_pb2.SAMPLER_K_HEUN,
-    "k_dpm_2": generation_pb2.SAMPLER_K_DPM_2,
-    "k_dpm_2_ancestral": generation_pb2.SAMPLER_K_DPM_2_ANCESTRAL,
-    "k_lms": generation_pb2.SAMPLER_K_LMS,
-}
 
 args = {
     "sampler": [
@@ -61,10 +34,14 @@ with open("image.png", "rb") as file:
 with open("mask.png", "rb") as file:
     test_mask = file.read()
 
-class TestRunner(object):
+class TestRunner(TestHarness):
+
+    def __init__(self, combos, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.combos = combos
 
     def sampler(self, item, request, prompt, parameters):
-        request.image.transform.diffusion=algorithms[item["sampler"]]
+        request.image.transform.diffusion=ALGORITHMS[item["sampler"]]
 
         eta = item.get("eta", None)
         if eta != None:
@@ -94,7 +71,6 @@ class TestRunner(object):
                 )
             ))
 
-
     def build_combinations(self, args, idx):
         if idx == len(args.keys()) - 1:
             key = list(args.keys())[idx]
@@ -109,9 +85,8 @@ class TestRunner(object):
         return result
 
 
-    def run(self, args, manager, context, prefix=""):
-        combinations = self.build_combinations(args, 0)
-        generator = GenerationServiceServicer(manager)
+    def test(self):
+        combinations = self.build_combinations(self.combos, 0)
 
         for combo in combinations:
             request_id=re.sub('[^\w]+', '_', repr(combo))
@@ -122,7 +97,7 @@ class TestRunner(object):
             parameters = generation_pb2.StepParameter()
 
             request = generation_pb2.Request(
-                engine_id="stable-diffusion-v1-4",
+                engine_id="testengine",
                 request_id=request_id,
                 prompt=[],
                 image=generation_pb2.ImageParameters(
@@ -143,60 +118,16 @@ class TestRunner(object):
             
             request.image.parameters.append(parameters)
 
-            for result in generator.Generate(request, context):
-                for artifact in result.artifacts:
-                    if artifact.type == generation_pb2.ARTIFACT_IMAGE:
-                        with open(f"out/{prefix}{request_id}.png", "wb") as f:
-                            f.write(artifact.binary)
-
-class FakeContext():
-    def add_callback(self, callback):
-        pass
-
-    def set_code(self, code):
-        print("Test failed")
-        monitor.stop()
-        sys.exit(-1)
-    
-    def set_details(self, code):
-        pass
-
-instance = TestRunner()
+            self.save_output(request_id, self.call_generator(request))
 
 monitor = VRAMUsageMonitor()
 monitor.start()
 
-with open(os.path.normpath("testengines.yaml"), 'r') as cfg:
-    engines = yaml.load(cfg, Loader=Loader)
-
 stats = {}
 
-for vramO in range(4):
-    print("opt", vramO)
-
-    torch.cuda.empty_cache()
-
-    manager = EngineManager(
-        engines, 
-        weight_root="../weights/",
-        mode=EngineMode(vram_optimisation_level=vramO, enable_cuda=True, enable_mps=False), 
-        nsfw_behaviour="flag"
-    )
-
-    manager.loadPipelines()
-
-    monitor.read_and_reset()
-    start_time = time.monotonic()
-
-    instance.run(args, manager, FakeContext(), prefix=f"vram_{vramO}_")
-
-    end_time = time.monotonic() 
-    used, total = monitor.read_and_reset()
-
-    runstats = {"vramused": used, "time": end_time - start_time}
-    print("Run complete", repr(runstats))
-
-    stats[f"run vram-optimisation-level={vramO}"] = runstats
+for vramO in [2]: #range(4):
+    instance = TestRunner(engine_path="engines.inpaint.yaml", combos=args, prefix=f"hp_{vramO}", vramO=vramO, monitor=monitor)
+    stats[f"run vram-optimisation-level={vramO}"] = instance.run()
 
 monitor.stop()
 

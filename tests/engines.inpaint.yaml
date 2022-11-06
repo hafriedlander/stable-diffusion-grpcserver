@@ -1,0 +1,18 @@
+- id: "testengine"
+  default: True
+  enabled: True
+  visible: True
+  name: "Test Engine"
+  description: "Test Engine"
+  class: "UnifiedPipeline"
+  model: "runwayml/stable-diffusion-v1-5"
+  use_auth_token: True
+  local_model: "./stable-diffusion-v1-5"
+  local_model_fp16: "./stable-diffusion-v1-5-fp16"
+  overrides:
+    inpaint_unet:
+      model: "runwayml/stable-diffusion-inpainting"
+      local_model: "./stable-diffusion-inpainting"
+      local_model_fp16: "./stable-diffusion-inpainting-fp16"
+      subfolder: "unet"
+

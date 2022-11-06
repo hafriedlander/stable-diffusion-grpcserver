@@ -36,7 +36,9 @@ dependencies = [
   "hupper ~= 1.10.3",
   "watchdog ~= 2.1.9",
   "python-dotenv ~= 0.21.0",
-  "service_identity ~= 21.1.0"
+  "service_identity ~= 21.1.0",
+  # For Tests
+  "pynvml ~= 11.4.1",
 ]
 
 [project.urls]
