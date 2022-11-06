@@ -158,7 +158,14 @@ class ParameterExtractor:
         return self._image_stepparameter("sampler.cfg_scale")
 
     def clip_guidance_scale(self):
-        return self._image_stepparameter("guidance.guidance_strength")
+        if self._request.WhichOneof("params") != "image": return None
+
+        for parameters in self._request.image.parameters:
+            if parameters.HasField("guidance"):
+                guidance = parameters.guidance
+                for instance in guidance.instances:
+                    if instance.HasField("guidance_strength"):
+                        return instance.guidance_strength
 
     def sampler(self):
         if self._request.WhichOneof("params") != "image": return None
