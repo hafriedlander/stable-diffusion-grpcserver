@@ -4,6 +4,7 @@ import os, warnings, traceback, math, json, importlib, inspect
 from fnmatch import fnmatch
 from copy import deepcopy
 from types import SimpleNamespace as SN
+from typing import Callable, List, Tuple, Optional, Union, Literal, Iterable
 
 import torch
 import accelerate
@@ -21,7 +22,7 @@ from diffusers.pipeline_utils import DiffusionPipeline
 
 import generation_pb2
 
-from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipeline
+from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipeline, UnifiedPipelinePromptType, UnifiedPipelineImageType
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 
 from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
@@ -281,42 +282,66 @@ class PipelineWrapper(object):
         if self.mode.device == "cuda": torch.cuda.empty_cache()
 
     def generate(
-        self, 
-        tokens, 
-        params, 
-        negative_tokens=None, 
-        image=None, 
-        mask=None, 
-        outmask=None,
-        num_images_per_prompt=1,
+        self,
+
+        # The prompt, negative_prompt, and number of images per prompt
+        prompt: UnifiedPipelinePromptType,
+        negative_prompt: Optional[UnifiedPipelinePromptType] = None,
+        num_images_per_prompt: Optional[int] = 1,
+
+        # The seeds - len must match len(prompt) * num_images_per_prompt if provided
+        seed: Optional[Union[int, Iterable[int]]] = None,
+
+        # The size - ignored if an init_image is passed
+        height: int = 512,
+        width: int = 512,
+
+        # Guidance control    
+        guidance_scale: float = 7.5,
+        clip_guidance_scale: Optional[float] = None,
+ 
+        # Sampler control
+        sampler: generation_pb2.DiffusionSampler = None,
+        eta: Optional[float] = 0.0,
+        num_inference_steps: int = 50,
+
+        # Providing these changes from txt2img into either img2img (no mask) or inpaint (mask) mode
+        init_image: Optional[UnifiedPipelineImageType] = None,
+        mask_image: Optional[UnifiedPipelineImageType] = None,
+        outmask_image: Optional[UnifiedPipelineImageType] = None,
+
+        # The strength of the img2img or inpaint process, if init_image is provided
+        strength: float = 0.0,
+
+        # Process controll
         progress_callback=None, 
         stop_event=None, 
         suppress_output=False
     ):
         generator=None
 
-        latents_device = "cpu" if self.mode.device == "mps" else self.mode.device
+        generator_device = "cpu" if self.mode.device == "mps" else self.mode.device
 
-        if isinstance(params.seed, list):
-            generator = [torch.Generator(latents_device).manual_seed(seed) for seed in params.seed] 
-        elif params.seed > 0:
-            generator = torch.Generator(latents_device).manual_seed(params.seed)
+        if isinstance(seed, Iterable):
+            generator = [torch.Generator(generator_device).manual_seed(s) for s in seed] 
+        elif seed > 0:
+            generator = torch.Generator(generator_device).manual_seed(seed)
 
-        if params.sampler is None or params.sampler == generation_pb2.SAMPLER_DDPM:
+        if sampler is None or sampler == generation_pb2.SAMPLER_DDPM:
             scheduler=self._plms
-        elif params.sampler == generation_pb2.SAMPLER_K_LMS:
+        elif sampler == generation_pb2.SAMPLER_K_LMS:
             scheduler=self._klms
-        elif params.sampler == generation_pb2.SAMPLER_DDIM:
+        elif sampler == generation_pb2.SAMPLER_DDIM:
             scheduler=self._ddim
-        elif params.sampler == generation_pb2.SAMPLER_K_EULER:
+        elif sampler == generation_pb2.SAMPLER_K_EULER:
             scheduler=self._euler
-        elif params.sampler == generation_pb2.SAMPLER_K_EULER_ANCESTRAL:
+        elif sampler == generation_pb2.SAMPLER_K_EULER_ANCESTRAL:
             scheduler=self._eulera
-        elif params.sampler == generation_pb2.SAMPLER_K_DPM_2:
+        elif sampler == generation_pb2.SAMPLER_K_DPM_2:
             scheduler=self._dpm2
-        elif params.sampler == generation_pb2.SAMPLER_K_DPM_2_ANCESTRAL:
+        elif sampler == generation_pb2.SAMPLER_K_DPM_2_ANCESTRAL:
             scheduler=self._dpm2a
-        elif params.sampler == generation_pb2.SAMPLER_K_HEUN:
+        elif sampler == generation_pb2.SAMPLER_K_HEUN:
             scheduler=self._heun
         else:
             raise NotImplementedError("Scheduler not implemented")
@@ -325,19 +350,20 @@ class PipelineWrapper(object):
         self._pipeline.progress_bar = ProgressBarWrapper(progress_callback, stop_event, suppress_output)
 
         images = self._pipeline(
-            prompt=tokens,
-            negative_prompt=negative_tokens if negative_tokens else None,
+            prompt=prompt,
+            negative_prompt=negative_prompt if negative_prompt else None,
             num_images_per_prompt=num_images_per_prompt,
-            init_image=image,
-            mask_image=mask,
-            outmask_image=outmask,
-            strength=params.strength,
-            width=params.width,
-            height=params.height,
-            num_inference_steps=params.steps,
-            guidance_scale=params.cfg_scale,
-            eta=params.eta,
             generator=generator,
+            width=width,
+            height=height,
+            guidance_scale=guidance_scale,
+            clip_guidance_scale=clip_guidance_scale,
+            eta=eta,
+            num_inference_steps=num_inference_steps,
+            init_image=init_image,
+            mask_image=mask_image,
+            outmask_image=outmask_image,
+            strength=strength,
             output_type="tensor",
             return_dict=False
         )

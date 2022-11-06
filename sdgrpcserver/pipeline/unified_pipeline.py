@@ -1,7 +1,7 @@
 import inspect, traceback, math
 import time
 from mimetypes import init
-from typing import Callable, List, Tuple, Optional, Union, Literal
+from typing import Callable, List, Tuple, Optional, Union, Literal, NewType
 
 import numpy as np
 import torch
@@ -164,7 +164,7 @@ CLIP_NO_CUTOUTS_TYPE = Literal[False, True, "vae", "approx"]
 
 class ClipGuidedNoisePredictor:
 
-    def __init__(self, pipeline, text_embeddings, guidance_scale, text_embeddings_clip, clip_guidance_scale, vae_cutouts, approx_cutouts, no_cutouts, generator, **kwargs):
+    def __init__(self, pipeline, text_embeddings, guidance_scale, text_embeddings_clip, clip_guidance_scale, vae_cutouts, approx_cutouts, no_cutouts, generator):
         self.pipeline = pipeline
         self.guidance_scale = guidance_scale
         self.text_embeddings_u, self.text_embeddings_g = text_embeddings.chunk(2)
@@ -974,6 +974,19 @@ class UnifiedPipelinePrompt():
     def as_unweighted_string(self):
         return [" ".join([token[0] for token in prompt]) for prompt in self._prompt]
         
+
+UnifiedPipelinePromptType = NewType("UnifiedPipelinePromptType", Union[
+    str,                           # Just a single string, for a batch of 1
+    List[str],                     # A list of strings, for a batch of len(prompt)
+    List[Tuple[str, float]],       # A list of (part, weight) token tuples, for a batch of 1
+    List[List[Tuple[str, float]]], # A list of lists of (part, weight) token tuples, for a batch of len(prompt)
+    UnifiedPipelinePrompt          # A pre-parsed prompt
+])
+
+UnifiedPipelineImageType = NewType("ImageType", Union[
+    torch.FloatTensor, PIL.Image.Image
+])
+
 class UnifiedPipeline(DiffusionPipeline):
     r"""
     Pipeline for unified image generation using Stable Diffusion.
@@ -1146,16 +1159,16 @@ class UnifiedPipeline(DiffusionPipeline):
     @torch.no_grad()
     def __call__(
         self,
-        prompt: Union[str, List[str], List[Tuple[str, float]], List[List[Tuple[str, float]]]],
+        prompt: UnifiedPipelinePromptType,
         height: int = 512,
         width: int = 512,
-        init_image: Union[torch.FloatTensor, PIL.Image.Image] = None,
-        mask_image: Union[torch.FloatTensor, PIL.Image.Image] = None,
-        outmask_image: Union[torch.FloatTensor, PIL.Image.Image] = None,
+        init_image: Optional[UnifiedPipelineImageType] = None,
+        mask_image: Optional[UnifiedPipelineImageType] = None,
+        outmask_image: Optional[UnifiedPipelineImageType] = None,
         strength: float = 0.0,
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
-        negative_prompt: Optional[Union[str, List[str], List[Tuple[str, float]], List[List[Tuple[str, float]]]]] = None,
+        negative_prompt: Optional[UnifiedPipelinePromptType] = None,
         num_images_per_prompt: Optional[int] = 1,
         eta: Optional[float] = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
@@ -1171,7 +1184,6 @@ class UnifiedPipeline(DiffusionPipeline):
         vae_cutouts: Optional[int] = None,
         approx_cutouts: Optional[int] = None,
         no_cutouts: Optional[Union[str, bool]] = None,
-        **kwargs,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -1230,6 +1242,10 @@ class UnifiedPipeline(DiffusionPipeline):
             list of `bool`s denoting whether the corresponding generated image likely represents "not-safe-for-work"
             (nsfw) content, according to the `safety_checker`.
         """
+
+        # Check CLIP before overwritting
+        if clip_guidance_scale is not None and self.clip_model is None:
+            print("Warning: CLIP guidance passed to a pipeline without a CLIP model. It will be ignored.")
 
         # Set defaults for clip
         if clip_guidance_scale is None: clip_guidance_scale = self.clip_defaults["guidance_scale"]

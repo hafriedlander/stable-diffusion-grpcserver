@@ -23,37 +23,38 @@ def buildDefaultMaskPostAdjustments():
     blur.blur.sigma = 32
     blur.blur.direction = generation_pb2.DIRECTION_UP
 
-    #levels = generation_pb2.ImageAdjustment()
-    #levels.levels.input_low = 0
-    #levels.levels.input_high = 0.5
-    #levels.levels.output_low = 0
-    #levels.levels.output_high = 1
+    return [hardenMask, blur]
 
-    return [hardenMask, blur] #, levels]
-
-defaultMaskPostAdjustments = buildDefaultMaskPostAdjustments();
+DEFAULT_POST_ADJUSTMENTS = buildDefaultMaskPostAdjustments();
 
 debugCtr=0
 
-class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
-    def __init__(self, manager, debug_recorder = DebugNullRecorder()):
-        self._manager = manager
-        self._debug_recorder = debug_recorder
+class ParameterExtractor:
+    """
+    ParameterExtractor pulls fields out of a deeply nested GRPC structure.
 
-    def saveDebugTensor(self, tensor):
+    Every method that doesn't start with an "_" is a field that can be
+    extracted from a Request object
+
+    They shouldn't be called directly, but through "get", which will
+    memo-ise the result.
+    """
+
+    def __init__(self, manager, request):
+        self._manager = manager
+        self._request = request
+        self._result = {}
+
+    def _save_debug_tensor(self, tensor):
         global debugCtr
         debugCtr += 1 
         with open(f"debug-{debugCtr}.png", "wb") as f:
             f.write(images.toPngBytes(tensor)[0])
 
-
-    def unimp(self, what):
-        raise NotImplementedError(f"{what} not implemented")
-
     def _handleImageAdjustment(self, tensor, adjustments):
         if type(tensor) is bytes: tensor = images.fromPngBytes(tensor)
 
-        #self.saveDebugTensor(tensor)
+        #self._save_debug_tensor(tensor)
 
         for adjustment in adjustments:
             which = adjustment.WhichOneof("adjustment")
@@ -86,9 +87,163 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
             elif which == "crop":
                 tensor = images.crop(tensor, adjustment.crop.top, adjustment.crop.left, adjustment.crop.height, adjustment.crop.width)
             
-            #self.saveDebugTensor(tensor)
+            #self._save_debug_tensor(tensor)
         
         return tensor
+
+    def _image_stepparameter(self, field):
+        if self._request.WhichOneof("params") != "image": return None
+
+        for ctx in self._request.image.parameters:
+            parts = field.split(".")
+
+            while parts:
+                if ctx.HasField(parts[0]):
+                    ctx = getattr(ctx, parts.pop(0))
+                else:
+                    parts = ctx = None
+
+            if ctx: return ctx
+
+    def _image_parameter(self, field):
+        if self._request.WhichOneof("params") != "image": return None
+        if not self._request.image.HasField(field): return None
+        return getattr(self._request.image, field)
+
+    def _prompt_of_type(self, ptype):
+        for prompt in self._request.prompt:
+            which = prompt.WhichOneof("prompt")
+            if which == ptype: 
+                yield prompt
+
+    def prompt(self):
+        tokens = []
+
+        for prompt in self._prompt_of_type("text"):
+            weight = 1.0
+            if prompt.HasField("parameters") and prompt.parameters.HasField("weight"): weight = prompt.parameters.weight
+            if weight > 0: tokens.append((prompt.text, weight))
+
+        return tokens if tokens else None
+
+    def negative_prompt(self):
+        tokens = []
+
+        for prompt in self._prompt_of_type("text"):
+            weight = 1.0
+            if prompt.HasField("parameters") and prompt.parameters.HasField("weight"): weight = prompt.parameters.weight
+            if weight < 0: tokens.append((prompt.text, -weight))
+
+        return tokens if tokens else None
+
+    def num_images_per_prompt(self):
+        return self._image_parameter("samples")
+
+    def height(self):
+        image = self.get("init_image")
+        if image is not None: return image.shape[2]
+        return self._image_parameter("height")
+
+    def width(self):
+        image = self.get("init_image")
+        if image is not None: return image.shape[3]
+        return self._image_parameter("width")
+
+    def seed(self):
+        if self._request.WhichOneof("params") != "image": return None
+        seed = list(self._request.image.seed)
+        return seed if seed else None
+
+    def guidance_scale(self):
+        return self._image_stepparameter("sampler.cfg_scale")
+
+    def clip_guidance_scale(self):
+        return self._image_stepparameter("guidance.guidance_strength")
+
+    def sampler(self):
+        if self._request.WhichOneof("params") != "image": return None
+        if not self._request.image.HasField("transform"): return None
+        if self._request.image.transform.WhichOneof("type") != "diffusion": return None
+        return self._request.image.transform.diffusion
+
+    def num_inference_steps(self):
+        return self._image_parameter("steps")
+
+    def eta(self):
+        return self._image_stepparameter("sampler.eta")
+
+    def init_image(self):
+        for prompt in self._prompt_of_type("artifact"):
+            if prompt.artifact.type == generation_pb2.ARTIFACT_IMAGE:
+                image = images.fromPngBytes(prompt.artifact.binary).to(self._manager.mode.device)
+                image = self._handleImageAdjustment(image, prompt.artifact.adjustments)
+                return image
+
+    def mask_image(self):
+        for prompt in self._prompt_of_type("artifact"):
+            if prompt.artifact.type == generation_pb2.ARTIFACT_MASK:
+                mask = images.fromPngBytes(prompt.artifact.binary).to(self._manager.mode.device)
+                return self._handleImageAdjustment(mask, prompt.artifact.adjustments)
+
+    def outmask_image(self):
+        for prompt in self._prompt_of_type("artifact"):
+            if prompt.artifact.type == generation_pb2.ARTIFACT_MASK:
+                mask = self.get("mask_image")
+                post_adjustments = prompt.artifact.postAdjustments
+                return self._handleImageAdjustment(mask, post_adjustments if post_adjustments else DEFAULT_POST_ADJUSTMENTS)
+
+    def strength(self):
+        return self._image_stepparameter("schedule.start")
+
+    def get(self, field):
+        if field not in self._result: 
+            self._result[field] = getattr(self, field)()
+        return self._result[field]
+
+    def fields(self):
+        return [
+            key
+            for key in dir(self)
+            if key[0] != "_" and key != "get" and key != "fields"
+        ]
+
+class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
+    def __init__(self, manager, debug_recorder = DebugNullRecorder()):
+        self._manager = manager
+        self._debug_recorder = debug_recorder
+
+    def unimp(self, what):
+        raise NotImplementedError(f"{what} not implemented")
+
+    def batched_seeds(self, samples, seeds, batchmax):
+        # If we weren't given any seeds at all, just start with a single -1
+        if not seeds: seeds = [-1]
+
+        # Replace any negative seeds with a randomly selected one
+        seeds = [seed if seed >= 0 else random.randrange(0, 2**32-1) for seed in seeds]
+
+        # Fill seeds up to params.samples if we didn't get passed enough
+        if len(seeds) < samples:
+            # Starting with the last seed we were given
+            nextseed = seeds[-1]+1
+            while len(seeds) < samples: 
+                seeds.append(nextseed)
+                nextseed += 1
+
+        # Calculate the most even possible split across batchmax
+        if samples <= batchmax:
+            batches = [samples]
+        elif samples % batchmax == 0:
+            batches = [batchmax] * (samples // batchmax)
+        else:
+            d = samples // batchmax + 1
+            batchsize = samples // d
+            r = samples - batchsize * d
+            batches = [batchsize+1]*r + [batchsize] * (d-r)        
+
+        for batch in batches:
+            batchseeds, seeds = seeds[:batch], seeds[batch:]
+            yield batchseeds
 
     def Generate(self, request, context):
         with self._debug_recorder.record(request.request_id) as recorder:
@@ -99,70 +254,12 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                 if request.requested_type != generation_pb2.ARTIFACT_NONE and request.requested_type != generation_pb2.ARTIFACT_IMAGE:
                     self.unimp('Generation of anything except images')
 
-                # Basic parameters
-                params=SN(
-                    height=512,
-                    width=512,
-                    cfg_scale=7.5,
-                    eta=0,
-                    sampler=None,
-                    steps=50,
-                    seed=-1,
-                    samples=1,
-                    strength=0.8
-                )
+                extractor = ParameterExtractor(self._manager, request)
+                kwargs = {}
 
-                for field in vars(params):
-                    try:
-                        if request.image.HasField(field):
-                            setattr(params, field, getattr(request.image, field))
-                    except Exception as e:
-                        pass
-
-                # Extract prompt inputs
-                image=None
-                inMask=None
-                outMask=None
-                tokens=[]
-                negative=[]
-
-                for prompt in request.prompt:
-                    which = prompt.WhichOneof("prompt")
-                    if which == "text": 
-                        weight = 1.0
-                        if prompt.HasField("parameters") and prompt.parameters.HasField("weight"): weight = prompt.parameters.weight
-                        if weight > 0: tokens.append((prompt.text, weight))
-                        else: negative.append((prompt.text, -weight))
-                    elif which == "tokens": 
-                        self.unimp("Token prompts")
-                    else:
-                        if prompt.artifact.type == generation_pb2.ARTIFACT_IMAGE:
-                            image = images.fromPngBytes(prompt.artifact.binary).to(self._manager.mode.device)
-                            image = self._handleImageAdjustment(image, prompt.artifact.adjustments)
-                            params.height = image.shape[2]
-                            params.width = image.shape[3]
-                        elif prompt.artifact.type == generation_pb2.ARTIFACT_MASK:
-                            mask = images.fromPngBytes(prompt.artifact.binary).to(self._manager.mode.device)
-                            inMask = self._handleImageAdjustment(mask, prompt.artifact.adjustments)
-
-                            postAdjustments = prompt.artifact.postAdjustments
-                            if not postAdjustments: postAdjustments = defaultMaskPostAdjustments
-
-                            outMask = self._handleImageAdjustment(inMask, postAdjustments)
-                        else:
-                            self.unimp(f"Artifact prompts of type {prompt.artifact.type}")
-
-                
-                seeds = list(request.image.seed)
-
-                for extras in request.image.parameters:
-                    if extras.HasField("sampler"):
-                        if extras.sampler.HasField("cfg_scale"): params.cfg_scale = extras.sampler.cfg_scale
-                        if extras.sampler.HasField("eta"): params.eta = extras.sampler.eta
-                    if extras.HasField("schedule"):
-                        if extras.schedule.HasField("start"): params.strength = extras.schedule.start            
-                
-                if request.image.HasField("transform") and request.image.transform.WhichOneof("type") == "diffusion": params.sampler = request.image.transform.diffusion
+                for field in extractor.fields():
+                    val = extractor.get(field)
+                    if val is not None: kwargs[field] = val
 
                 try:
                     pipe = self._manager.getPipe(request.engine_id)
@@ -175,52 +272,27 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                 context.add_callback(lambda: stop_event.set())
 
                 ctr = 0
-                batchmax = self._manager.batchMode.batchmax(params.width * params.height)
+                samples = kwargs.get("num_images_per_prompt", 1)
+                seeds = kwargs.get("seed", None)
+                batchmax = self._manager.batchMode.batchmax(kwargs["width"] * kwargs["height"])
 
-                # If we weren't given any seeds at all, just start with a single -1
-                if not seeds: seeds = [-1]
-
-                # Replace any negative seeds with a randomly selected one
-                seeds = [seed if seed >= 0 else random.randrange(0, 2**32-1) for seed in seeds]
-
-                # Fill seeds up to params.samples if we didn't get passed enough
-                if len(seeds) < params.samples:
-                    # Starting with the last seed we were given
-                    nextseed = seeds[-1]+1
-                    while len(seeds) < params.samples: 
-                        seeds.append(nextseed)
-                        nextseed += 1
-
-                # Calculate the most even possible split across batchmax
-                if params.samples <= batchmax:
-                    batches = [params.samples]
-                elif params.samples % batchmax == 0:
-                    batches = [batchmax] * (params.samples // batchmax)
-                else:
-                    d = params.samples // batchmax + 1
-                    batchsize = params.samples // d
-                    r = params.samples - batchsize * d
-                    batches = [batchsize+1]*r + [batchsize] * (d-r)
-
-                # Loop until we've returned the requested number of images
-                for batch in batches:
-                    params.seed, seeds = seeds[:batch], seeds[batch:]
-
-                    print(f'Generating {repr(params)}, {"with Image" if image != None else ""}, {"with Mask" if inMask != None else ""}')
-
-                    args={
-                        "tokens": tokens,
-                        "negative_tokens": negative if negative else None,
-                        "num_images_per_prompt": batch,
-                        "image": image,
-                        "mask": inMask,
-                        "outmask": outMask,
-                        "params": params,
+                for seeds in self.batched_seeds(samples, seeds, batchmax):
+                    batchargs = {
+                        **kwargs,
+                        "seed": seeds,
+                        "num_images_per_prompt": len(seeds)
                     }
 
-                    recorder.store('pipe.generate calls', args)
+                    logargs = {**batchargs}
+                    for field in ["init_image", "mask_image", "outmask_image"]:
+                        if field in logargs: logargs[field] = "yes"
 
-                    results = pipe.generate(**args, stop_event=stop_event)
+                    print()
+                    print(f'Generating {repr(logargs)}')
+
+                    recorder.store('pipe.generate calls', kwargs)
+
+                    results = pipe.generate(**batchargs, stop_event=stop_event)
 
                     for i, (result_image, nsfw) in enumerate(zip(results[0], results[1])):
                         answer = generation_pb2.Answer()
@@ -229,7 +301,7 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                         artifact=image_to_artifact(result_image)
                         artifact.finish_reason=generation_pb2.FILTER if nsfw else generation_pb2.NULL
                         artifact.index=ctr
-                        artifact.seed=params.seed[i]
+                        artifact.seed=seeds[i]
                         answer.artifacts.append(artifact)
 
                         recorder.store('pipe.generate result', artifact)
