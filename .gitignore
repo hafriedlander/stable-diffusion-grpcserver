@@ -1,6 +1,5 @@
 # Initially taken from Github's Python gitignore file
-
-_*
+_[A-Za-z]*
 weights/*
 src/*
 tests/out/*
