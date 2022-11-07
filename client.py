@@ -51,6 +51,9 @@ SAMPLERS: Dict[str, int] = {
     "k_dpm_2": generation.SAMPLER_K_DPM_2,
     "k_dpm_2_ancestral": generation.SAMPLER_K_DPM_2_ANCESTRAL,
     "k_lms": generation.SAMPLER_K_LMS,
+    "dpmspp_1": generation.SAMPLER_DPMSOLVERPP_1ORDER,
+    "dpmspp_2": generation.SAMPLER_DPMSOLVERPP_2ORDER,
+    "dpmspp_3": generation.SAMPLER_DPMSOLVERPP_3ORDER,
 }
 
 def get_sampler_from_str(s: str) -> generation.DiffusionSampler:
@@ -315,7 +318,7 @@ class StabilityInference:
         # Build our CLIP parameters
         if guidance_preset is not generation.GUIDANCE_PRESET_NONE:
             # to do: make it so user can override this
-            step_parameters['sampler']=None
+            # step_parameters['sampler']=None
 
             if guidance_models:
                 guiders = [generation.Model(alias=model) for model in guidance_models]

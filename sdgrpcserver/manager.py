@@ -26,6 +26,7 @@ from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipeline, UnifiedPipel
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 
 from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
+from sdgrpcserver.pipeline.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
 from sdgrpcserver.pipeline.kschedulers.scheduling_utils import KSchedulerMixin
 from sdgrpcserver.pipeline.kschedulers.scheduling_euler_discrete import EulerDiscreteScheduler
 from sdgrpcserver.pipeline.kschedulers.scheduling_euler_ancestral_discrete import EulerAncestralDiscreteScheduler
@@ -224,6 +225,28 @@ class PipelineWrapper(object):
                 num_train_timesteps=1000
             ))
 
+        self._dpmspp1 = self._prepScheduler(DPMSolverMultistepScheduler(
+                beta_start=0.00085, 
+                beta_end=0.012, 
+                beta_schedule="scaled_linear", 
+                num_train_timesteps=1000,
+                solver_order=1
+        ))
+        self._dpmspp2 = self._prepScheduler(DPMSolverMultistepScheduler(
+                beta_start=0.00085, 
+                beta_end=0.012, 
+                beta_schedule="scaled_linear", 
+                num_train_timesteps=1000,
+                solver_order=2
+        ))
+        self._dpmspp3 = self._prepScheduler(DPMSolverMultistepScheduler(
+                beta_start=0.00085, 
+                beta_end=0.012, 
+                beta_schedule="scaled_linear", 
+                num_train_timesteps=1000,
+                solver_order=3
+        ))
+
     def _prepScheduler(self, scheduler):
         if isinstance(scheduler, KSchedulerMixin):
             scheduler = scheduler.set_format("pt")
@@ -343,6 +366,12 @@ class PipelineWrapper(object):
             scheduler=self._dpm2a
         elif sampler == generation_pb2.SAMPLER_K_HEUN:
             scheduler=self._heun
+        elif sampler == generation_pb2.SAMPLER_DPMSOLVERPP_1ORDER:
+            scheduler=self._dpmspp1
+        elif sampler == generation_pb2.SAMPLER_DPMSOLVERPP_2ORDER:
+            scheduler=self._dpmspp2
+        elif sampler == generation_pb2.SAMPLER_DPMSOLVERPP_3ORDER:
+            scheduler=self._dpmspp3
         else:
             raise NotImplementedError("Scheduler not implemented")
 
