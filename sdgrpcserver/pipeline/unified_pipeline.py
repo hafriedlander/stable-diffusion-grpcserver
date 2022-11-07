@@ -25,6 +25,7 @@ from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 
 from sdgrpcserver import images
+from sdgrpcserver.pipeline.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
 from sdgrpcserver.pipeline.kschedulers.scheduling_utils import KSchedulerMixin
 from sdgrpcserver.pipeline.text_embedding import *
 
@@ -223,14 +224,14 @@ class ClipGuidedNoisePredictor:
 
         noise_pred_orig = noise_pred_u + self.guidance_scale * (noise_pred_g - noise_pred_u)
 
-        if isinstance(self.pipeline.scheduler, PNDMScheduler):
+        if isinstance(self.pipeline.scheduler, KSchedulerMixin): 
+            latents = latents + grads * (sigma**2)
+            return noise_pred_orig, latents
+        else:
             # Todo: Don't duplicate this bit from cond_fn
             alpha_prod_t = self.pipeline.scheduler.alphas_cumprod[t]
             beta_prod_t = 1 - alpha_prod_t
             return noise_pred_orig - torch.sqrt(beta_prod_t) * grads
-        else:
-            latents = latents + grads * (sigma**2)
-            return noise_pred_orig, latents
 
     @torch.enable_grad()
     def cond_fn(
@@ -261,7 +262,11 @@ class ClipGuidedNoisePredictor:
         # predict the noise residual
         noise_pred_g = unet(latent_model_input, timestep, encoder_hidden_states=text_embeddings_g).sample
 
-        if isinstance(self.pipeline.scheduler, PNDMScheduler):
+        if isinstance(self.pipeline.scheduler, KSchedulerMixin):
+            # And calculate the output
+            sample = resized_latents - sigma * noise_pred_g
+            clip_guidance_scale = clip_guidance_scale / 10 # Adjust to match to non-KScheduler effect. Determined through experiment.
+        else:
             alpha_prod_t = self.pipeline.scheduler.alphas_cumprod[timestep]
             beta_prod_t = 1 - alpha_prod_t
             # compute predicted original sample from predicted noise also called
@@ -270,11 +275,6 @@ class ClipGuidedNoisePredictor:
 
             fac = torch.sqrt(beta_prod_t)
             sample = pred_original_sample * (fac) + resized_latents * (1 - fac)
-        elif isinstance(self.pipeline.scheduler, KSchedulerMixin):
-            # And calculate the output
-            sample = resized_latents - sigma * noise_pred_g
-        else:
-            raise ValueError(f"scheduler type {type(self.pipeline.scheduler)} not supported")
 
         # Convert sample (the whole denoised next image in latent space) to a set of images we check using CLIP
         # For VAE we crop / resize _before_ VAE to limit size of grads. 
@@ -321,12 +321,12 @@ class ClipGuidedNoisePredictor:
         image_embeddings_clip = self.pipeline.clip_model.get_image_features(image)
 
         if no_cutouts:
-            loss = spherical_dist_loss(image_embeddings_clip, text_embeddings_clip).mean() * (clip_guidance_scale * 100)
+            loss = spherical_dist_loss(image_embeddings_clip, text_embeddings_clip).mean() * (clip_guidance_scale * 500)
         else:
             text_embeddings_input = text_embeddings_clip.repeat_interleave(num_cutouts, dim=0)
             dists = spherical_dist_loss(image_embeddings_clip, text_embeddings_input)
             dists = dists.view([num_cutouts, latents.shape[0], -1])
-            loss = dists.sum(2).mean(0).sum() * (clip_guidance_scale * 100)
+            loss = dists.sum(2).mean(0).sum() * (clip_guidance_scale * 500)
 
         grads = -torch.autograd.grad(loss, latents)[0]
         return grads, noise_pred_g
