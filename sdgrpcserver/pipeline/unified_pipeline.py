@@ -171,13 +171,14 @@ CLIP_NO_CUTOUTS_TYPE = Literal[False, True, "vae", "approx"]
 
 class ClipGuidedNoisePredictor:
 
-    def __init__(self, pipeline, text_embeddings, guidance_scale, text_embeddings_clip, clip_guidance_scale, vae_cutouts, approx_cutouts, no_cutouts, generator):
+    def __init__(self, pipeline, text_embeddings, guidance_scale, text_embeddings_clip, clip_guidance_scale, clip_gradient_threshold, vae_cutouts, approx_cutouts, no_cutouts, generator):
         self.pipeline = pipeline
         self.guidance_scale = guidance_scale
         self.text_embeddings_u, self.text_embeddings_g = text_embeddings.chunk(2)
 
         self.text_embeddings_clip = text_embeddings_clip
         self.clip_guidance_scale = clip_guidance_scale
+        self.clip_gradient_threshold = clip_gradient_threshold
         self.vae_cutouts = vae_cutouts
         self.approx_cutouts = approx_cutouts
         self.no_cutouts = no_cutouts
@@ -192,6 +193,9 @@ class ClipGuidedNoisePredictor:
 
         self.generator = generator
 
+        self.lossavg = []
+        self.flatloss = False
+
     def __call__(self, unet, latents, i, t, sigma = None, second = False):
         if sigma is None and isinstance(self.pipeline.scheduler, KSchedulerMixin): 
             sigma = self.pipeline.scheduler.sigmas[i] 
@@ -203,7 +207,7 @@ class ClipGuidedNoisePredictor:
 
         noise_pred_u = unet(latent_model_input, t, encoder_hidden_states=self.text_embeddings_u).sample
 
-        if second:
+        if second or self.flatloss:
             noise_pred_g = unet(latent_model_input, t, encoder_hidden_states=self.text_embeddings_g).sample
             return  noise_pred_u + self.guidance_scale * (noise_pred_g - noise_pred_u)
 
@@ -221,6 +225,16 @@ class ClipGuidedNoisePredictor:
             self.no_cutouts,
             sigma
         )
+
+        if len(self.lossavg) > 10:
+            # Calculate gradient for loss
+            x = np.linspace(0,1,10)
+            X = np.vstack([x, np.ones(len(x))]).T
+            y = np.asarray(self.lossavg[-10:])
+
+            m, c = np.linalg.lstsq(X, y, rcond=None)[0]
+            if abs(m) < self.clip_gradient_threshold:
+                self.flatloss = True
 
         noise_pred_orig = noise_pred_u + self.guidance_scale * (noise_pred_g - noise_pred_u)
 
@@ -321,14 +335,16 @@ class ClipGuidedNoisePredictor:
         image_embeddings_clip = self.pipeline.clip_model.get_image_features(image)
 
         if no_cutouts:
-            loss = spherical_dist_loss(image_embeddings_clip, text_embeddings_clip).mean() * (clip_guidance_scale * 500)
+            loss = spherical_dist_loss(image_embeddings_clip, text_embeddings_clip).mean()
         else:
             text_embeddings_input = text_embeddings_clip.repeat_interleave(num_cutouts, dim=0)
             dists = spherical_dist_loss(image_embeddings_clip, text_embeddings_input)
             dists = dists.view([num_cutouts, latents.shape[0], -1])
-            loss = dists.sum(2).mean(0).sum() * (clip_guidance_scale * 500)
+            loss = dists.sum(2).mean(0).sum() 
 
-        grads = -torch.autograd.grad(loss, latents)[0]
+        self.lossavg.append(float(loss))
+
+        grads = -torch.autograd.grad(loss * (clip_guidance_scale * 500), latents)[0]
         return grads, noise_pred_g
 
 
@@ -1088,7 +1104,8 @@ class UnifiedPipeline(DiffusionPipeline):
             "vae_cutouts": 2,
             "approx_cutouts": 2,
             "no_cutouts": False,
-            "guidance_scale": 1.0
+            "guidance_scale": 1.0,
+            "gradient_threshold": 0.01
         }
 
         if self.clip_model is not None:
@@ -1144,6 +1161,8 @@ class UnifiedPipeline(DiffusionPipeline):
                         self.clip_defaults["no_cutouts"] = bool(subval)
                     elif subkey == "guidance_scale": 
                         self.clip_defaults["guidance_scale"] = float(subval)
+                    elif subkey == "gradient_threshold":
+                        self.clip_defaults["gradient_threshold"] = float(subval)
                     else:
                         raise ValueError(f"Unknown option {subkey}: {subval} passed as part of clip settings")
             elif key == "clip_vae_grad":
@@ -1202,6 +1221,7 @@ class UnifiedPipeline(DiffusionPipeline):
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
         clip_guidance_scale: Optional[float] = None,
+        clip_gradient_threshold: Optional[float] = None,
         clip_prompt: Optional[Union[str, List[str]]] = None,
         vae_cutouts: Optional[int] = None,
         approx_cutouts: Optional[int] = None,
@@ -1271,6 +1291,7 @@ class UnifiedPipeline(DiffusionPipeline):
 
         # Set defaults for clip
         if clip_guidance_scale is None: clip_guidance_scale = self.clip_defaults["guidance_scale"]
+        if clip_gradient_threshold is None: clip_gradient_threshold = self.clip_defaults["gradient_threshold"]
         if vae_cutouts is None: vae_cutouts = self.clip_defaults["vae_cutouts"]
         if approx_cutouts is None: approx_cutouts = self.clip_defaults["approx_cutouts"]
         if no_cutouts is None: no_cutouts = self.clip_defaults["no_cutouts"]
@@ -1387,8 +1408,9 @@ class UnifiedPipeline(DiffusionPipeline):
                 pipeline=self, 
                 text_embeddings=text_embeddings,
                 guidance_scale=guidance_scale,
-                text_embeddings_clip=text_embeddings_clip, 
-                clip_guidance_scale=clip_guidance_scale, 
+                text_embeddings_clip=text_embeddings_clip,
+                clip_guidance_scale=clip_guidance_scale,
+                clip_gradient_threshold=clip_gradient_threshold,
                 vae_cutouts=vae_cutouts,
                 approx_cutouts=approx_cutouts,
                 no_cutouts=no_cutouts,
@@ -1466,7 +1488,7 @@ class UnifiedPipeline(DiffusionPipeline):
                 input_latents = latents
 
                 # predict the noise residual
-                noise_pred = mode.noise_predict(input_latents, t_index, t)
+                noise_pred = noise_predictor(mode.unet, input_latents, t_index, t)
                 # TODO: kind of a hack, deal with CLIP predictor returning latents too
                 if isinstance(noise_pred, tuple): noise_pred, input_latents = noise_pred
 
