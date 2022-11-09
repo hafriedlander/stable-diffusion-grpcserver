@@ -541,19 +541,27 @@ class EngineManager(object):
             modules = {**modules, **extra_kwargs}
             return klass(**modules)
         
-        raise ValueError(f"Error loading {model} - {local_model.__class__} is not an instance of {klass}")
+        raise ValueError(f"Error loading model - {local_model.__class__} is not an instance of {klass}")
 
     def _fromWeights(self, klass, opts, extra_kwargs, force_redownload=False):
         weight_path=self._getWeightPath(opts, force_redownload=force_redownload)
         if self.mode.fp16: extra_kwargs["torch_dtype"]=torch.float16
         if opts.get('subfolder', None): extra_kwargs['subfolder'] = opts.get('subfolder')
 
-        # Work around from_pretrained not understanding Optional models
-        if klass is UnifiedPipeline:
-            if "inpaint_unet" not in extra_kwargs: 
-                extra_kwargs["inpaint_unet"] = None
-            if "clip_model" not in extra_kwargs: 
-                extra_kwargs["clip_model"] = None
+        constructor_keys = set(inspect.signature(klass.__init__).parameters.keys())
+        accepts_safety_checker = "safety_checker" in constructor_keys
+        accepts_inpaint_unet = "inpaint_unet" in constructor_keys
+        accepts_clip_model = "clip_model" in constructor_keys
+
+        if accepts_clip_model:
+            if self._nsfw == "flag":
+                extra_kwargs["safety_checker"] = self.fromPretrained(FlagOnlySafetyChecker, {**opts, "subfolder": "safety_checker"})
+            if self._nsfw == "ignore":
+                extra_kwargs["safety_checker"] = None
+        if accepts_inpaint_unet and "inpaint_unet" not in extra_kwargs: 
+            extra_kwargs["inpaint_unet"] = None
+        if accepts_clip_model and "clip_model" not in extra_kwargs: 
+            extra_kwargs["clip_model"] = None
 
         # Supress warnings during pipeline load. Unfortunately there isn't a better 
         # way to override the behaviour (beyond duplicating a huge function)
@@ -602,6 +610,14 @@ class EngineManager(object):
         for name, (library_name, class_name) in [item for item in config_dict.items() if item[0][0] != "_"]:
             if whitelist and name not in whitelist: continue
             if blacklist and name in blacklist: continue
+
+            if name == "safety_checker":
+                if self._nsfw == 'flag':
+                    library_name = 'sdgrpcserver.pipeline.safety_checkers'
+                    class_name = 'FlagOnlySafetyChecker'
+                elif self._nsfw == "ignore":
+                    pipeline[name] = None
+                    continue
 
             # This is mostly from DiffusersPipeline.from_preloaded. Why is that method _so long_?
             is_pipeline_module = hasattr(pipelines, library_name)
@@ -671,11 +687,6 @@ class EngineManager(object):
 
     def buildPipeline(self, engine, naked = False):
         extra_kwargs={}
-
-        if self._nsfw == "flag":
-            extra_kwargs["safety_checker"] = self.fromPretrained(FlagOnlySafetyChecker, {**engine, "subfolder": "safety_checker"})
-        elif self._nsfw == "ignore":
-            extra_kwargs["safety_checker"] = None
 
         for name, opts in engine.get("overrides", {}).items():
             if isinstance(opts, str): opts = { "model": opts }
