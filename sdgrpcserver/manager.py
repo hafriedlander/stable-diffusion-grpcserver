@@ -447,7 +447,7 @@ class EngineManager(object):
     @property
     def batchMode(self): return self._batchMode
 
-    def _getWeightPath(self, opts):
+    def _getWeightPath(self, opts, force_recheck=False, force_redownload=False):
         usefp16 = self.mode.fp16 and opts.get("has_fp16", True)
 
         local_path = opts.get("local_model_fp16" if usefp16 else "local_model", None)
@@ -477,8 +477,16 @@ class EngineManager(object):
             if subfolder: extra_kwargs["allow_patterns"]=f"{subfolder}*"
             if use_auth_token: extra_kwargs["use_auth_token"]=use_auth_token
 
+            if force_redownload:
+                try:
+                    repo_info = next((repo for repo in huggingface_hub.scan_cache_dir().repos if repo.repo_id==model_path))
+                    hashes = [revision.commit_hash for revision in repo_info.revisions]
+                    huggingface_hub.scan_cache_dir().delete_revisions(*hashes).execute()
+                except:
+                    pass
+
             cache_path = None
-            attempt_download = False
+            attempt_download = force_recheck or force_redownload
 
             try:
                 # Try getting the cached path without connecting to internet
@@ -535,8 +543,8 @@ class EngineManager(object):
         
         raise ValueError(f"Error loading {model} - {local_model.__class__} is not an instance of {klass}")
 
-    def _fromWeights(self, klass, opts, extra_kwargs):
-        weight_path=self._getWeightPath(opts)
+    def _fromWeights(self, klass, opts, extra_kwargs, force_redownload=False):
+        weight_path=self._getWeightPath(opts, force_redownload=force_redownload)
         if self.mode.fp16: extra_kwargs["torch_dtype"]=torch.float16
         if opts.get('subfolder', None): extra_kwargs['subfolder'] = opts.get('subfolder')
 
@@ -558,6 +566,12 @@ class EngineManager(object):
 
         return result
 
+    def _weightRetry(self, callback, *args, **kwargs):
+        try: return callback(*args, **kwargs)
+        except: pass
+
+        return callback(*args, **kwargs, force_redownload=True)
+
     def fromPretrained(self, klass, opts, extra_kwargs = None):
         if extra_kwargs is None: extra_kwargs = {}
 
@@ -566,15 +580,15 @@ class EngineManager(object):
 
         # Handle copying a local model
         if is_local: return self._fromLoaded(klass, opts, extra_kwargs)
-        else: return self._fromWeights(klass, opts, extra_kwargs)
+        else: return self._weightRetry(self._fromWeights, klass, opts, extra_kwargs)
 
     def _nakedFromLoaded(self, opts):
         local_model = self.loadModel(opts["model"][1:])
         if not isinstance(local_model, SN): raise ValueError(f"{model} is not a pipeline, it's a {local_model}")
         return local_model
 
-    def _nakedFromWeights(self, opts):
-        weight_path = self._getWeightPath(opts)
+    def _nakedFromWeights(self, opts, force_redownload=False):
+        weight_path = self._getWeightPath(opts, force_redownload=force_redownload)
         config_dict = DiffusionPipeline.get_config_dict(weight_path)
 
         whitelist = opts.get("whitelist", None)
@@ -647,7 +661,7 @@ class EngineManager(object):
         if is_local:
             pipeline = self._nakedFromLoaded(opts)
         else:
-            pipeline = self._nakedFromWeights(opts)
+            pipeline = self._weightRetry(self._nakedFromWeights, opts)
         
         if extras:
             args = {**pipeline.__dict__, **extras}
