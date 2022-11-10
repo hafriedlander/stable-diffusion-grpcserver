@@ -471,7 +471,7 @@ if __name__ == "__main__":
         help="[k_lms] (" + ", ".join(SAMPLERS.keys()) + ")",
     )
     parser.add_argument(
-        "--eta", "-E", type=float, default=0.0, help="[0.0] ETA factor (for DDIM scheduler)"
+        "--eta", "-E", type=float, default=None, help="[0.0] ETA factor (for DDIM scheduler)"
     )
     parser.add_argument(
         "--steps", "-s", type=int, default=50, help="[50] number of steps"
