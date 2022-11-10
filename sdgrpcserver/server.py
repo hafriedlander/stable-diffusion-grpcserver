@@ -295,6 +295,9 @@ def main():
         "--nsfw_behaviour", "-N", type=str, default=os.environ.get("SD_NSFW_BEHAVIOUR", "block"), choices=["block", "flag", "ignore"], help="What to do with images detected as NSFW"
     )
     generation_opts.add_argument(
+        "--supress_metadata", action="store_true", help="Supress storing request metadata in returned PNGs"
+    )
+    generation_opts.add_argument(
         "--enable_mps", action="store_true", help="Use MPS on MacOS where available"
     )
 
@@ -333,6 +336,7 @@ def main():
     args.localtunnel = args.localtunnel or 'SD_LOCALTUNNEL' in os.environ
     args.batch_autodetect = args.batch_autodetect or 'SD_BATCH_AUTODETECT' in os.environ
     args.enable_debug_recording = args.enable_debug_recording or 'SD_ENABLE_DEBUG_RECORDING' in os.environ
+    args.supress_metadata = args.supress_metadata or 'SD_SUPRESS_METADATA' in os.environ
 
     if args.localtunnel and not args.access_token:
         args.access_token = secrets.token_urlsafe(16)
@@ -398,11 +402,11 @@ def main():
 
         print("Manager loaded")
 
-        generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(manager, debug_recorder=debug_recorder), grpc.grpc_server)
+        generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(manager, supress_metadata=args.supress_metadata, debug_recorder=debug_recorder), grpc.grpc_server)
         dashboard_pb2_grpc.add_DashboardServiceServicer_to_server(DashboardServiceServicer(), grpc.grpc_server)
         engines_pb2_grpc.add_EnginesServiceServicer_to_server(EnginesServiceServicer(manager), grpc.grpc_server)
 
-        generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(manager, debug_recorder=debug_recorder), http.grpc_server)
+        generation_pb2_grpc.add_GenerationServiceServicer_to_server(GenerationServiceServicer(manager, supress_metadata=args.supress_metadata, debug_recorder=debug_recorder), http.grpc_server)
         dashboard_pb2_grpc.add_DashboardServiceServicer_to_server(DashboardServiceServicer(), http.grpc_server)
         engines_pb2_grpc.add_EnginesServiceServicer_to_server(EnginesServiceServicer(manager), http.grpc_server)
 

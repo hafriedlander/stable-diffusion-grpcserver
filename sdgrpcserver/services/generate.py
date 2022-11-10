@@ -1,9 +1,10 @@
 
 from math import sqrt
-import random, traceback, threading
+import random, traceback, threading, json
 from types import SimpleNamespace as SN
 import torch
 
+from google.protobuf import json_format as pb_json_format
 import grpc
 import generation_pb2, generation_pb2_grpc
 
@@ -215,8 +216,9 @@ class ParameterExtractor:
         ]
 
 class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
-    def __init__(self, manager, debug_recorder = DebugNullRecorder()):
+    def __init__(self, manager, supress_metadata = False, debug_recorder = DebugNullRecorder()):
         self._manager = manager
+        self._supress_metadata = supress_metadata
         self._debug_recorder = debug_recorder
 
     def unimp(self, what):
@@ -301,11 +303,23 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
 
                     results = pipe.generate(**batchargs, stop_event=stop_event)
 
+                    meta = pb_json_format.MessageToDict(request)
+                    for prompt in meta['prompt']:
+                        if 'artifact' in prompt:
+                                del prompt['artifact']['binary']
+
                     for i, (result_image, nsfw) in enumerate(zip(results[0], results[1])):
                         answer = generation_pb2.Answer()
                         answer.request_id=request.request_id
                         answer.answer_id=f"{request.request_id}-{ctr}"
-                        artifact=image_to_artifact(result_image)
+
+                        if self._supress_metadata:
+                            artifact=image_to_artifact(result_image)
+                        else:
+                            meta["image"]["samples"] = 1
+                            meta["image"]["seed"] = [seeds[i]]
+                            artifact=image_to_artifact(result_image, meta={"generation_parameters": json.dumps(meta)})
+
                         artifact.finish_reason=generation_pb2.FILTER if nsfw else generation_pb2.NULL
                         artifact.index=ctr
                         artifact.seed=seeds[i]

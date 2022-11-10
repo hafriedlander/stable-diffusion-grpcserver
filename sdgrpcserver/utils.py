@@ -2,6 +2,7 @@
 from array import ArrayType
 import io
 import PIL
+from PIL import PngImagePlugin
 import numpy as np
 import cv2 as cv
 import torch
@@ -17,16 +18,20 @@ def artifact_to_image(artifact):
     else:
         raise NotImplementedError("Can't convert that artifact to an image")
 
-def image_to_artifact(im, artifact_type=generation_pb2.ARTIFACT_IMAGE):
+def image_to_artifact(im, artifact_type=generation_pb2.ARTIFACT_IMAGE, meta=None):
     binary=None
 
+    if isinstance(im, torch.Tensor):
+        im = images.toPIL(im)[0]
+ 
     if isinstance(im, PIL.Image.Image):
         buf = io.BytesIO()
-        im.save(buf, format='PNG')
+        info = PngImagePlugin.PngInfo()
+        if meta:
+            for k, v in meta.items(): info.add_text(k, v)
+        im.save(buf, format='PNG', pnginfo=info)
         buf.seek(0)
         binary=buf.getvalue()
-    elif isinstance(im, torch.Tensor):
-        binary=images.toPngBytes(im)[0]
     else:
         binary=cv.imencode(".png", im)[1]
 
