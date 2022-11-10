@@ -375,6 +375,15 @@ def main():
 
     torch.cuda.set_per_process_memory_fraction(args.vram_fraction)
 
+    enginecfg_path = os.path.normpath(args.enginecfg)
+    if not os.path.exists(enginecfg_path):
+        enginecfgdist_path = os.path.join(os.path.dirname(__file__), "config", "engines.yaml")
+        if not os.path.exists(enginecfgdist_path):
+            raise EnvironmentError(f"Configuration file {enginecfg_path} does not exist, and can't find the default version to initialise with.")
+        shutil.copyfile(enginecfgdist_path, enginecfg_path)
+        print(f"Initialised engines.yaml configuration with default version.")
+        print(f"Edit {enginecfg_path} to enable, disable or add additional models and engines.")
+
     with open(os.path.normpath(args.enginecfg), 'r') as cfg:
         engines = yaml.load(cfg, Loader=Loader)
 

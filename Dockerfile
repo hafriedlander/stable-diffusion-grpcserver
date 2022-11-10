@@ -90,7 +90,7 @@ COPY server.py .
 RUN mkdir -p /huggingface
 RUN mkdir -p /weights
 RUN mkdir -p /config
-COPY engines.yaml /config/
+COPY sdgrpcserver/config/engines.yaml /config/engines.yaml
 
 # Set up some environment files
 

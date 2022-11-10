@@ -20,6 +20,14 @@
   # You can leave it out if you want to only load from HuggingFace
   local_model: "./sd-vae-ft-ema"
 
+# And define another VAE. None of the engines reference this VAE by default.
+# If you define a model but never use it, it doesn't get loaded, so this won't use any RAM.
+- model_id: "stability-vae-mse"
+  type: "vae"
+  has_fp16: False
+  model: "stabilityai/sd-vae-ft-mse"
+  local_model: "./sd-vae-ft-mse"
+
 # Here we define the inpainting pipeline. Since only the unet is different to the models in
 # the V1.5 pipeline, we'll only load that
 - model_id: "stable-diffusion-inpainting"
@@ -130,9 +138,8 @@
 # This is the Stable Diffusion V1.5 model with CLIP guidance enabled. This configuration needs quite
 # a lot of VRAM, but is faster and produces better results if you have enough.
 - id: "stable-diffusion-v1-5-clip"
-  # If you test this and find it won't work on your GPU, set this to False
-  # to prevent it from being used in future.
-  enabled: True
+  # If you'd like to test this engine is compatible with your hardware, set this to True. 
+  enabled: False
   visible: True
   name: "Stable Diffusion V1.5 CLIP guided"
   description: "Stable Diffusion using the RunwayML model, CLIP guidance and our Unified pipeline"
@@ -170,7 +177,10 @@
 
 # This is the standard Waifu Diffusion V1.3 model
 - id: "waifu-diffusion-v1-3"
-  enabled: True
+  # To save on initial download time, all the Waifu Diffusion models are disabled
+  # by default. This one should work on any hardware that can run the main model though, 
+  # so anyone can enable it if they want to.
+  enabled: False
   visible: True
   name: "Waifu Diffusion V1.3"
   description: "Stable Diffusion using the Hakurei Waifu Diffusion model and our Unified pipeline"
@@ -182,7 +192,7 @@
 # This is the Waifu Diffusion model, but with Stable Diffusion's inpainting grafted in. This generally
 # gives better results than the model-independant inpainting method, but has it's own oddities
 - id: "waifu-diffusion-v1-3-grafted"
-  enabled: True
+  enabled: False
   visible: True
   name: "Waifu Diffusion V1.3 Grafted"
   description: "Waifu Diffusion with grafted inpainting"
@@ -201,7 +211,7 @@
 # This is the Waifu Diffusion model with CLIP guidance (high vram version)
 # (Grafted inpainting doesn't work very well with CLIP, so I recommend low CLIP guidance when inpainting)
 - id: "waifu-diffusion-v1-3-grafted-clip"
-  enabled: True
+  enabled: False
   visible: True
   name: "Waifu Diffusion V1.3 Grafted"
   description: "Waifu Diffusion with grafted inpainting and CLIP guidance"
@@ -219,7 +229,7 @@
 
 # This is the Waifu Diffusion model with SD grafted inpaint and CLIP guidance (low vram version)
 - id: "waifu-diffusion-v1-3-grafted-clip-small"
-  enabled: True
+  enabled: False
   visible: True
   name: "Waifu Diffusion V1.3 Grafted"
   description: "Waifu Diffusion with grafted inpainting and CLIP guidance"
@@ -237,9 +247,9 @@
     clip: "@laion-clip-b"
 
 # And finally, here is the unmodified Stable Diffusion V1.4 model, showing how to list
-# the model inline
+# the model inline. This is disabled by default, set enabled: True to enable it.
 - id: "stable-diffusion-v1-4"
-  enabled: True
+  enabled: False
   visible: True
   name: "Stable Diffusion V1.4"
   description: "Stable Diffusion using the CompVis model and our Unified pipeline"

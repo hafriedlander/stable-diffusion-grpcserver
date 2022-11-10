@@ -3,6 +3,7 @@ _[A-Za-z]*
 weights/*
 src/*
 tests/out/*
+/config.yaml
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
