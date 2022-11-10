@@ -312,11 +312,11 @@ class StabilityInference:
                 guidance_prompt = generation.Prompt(text=guidance_prompt)
             elif not isinstance(guidance_prompt, generation.Prompt):
                 raise ValueError("guidance_prompt must be a string or Prompt object")
-        if guidance_strength == 0.0:
-            guidance_strength = None
+        #if guidance_strength == 0.0:
+        #    guidance_strength = None
 
         # Build our CLIP parameters
-        if guidance_preset is not generation.GUIDANCE_PRESET_NONE:
+        if guidance_preset is not generation.GUIDANCE_PRESET_NONE or guidance_strength is not None:
             # to do: make it so user can override this
             # step_parameters['sampler']=None
 
@@ -460,7 +460,7 @@ if __name__ == "__main__":
         "--guidance_strength", 
         "-G", 
         type=float, 
-        default=0, 
+        default=None,
         help="[0.0] CLIP Guidance scale factor. We recommend values in range [0.0,1.0]. A good default is 0.25"
     )
     parser.add_argument(
@@ -538,7 +538,6 @@ if __name__ == "__main__":
         "start_schedule": args.start_schedule,
         "end_schedule": args.end_schedule,
         "cfg_scale": args.cfg_scale,
-        "guidance_preset": generation.GUIDANCE_PRESET_SIMPLE if args.guidance_strength > 0 else generation.GUIDANCE_PRESET_NONE,
         "guidance_strength": args.guidance_strength,
         "sampler": get_sampler_from_str(args.sampler),
         "eta": args.eta,
