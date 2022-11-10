@@ -1013,17 +1013,17 @@ class UnifiedPipelinePrompt():
         return [" ".join([token[0] for token in prompt]) for prompt in self._prompt]
         
 
-UnifiedPipelinePromptType = NewType("UnifiedPipelinePromptType", Union[
+UnifiedPipelinePromptType = Union[
     str,                           # Just a single string, for a batch of 1
     List[str],                     # A list of strings, for a batch of len(prompt)
     List[Tuple[str, float]],       # A list of (part, weight) token tuples, for a batch of 1
     List[List[Tuple[str, float]]], # A list of lists of (part, weight) token tuples, for a batch of len(prompt)
     UnifiedPipelinePrompt          # A pre-parsed prompt
-])
+]
 
-UnifiedPipelineImageType = NewType("ImageType", Union[
+UnifiedPipelineImageType = Union[
     torch.FloatTensor, PIL.Image.Image
-])
+]
 
 class UnifiedPipeline(DiffusionPipeline):
     r"""
@@ -1104,7 +1104,7 @@ class UnifiedPipeline(DiffusionPipeline):
             "vae_cutouts": 2,
             "approx_cutouts": 2,
             "no_cutouts": False,
-            "guidance_scale": 1.0,
+            "guidance_scale": 0.0,
             "gradient_threshold": 0.01
         }
 
