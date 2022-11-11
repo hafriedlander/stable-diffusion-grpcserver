@@ -553,7 +553,7 @@ class EngineManager(object):
         accepts_inpaint_unet = "inpaint_unet" in constructor_keys
         accepts_clip_model = "clip_model" in constructor_keys
 
-        if accepts_clip_model:
+        if accepts_safety_checker:
             if self._nsfw == "flag":
                 extra_kwargs["safety_checker"] = self.fromPretrained(FlagOnlySafetyChecker, {**opts, "subfolder": "safety_checker"})
             if self._nsfw == "ignore":
@@ -775,7 +775,11 @@ class EngineManager(object):
             self.batchMode.run_autodetect(self)
 
     def getStatus(self):
-        return {engine["id"]: engine["id"] in self._pipelines for engine in self.engines if engine.get("enabled", True)}
+        return {
+            engine["id"]: engine["id"] in self._pipelines 
+            for engine in self.engines 
+            if engine.get("id", False) and engine.get("enabled", False)
+        }
 
     def getPipe(self, id=None):
         """

@@ -9,7 +9,7 @@ class EnginesServiceServicer(engines_pb2_grpc.EnginesServiceServicer):
 
         status = self._manager.getStatus()
         for engine in self._manager.engines:
-            if not (engine.get("enabled", False) and engine.get("visible", False)):
+            if not (engine.get("id", False) and engine.get("enabled", False) and engine.get("visible", False)):
                 continue
 
             info=engines_pb2.EngineInfo()
