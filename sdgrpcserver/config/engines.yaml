@@ -105,44 +105,45 @@
 # to be passed a classname to use to actually build the engine with, a model
 # (either from the definitions above or just declared inline) and maybe some options
 
-# This is the main Stable Diffusion V1.5 model
-- id: "stable-diffusion-v1-5"
+# This is the Stable Diffusion V1.5 model with CLIP guidance enabled. It's the standard engine
+# we currently recommend to give the best results on most people's hardware. This configuration 
+# needs much less VRAM but is slightly less accurate than -quality below
+- id: "stable-diffusion-v1-5-standard"
   # You can set enabled to False to temporarily prevent it from being loaded
   enabled: True
   # You can set visible to False to make the engine available but prevent it from showing 
   # up in the API list (directly requesting it works)
   visible: True
   # This name can be used by User Interfaces
-  name: "Stable Diffusion V1.5"
+  name: "Stable Diffusion V1.5 w/ standard CLIP guidance"
   # This description can be used by User Interfaces
-  description: "Stable Diffusion using the RunwayML model and our Unified pipeline"
+  description: "Stable Diffusion using the RunwayML model, CLIP guidance (standard config) and our Unified pipeline"
   # This class is used to actually handle the generation.
   class: "UnifiedPipeline"
-  # You can set various options on each engine. In this case we're enabling xformers (if available)
+  # You can set various options on each engine.
   options:
-    xformers: True
-  # And finally we set the model to use - in this case we're just referencing an already-loaded model
+    # For now, the xformers implementation in Diffusers is not able to be run backwards
+    # so we explicitly use a reversable implementation instead
+    xformers: "reversible"
+    # And we use less cutouts than quality CLIP guidance, avoiding using the VAE entirely
+    clip:
+      approx_cutouts: 2
+      vae_cutouts: 0
+  # Here we set the model to use - in this case we're just referencing an already-loaded model
   model: "@stable-diffusion-v1-5-base"
-
-# This is the main Stable Diffusion V1.5 model, but without xformers for comparison
-# Xformers is not quite seed-stable, so if seed stability is important to you, you might prefer to use this
-- id: "stable-diffusion-v1-5-no-xformers"
-  # This engine is disabled by default. You can enable it by changed this to True
-  enabled: False
-  visible: True
-  name: "Stable Diffusion V1.5"
-  description: "Stable Diffusion using the RunwayML model and our Unified pipeline"
-  class: "UnifiedPipeline"
-  model: "@stable-diffusion-v1-5-base"
+  # You can provide individual model overrides in engines just like in models
+  overrides:
+    # Just like in models, clip means both clip_model and feature_extractor
+    clip: "@laion-clip-b"
 
 # This is the Stable Diffusion V1.5 model with CLIP guidance enabled. This configuration needs quite
 # a lot of VRAM, but is faster and produces better results if you have enough.
-- id: "stable-diffusion-v1-5-clip"
+- id: "stable-diffusion-v1-5-quality"
   # If you'd like to test this engine is compatible with your hardware, set this to True. 
   enabled: False
   visible: True
-  name: "Stable Diffusion V1.5 CLIP guided"
-  description: "Stable Diffusion using the RunwayML model, CLIP guidance and our Unified pipeline"
+  name: "Stable Diffusion V1.5 w/ quality CLIP guided"
+  description: "Stable Diffusion using the RunwayML model, CLIP guidance (quality config) and our Unified pipeline"
   class: "UnifiedPipeline"
   # Here we're setting some options for the CLIP guidance engine
   options:
@@ -155,25 +156,36 @@
     # Just like in models, clip means both clip_model and feature_extractor
     clip: "@laion-clip-h"
 
-# This is the Stable Diffusion V1.5 model with CLIP guidance enabled. This configuration needs much less
-# VRAM (6GB should be sufficient in fp16 mode if xformers is available), but is slower and slightly less accurate
-- id: "stable-diffusion-v1-5-clip-small"
-  enabled: True
+# This is the main Stable Diffusion V1.5 model
+- id: "stable-diffusion-v1-5-noclip"
+  # This engine is disabled by default, since it's a strict subset of the engines above.
+  # It uses slightly less VRAM because no clip model is loaded. You can enable it by changed this to True
+  enabled: False
+  # You can set visible to False to make the engine available but prevent it from showing 
+  # up in the API list (directly requesting it works)
   visible: True
-  name: "Stable Diffusion V1.5 CLIP guided"
-  description: "Stable Diffusion using the RunwayML model, CLIP guidance (limited memory version) and our Unified pipeline"
+  # This name can be used by User Interfaces
+  name: "Stable Diffusion V1.5 without CLIP guidance"
+  # This description can be used by User Interfaces
+  description: "Stable Diffusion using the RunwayML model and our Unified pipeline"
+  # This class is used to actually handle the generation.
   class: "UnifiedPipeline"
+  # You can set various options on each engine. In this case we're enabling xformers (if available)
   options:
-    # For now, the xformers implementation in Diffusers is not able to be run backwards
-    # so we explicitly use a reversable implementation instead
-    xformers: "reversible"
-    # And we use less cutouts than standard CLIP guidance, avoiding using the VAE entirely
-    clip:
-      approx_cutouts: 2
-      vae_cutouts: 0
+    xformers: True
+  # And finally we set the model to use - in this case we're just referencing an already-loaded model
   model: "@stable-diffusion-v1-5-base"
-  overrides:
-    clip: "@laion-clip-b"
+
+# This is the main Stable Diffusion V1.5 model, but without xformers for comparison
+# Xformers is not quite seed-stable, so if seed stability is important to you, you might prefer to use this
+- id: "stable-diffusion-v1-5-noclip-noxformers"
+  # This engine is disabled by default. You can enable it by changed this to True
+  enabled: False
+  visible: True
+  name: "Stable Diffusion V1.5 without CLIP guidance or XFormers"
+  description: "Stable Diffusion using the RunwayML model and our Unified pipeline"
+  class: "UnifiedPipeline"
+  model: "@stable-diffusion-v1-5-base"
 
 # This is the standard Waifu Diffusion V1.3 model
 - id: "waifu-diffusion-v1-3"
