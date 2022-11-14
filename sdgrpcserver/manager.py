@@ -1,6 +1,6 @@
 
 from functools import cache
-import os, warnings, traceback, math, json, importlib, inspect
+import os, warnings, traceback, math, json, importlib, inspect, tempfile
 from fnmatch import fnmatch
 from copy import deepcopy
 from types import SimpleNamespace as SN
@@ -9,6 +9,7 @@ from typing import Callable, List, Tuple, Optional, Union, Literal, Iterable
 import torch
 import accelerate
 import huggingface_hub
+from huggingface_hub.file_download import http_get
 
 from tqdm.auto import tqdm
 
@@ -23,16 +24,12 @@ from diffusers.pipeline_utils import DiffusionPipeline
 import generation_pb2
 
 from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipeline, UnifiedPipelinePromptType, UnifiedPipelineImageType
+from sdgrpcserver.pipeline.upscaler_pipeline import NoiseLevelAndTextConditionedUpscaler, UpscalerPipeline
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 
 from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
 from sdgrpcserver.pipeline.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
-from sdgrpcserver.pipeline.kschedulers.scheduling_utils import KSchedulerMixin
-from sdgrpcserver.pipeline.kschedulers.scheduling_euler_discrete import EulerDiscreteScheduler
-from sdgrpcserver.pipeline.kschedulers.scheduling_euler_ancestral_discrete import EulerAncestralDiscreteScheduler
-from sdgrpcserver.pipeline.kschedulers.scheduling_dpm2_discrete import DPM2DiscreteScheduler
-from sdgrpcserver.pipeline.kschedulers.scheduling_dpm2_ancestral_discrete import DPM2AncestralDiscreteScheduler
-from sdgrpcserver.pipeline.kschedulers.scheduling_heun_discrete import HeunDiscreteScheduler
+from sdgrpcserver.pipeline.kschedulers import *
 
 
 class ProgressBarWrapper(object):
@@ -421,6 +418,16 @@ def clone_model(model, share_parameters=True, share_buffers=True):
 
     return clone
 
+# TODO: Not here
+default_home = os.path.join(os.path.expanduser("~"), ".cache")
+sd_cache_home = os.path.expanduser(
+    os.getenv(
+        "SD_HOME",
+        os.path.join(os.getenv("XDG_CACHE_HOME", default_home), "sdgrpcserver"),
+    )
+)
+
+
 class EngineManager(object):
 
     def __init__(self, engines, weight_root="./weights", refresh_models=None, mode=EngineMode(), nsfw_behaviour="block", batchMode=BatchMode()):
@@ -448,12 +455,15 @@ class EngineManager(object):
     def batchMode(self): return self._batchMode
 
     def _getWeightPath(self, opts, force_recheck=False, force_redownload=False):
+        # TODO: Break this up, it's too long
+
         usefp16 = self.mode.fp16 and opts.get("has_fp16", True)
 
         local_path = opts.get("local_model_fp16" if usefp16 else "local_model", None)
         model_path = opts.get("model", None)
         subfolder = opts.get("subfolder", None)
         use_auth_token=self._token if opts.get("use_auth_token", False) else False
+        urls = opts.get("urls", None)
 
         # Keep a list of the things we tried that failed, so we can report them all in one go later
         # in the case that we weren't able to load it any way at all
@@ -523,6 +533,26 @@ class EngineManager(object):
 
         else:
             failures.append("    - No remote model name was provided")
+
+        if urls:
+            id = urls["id"]
+            cache_path = os.path.join(sd_cache_home, id)
+            os.makedirs(cache_path, exist_ok=True)
+
+            try:
+                for name, url in urls.items():
+                    if name == "id": continue
+                    full_name = os.path.join(cache_path, name)
+                    if os.path.exists(full_name): continue
+
+                    with tempfile.NamedTemporaryFile(mode="wb", dir=cache_path, delete=False) as temp_file:
+                        http_get(url, temp_file)
+                        os.replace(temp_file.name, full_name)
+            except:
+                failures.append("    - Download failed. Error was:")
+                failures.append(traceback.format_exc())
+            else:
+                return cache_path
 
         raise EnvironmentError("\n".join(failures))
 
@@ -667,6 +697,8 @@ class EngineManager(object):
             return self.fromPretrained(CLIPModel, opts)
         elif name == "feature_extractor":
             return self.fromPretrained(CLIPFeatureExtractor, opts)
+        elif name == "upscaler":
+            return self.fromPretrained(NoiseLevelAndTextConditionedUpscaler, opts)
         else:
             raise ValueError(f"Unknown model {name}")   
 
@@ -710,6 +742,9 @@ class EngineManager(object):
 
             elif klass == "UnifiedPipeline":
                 pipeline = self.fromPretrained(UnifiedPipeline, engine, extra_kwargs)
+
+            elif klass == "UpscalerPipeline":
+                pipeline = self.fromPretrained(UpscalerPipeline, engine, extra_kwargs)
 
             else:
                 raise Exception(f'Unknown engine class "{klass}"')
