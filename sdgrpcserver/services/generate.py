@@ -10,7 +10,7 @@ import generation_pb2, generation_pb2_grpc
 
 from sdgrpcserver.utils import image_to_artifact, artifact_to_image
 
-from sdgrpcserver import images
+from sdgrpcserver import images, constants
 from sdgrpcserver.debug_recorder import DebugNullRecorder
 
 def buildDefaultMaskPostAdjustments():
@@ -47,15 +47,16 @@ class ParameterExtractor:
         self._result = {}
 
     def _save_debug_tensor(self, tensor):
+        return
         global debugCtr
         debugCtr += 1 
-        with open(f"debug-{debugCtr}.png", "wb") as f:
+        with open(f"{constants.debug_path}/debug-adjustments-{debugCtr}.png", "wb") as f:
             f.write(images.toPngBytes(tensor)[0])
 
     def _handleImageAdjustment(self, tensor, adjustments):
         if type(tensor) is bytes: tensor = images.fromPngBytes(tensor)
 
-        #self._save_debug_tensor(tensor)
+        self._save_debug_tensor(tensor)
 
         for adjustment in adjustments:
             which = adjustment.WhichOneof("adjustment")
@@ -88,7 +89,7 @@ class ParameterExtractor:
             elif which == "crop":
                 tensor = images.crop(tensor, adjustment.crop.top, adjustment.crop.left, adjustment.crop.height, adjustment.crop.width)
             
-            #self._save_debug_tensor(tensor)
+            self._save_debug_tensor(tensor)
         
         return tensor
 

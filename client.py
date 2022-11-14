@@ -22,7 +22,7 @@ import grpc
 from argparse import ArgumentParser, Namespace
 from typing import Dict, Generator, List, Optional, Union, Any, Sequence, Tuple
 from google.protobuf.json_format import MessageToJson
-from PIL import Image
+from PIL import Image, ImageOps
 
 try:
     from dotenv import load_dotenv
@@ -94,9 +94,17 @@ def open_images(
             img.show()
         yield [path, artifact]
 
-def image_to_prompt(im, init: bool = False, mask: bool = False) -> generation.Prompt:
+def image_to_prompt(im, init: bool = False, mask: bool = False, use_alpha = False) -> generation.Prompt:
     if init and mask:
         raise ValueError("init and mask cannot both be True")
+
+    if use_alpha:
+        # Split into 3 channels
+        r, g, b, a = im.split()
+        # Recombine back to RGB image
+        im = Image.merge('RGB', (a, a, a))
+        im = ImageOps.invert(im)
+
     buf = io.BytesIO()
     im.save(buf, format="PNG")
     buf.seek(0)
@@ -189,6 +197,14 @@ class StabilityInference:
         if verbose:
             logger.info(f"Opening channel to {host}")
 
+        maxMsgLength = 20 * 1024 * 1024 # 20 MB
+
+        channel_options=[
+            ('grpc.max_message_length', maxMsgLength),
+            ('grpc.max_send_message_length', maxMsgLength),
+            ('grpc.max_receive_message_length', maxMsgLength),
+        ]
+
         call_credentials = []
 
         if key:
@@ -202,10 +218,14 @@ class StabilityInference:
             
             channel = grpc.secure_channel(
                 host, 
-                grpc.composite_channel_credentials(channel_credentials, *call_credentials)
+                grpc.composite_channel_credentials(channel_credentials, *call_credentials),
+                options=channel_options
             )
         else: 
-            channel = grpc.insecure_channel(host)
+            channel = grpc.insecure_channel(
+                host, 
+                options=channel_options
+            )
 
         if verbose:
             logger.info(f"Channel opened to {host}")
@@ -217,6 +237,7 @@ class StabilityInference:
         negative_prompt: str = None,
         init_image: Optional[Image.Image] = None,
         mask_image: Optional[Image.Image] = None,
+        mask_from_image_alpha: bool = False,
         height: int = 512,
         width: int = 512,
         start_schedule: float = 1.0,
@@ -307,6 +328,9 @@ class StabilityInference:
             if mask_image is not None:
                 prompts += [image_to_prompt(mask_image, mask=True)]
         
+            elif mask_from_image_alpha:
+                prompts += [image_to_prompt(init_image, mask=True, use_alpha=True)]
+
         if guidance_prompt:
             if isinstance(guidance_prompt, str):
                 guidance_prompt = generation.Prompt(text=guidance_prompt)
@@ -511,6 +535,12 @@ if __name__ == "__main__":
         help="Mask image",
     )
     parser.add_argument(
+        '--mask_from_image_alpha',
+        '-a',
+        action="store_true",
+        help="Get the mask from the image alpha channel, rather than a seperate image"
+    )
+    parser.add_argument(
         "--negative_prompt", "-N",
         type=str,
         help="Negative Prompt",
@@ -546,6 +576,7 @@ if __name__ == "__main__":
         "samples": args.num_samples,
         "init_image": args.init_image,
         "mask_image": args.mask_image,
+        "mask_from_image_alpha": args.mask_from_image_alpha,
     }
 
     stability_api = StabilityInference(

@@ -91,7 +91,17 @@ class GrpcServer(object):
         interceptors = []        
         if args.access_token: interceptors.append(GrpcServerTokenChecker(args.access_token))
 
-        self._server = grpc.server(futures.ThreadPoolExecutor(max_workers=4), interceptors=interceptors)
+        maxMsgLength = 20 * 1024 * 1024 # 20 MB
+
+        self._server = grpc.server(
+            futures.ThreadPoolExecutor(max_workers=4), 
+            interceptors=interceptors,
+            options=[
+                ('grpc.max_message_length', maxMsgLength),
+                ('grpc.max_send_message_length', maxMsgLength),
+                ('grpc.max_receive_message_length', maxMsgLength),
+            ],
+        )
         self._server.add_insecure_port(f"{host}:{port}")
 
     @property
