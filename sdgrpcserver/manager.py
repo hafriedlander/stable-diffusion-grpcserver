@@ -24,6 +24,7 @@ from diffusers.pipeline_utils import DiffusionPipeline
 import generation_pb2
 
 from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipeline, UnifiedPipelinePromptType, UnifiedPipelineImageType
+from sdgrpcserver.pipeline.new_unified_pipeline import NewUnifiedPipeline
 from sdgrpcserver.pipeline.upscaler_pipeline import NoiseLevelAndTextConditionedUpscaler, UpscalerPipeline
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 
@@ -322,6 +323,8 @@ class PipelineWrapper(object):
  
         # Sampler control
         sampler: generation_pb2.DiffusionSampler = None,
+        scheduler = None,
+
         eta: Optional[float] = 0.0,
         num_inference_steps: int = 50,
 
@@ -331,7 +334,7 @@ class PipelineWrapper(object):
         outmask_image: Optional[UnifiedPipelineImageType] = None,
 
         # The strength of the img2img or inpaint process, if init_image is provided
-        strength: float = 0.0,
+        strength: float = None,
 
         # Process controll
         progress_callback=None, 
@@ -347,30 +350,31 @@ class PipelineWrapper(object):
         elif seed > 0:
             generator = torch.Generator(generator_device).manual_seed(seed)
 
-        if sampler is None or sampler == generation_pb2.SAMPLER_DDPM:
-            scheduler=self._plms
-        elif sampler == generation_pb2.SAMPLER_K_LMS:
-            scheduler=self._klms
-        elif sampler == generation_pb2.SAMPLER_DDIM:
-            scheduler=self._ddim
-        elif sampler == generation_pb2.SAMPLER_K_EULER:
-            scheduler=self._euler
-        elif sampler == generation_pb2.SAMPLER_K_EULER_ANCESTRAL:
-            scheduler=self._eulera
-        elif sampler == generation_pb2.SAMPLER_K_DPM_2:
-            scheduler=self._dpm2
-        elif sampler == generation_pb2.SAMPLER_K_DPM_2_ANCESTRAL:
-            scheduler=self._dpm2a
-        elif sampler == generation_pb2.SAMPLER_K_HEUN:
-            scheduler=self._heun
-        elif sampler == generation_pb2.SAMPLER_DPMSOLVERPP_1ORDER:
-            scheduler=self._dpmspp1
-        elif sampler == generation_pb2.SAMPLER_DPMSOLVERPP_2ORDER:
-            scheduler=self._dpmspp2
-        elif sampler == generation_pb2.SAMPLER_DPMSOLVERPP_3ORDER:
-            scheduler=self._dpmspp3
-        else:
-            raise NotImplementedError("Scheduler not implemented")
+        if scheduler is None:
+            if sampler is None or sampler == generation_pb2.SAMPLER_DDPM:
+                scheduler=self._plms
+            elif sampler == generation_pb2.SAMPLER_K_LMS:
+                scheduler=self._klms
+            elif sampler == generation_pb2.SAMPLER_DDIM:
+                scheduler=self._ddim
+            elif sampler == generation_pb2.SAMPLER_K_EULER:
+                scheduler=self._euler
+            elif sampler == generation_pb2.SAMPLER_K_EULER_ANCESTRAL:
+                scheduler=self._eulera
+            elif sampler == generation_pb2.SAMPLER_K_DPM_2:
+                scheduler=self._dpm2
+            elif sampler == generation_pb2.SAMPLER_K_DPM_2_ANCESTRAL:
+                scheduler=self._dpm2a
+            elif sampler == generation_pb2.SAMPLER_K_HEUN:
+                scheduler=self._heun
+            elif sampler == generation_pb2.SAMPLER_DPMSOLVERPP_1ORDER:
+                scheduler=self._dpmspp1
+            elif sampler == generation_pb2.SAMPLER_DPMSOLVERPP_2ORDER:
+                scheduler=self._dpmspp2
+            elif sampler == generation_pb2.SAMPLER_DPMSOLVERPP_3ORDER:
+                scheduler=self._dpmspp3
+            else:
+                raise NotImplementedError("Scheduler not implemented")
 
         self._pipeline.scheduler = scheduler
         self._pipeline.progress_bar = ProgressBarWrapper(progress_callback, stop_event, suppress_output)
@@ -742,6 +746,9 @@ class EngineManager(object):
 
             elif klass == "UnifiedPipeline":
                 pipeline = self.fromPretrained(UnifiedPipeline, engine, extra_kwargs)
+
+            elif klass == "NewUnifiedPipeline":
+                pipeline = self.fromPretrained(NewUnifiedPipeline, engine, extra_kwargs)
 
             elif klass == "UpscalerPipeline":
                 pipeline = self.fromPretrained(UpscalerPipeline, engine, extra_kwargs)

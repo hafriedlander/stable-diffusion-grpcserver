@@ -15,7 +15,7 @@ def fromPIL(image):
     rgbHWC = np.array(image).astype(np.float32) / 255.0
     # Convert to BCHW
     rgbBCHW = rgbHWC[None].transpose(0, 3, 1, 2)
-    # And convert to Rensor
+    # And convert to Tensor
     return torch.from_numpy(rgbBCHW)
 
 def toPIL(tensor):

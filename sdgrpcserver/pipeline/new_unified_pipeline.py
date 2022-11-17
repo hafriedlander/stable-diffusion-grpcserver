@@ -1,10 +1,12 @@
 import inspect, traceback, math
 import time
 from mimetypes import init
-from typing import Callable, List, Tuple, Optional, Union, Literal, NewType
+
+from typing import Callable, List, Tuple, Iterable, Optional, Union, Literal, NewType
 
 import numpy as np
 import torch
+from torch import Tensor
 
 import torchvision
 import torchvision.transforms as T
@@ -23,6 +25,8 @@ from diffusers.schedulers.scheduling_utils import SchedulerMixin
 from diffusers.utils import deprecate, logging
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
+
+from k_diffusion import sampling as k_sampling, utils as k_utils, external as k_external
 
 from sdgrpcserver import images
 from sdgrpcserver.pipeline.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
@@ -47,7 +51,7 @@ enabled_debug_latents = set([
     #"step",
     #"mask",
     #"shapednoise",
-    #"initnoise"
+    #"initnoise",
 ])
 
 def write_debug_latents(vae, label, i, latents):
@@ -58,45 +62,398 @@ def write_debug_latents(vae, label, i, latents):
     stage_image = (stage_image / 2 + 0.5).clamp(0, 1).cpu()
 
     for j, pngBytes in enumerate(images.toPngBytes(stage_image)):
-        with open(f"/tests/out/debug-up-{label}-{j}-{i}.png", "wb") as f:
+        with open(f"/tests/out/debug-nup-{label}-{j}-{i}.png", "wb") as f:
             f.write(pngBytes)
+
+# Some types to describe the various structures of unet. First some return types
+
+# An Xt (ie a sample that includes some amount of noise)
+XtTensor = NewType('XtTensor', Tensor)
+# The input to some UNets needs to be scaled depending on current timestep
+ScaledXtTensor = NewType('SCaledXtTensor', Tensor)
+# The predicted noise in a sample
+PredictedNoiseTensor = NewType('PredictedNoiseTensor', Tensor)
+# The predicted X0 (i.e Xt - PredictedNoise)
+PX0Tensor = NewType('PX0Tensor', Tensor)
+
+# The Diffusers UNet
+DiffusersUNet = Callable[[ScaledXtTensor, int, Tensor], PredictedNoiseTensor]
+# A Wrapped UNet where the hidden_state argument inside the wrapping
+NoisePredictionUNet = Callable[[ScaledXtTensor, int], PredictedNoiseTensor]
+# A KDiffusion wrapped UNet
+KDiffusionUNet = Callable[[XtTensor, float], PX0Tensor]
+# The internal Diffusers UNet that wraps a NoisePredictionUNet to take an XtTensor instead of a ScaledXtTensor
+DiffusersScalingUNet = Callable[[XtTensor, int, int, float], PredictedNoiseTensor]
+# The main DiffusersScheduler wrapped UNet
+DiffusersUNet = Callable[[XtTensor, int, int, float], XtTensor]
+
+
+class CommonScheduler:
+    def __init__(
+        self, 
+        scheduler: Union[SchedulerMixin, KSchedulerMixin, Callable], 
+        generators: Iterable[torch.Generator], 
+        unet: NoisePredictionUNet,
+        device: torch.device,
+        dtype: torch.dtype,
+        vae
+    ):
+        self.scheduler = scheduler
+        self.generators = generators
+        self.unwrapped_unet = unet
+        self.device = device
+        self.dtype = dtype
+        self.vae = vae
+
+    def set_timesteps(
+        self, 
+        num_inference_steps: int,
+        start_offset: int = None,
+        strength: float = None,
+    ):
+        raise NotImplementedError("Subclass to implement")
+
+    def prepare_initial_latents(
+        self, 
+        latents: Tensor
+    ) -> Tensor:
+        raise NotImplementedError("Subclass to implement")
+
+    def scale_latents(
+        self,
+        latents: Tensor,
+        t: int
+    ):
+        raise NotImplementedError("Subclass to implement")
+
+    def add_noise(
+        self,
+        latents: Tensor,
+        noise: Tensor,
+        step_idx: int,
+    ) -> Tensor:
+        raise NotImplementedError("Subclass to implement")
+
+    def loop(
+        self, 
+        latents: Tensor,
+        progress_wrapper
+    ) -> Tensor:
+        raise NotImplementedError("Subclass to implement")
+
+    def match_shape(self, values: Tensor, broadcast_array: Tensor):
+        values = values.flatten()
+
+        while len(values.shape) < len(broadcast_array.shape):
+            values = values[..., None]
+
+        return values.to(broadcast_array.device)
+
+class DiffusersSchedulerBase(CommonScheduler):
+
+    def set_timesteps(
+        self, 
+        num_inference_steps: int,
+        start_offset: int = None,
+        strength: float = None,
+        eta: float = None,
+    ):
+        self.eta = eta
+        self.num_inference_steps = num_inference_steps
+
+        if strength is not None:
+            if start_offset is not None:
+                raise ValueError("Can't pass both start_offset and strength to set_timesteps")
+
+            offset = self.scheduler.config.get("steps_offset", 0)
+            init_timestep = int(num_inference_steps * strength) + offset
+            init_timestep = min(init_timestep, num_inference_steps)
+
+            self.start_offset = max(num_inference_steps - init_timestep + offset, 0)
+        elif start_offset is not None:
+            self.start_offset = start_offset
+        else:
+            self.start_offset = 0
+
+        # Wrap the scheduler. TODO: Better place than here?
+        self.unet = self.wrap_unet(self.unwrapped_unet)
+
+        return self.scheduler.set_timesteps(num_inference_steps)
+
+    def wrap_scaled_unet(self, unet: NoisePredictionUNet) -> DiffusersScalingUNet:
+        raise NotImplementedError("Subclass to implement")
+
+    def wrap_unet(self, unet: DiffusersScalingUNet) -> DiffusersUNet:
+        scaled_unet = self.wrap_scaled_unet(unet)
+
+        scheduler_step_args = set(inspect.signature(self.scheduler.step).parameters.keys())
+
+        accepts_eta = "eta" in scheduler_step_args
+        accepts_generator = "generator" in scheduler_step_args
+        accepts_noise_predictor = "noise_predictor" in scheduler_step_args
+
+        step_kwargs = {}
+        if accepts_eta and self.eta is not None: step_kwargs["eta"] = self.self.eta
+        if accepts_generator: step_kwargs["generator"] = self.generators[0]
+        if accepts_noise_predictor: step_kwargs["noise_predictor"] = scaled_unet
+
+        def wrapped_unet(latents, i, t, sigma = None):
+            # predict the noise residual
+            noise_pred = scaled_unet(latents, i, t, sigma = sigma)
+            # TODO: kind of a hack, deal with CLIP predictor returning latents too
+            # if isinstance(noise_pred, tuple): noise_pred, input_latents = noise_pred
+            return self.scheduler_step(noise_pred, t, i, latents, **step_kwargs).prev_sample
+        
+        return wrapped_unet
+
+    def scheduler_step(self, noise_pred, t, t_index, latents, **step_kwargs):
+        raise NotImplementedError("Subclass to implement")
+
+    def loop(self, latents, progress_wrapper):
+        unet = self.unet
+        timesteps_tensor = self.scheduler.timesteps[self.start_offset:].to(self.device)
+
+        for i, t in enumerate(progress_wrapper(timesteps_tensor)):
+            t_index = self.start_offset + i
+            latents = unet(latents, t_index, t)
+
+        return latents
+
+class DiffusersScheduler(DiffusersSchedulerBase):
+
+    def prepare_initial_latents(
+        self, 
+        latents: Tensor
+    ) -> Tensor:
+        return latents * self.scheduler.init_noise_sigma
+
+    def add_noise(
+        self,
+        latents: Tensor,
+        noise: Tensor,
+        step_idx: int
+    ) -> Tensor:
+        timesteps = self.scheduler.timesteps[step_idx]
+        # TODO: need this?
+        # timesteps = torch.tensor([timesteps] * self.batch_total, device=self.device)
+        return self.scheduler.add_noise(latents, noise, timesteps)
+
+    def scale_latents(
+        self,
+        latents: Tensor,
+        t: int
+    ):
+        return self.scheduler.scale_model_input(latents, t)           
+
+    def wrap_scaled_unet(self, unet: NoisePredictionUNet) -> DiffusersScalingUNet:
+        def wrapped_unet(latents, i, t, sigma = None):
+            latents = self.scheduler.scale_model_input(latents, t)
+            return unet(latents, t)
+
+        return wrapped_unet
+
+    def scheduler_step(self, noise_pred, t, t_index, latents, **step_kwargs):
+        return self.scheduler.step(noise_pred, t, latents, **step_kwargs)
+
+class DiffusersKScheduler(DiffusersSchedulerBase):
+
+    def prepare_initial_latents(
+        self, 
+        latents: Tensor
+    ) -> Tensor:
+        return latents * self.scheduler.sigmas[0]
+
+    def add_noise(
+        self,
+        latents: Tensor,
+        noise: Tensor,
+        step_idx: int
+    ) -> Tensor:
+        timesteps = torch.tensor(step_idx)
+        return self.scheduler.add_noise(latents, noise, timesteps)
+
+    def scale_latents(
+        self,
+        latents: Tensor,
+        t: int
+    ):
+        deltas = [abs(x-t) for x in self.scheduler.timesteps]
+        i, best_delta = 0, deltas[0]
+
+        for j, delta in enumerate(deltas):
+            if delta < best_delta: i, best_delta = j, delta
+
+        sigma = self.scheduler.sigmas[i]
+
+        return latents / ((sigma**2 + 1) ** 0.5)       
+
+    def wrap_scaled_unet(self, unet: NoisePredictionUNet) -> DiffusersScalingUNet:
+        def wrapped_unet(latents, i, t, sigma = None):
+            if sigma is None: sigma = self.scheduler.sigmas[i]
+            # the model input needs to be scaled to match the continuous ODE formulation in K-LMS
+            latents = latents / ((sigma**2 + 1) ** 0.5)            
+            return unet(latents, t)
+
+        return wrapped_unet
+
+    def scheduler_step(self, noise_pred, t, t_index, latents, **step_kwargs):
+        return self.scheduler.step(noise_pred, t_index, latents, **step_kwargs)
+
+class KDiffusionUNetWrapper(k_external.DiscreteEpsDDPMDenoiser):
+    def __init__(self, unet: UNet2DConditionModel, alphas_cumprod: Tensor):
+        super().__init__(unet, alphas_cumprod, quantize=True)
+
+class KDiffusionScheduler(CommonScheduler):
+
+    def get_betas(
+        self,
+        num_train_timesteps: int = 1000,
+        beta_start: float = 0.00085,
+        beta_end: float = 0.012,
+    ) -> Tensor:
+        return torch.linspace(beta_start**0.5, beta_end**0.5, num_train_timesteps, device=self.device) ** 2
+
+    def get_alphas(self, betas: Tensor) -> Tensor:
+        return 1.0 - betas
+
+    def get_alphas_cumprod(self, alphas: Tensor) -> Tensor:
+        return torch.cumprod(alphas, dim=0)
+
+    def set_timesteps(
+        self, 
+        num_inference_steps: int,
+        start_offset: int = None,
+        strength: float = None,
+        kerras_rho: float = None,
+        eta: float = None,
+        churn: float = None,
+    ):
+        betas = self.get_betas()
+        alphas = self.get_alphas(betas)
+        alphas_cumprod = self.get_alphas_cumprod(alphas)
+
+        self._unet: KDiffusionUNetWrapper = KDiffusionUNetWrapper(self.unwrapped_unet, alphas_cumprod)
+        self.unet: KDiffusionUNet = self._unet
+
+        if kerras_rho is not None:
+            self.sigmas = k_sampling.get_sigmas_karras(
+                n=num_inference_steps,
+                sigma_max=self.unet.sigma_max.to('cpu'),
+                sigma_min=self.unet.sigma_min.to('cpu'),
+                rho=7.,
+                device=self.device,
+            )
+        else:
+            self.sigmas = self.unet.get_sigmas(
+                n=num_inference_steps
+            )
+
+        self.eta = eta
+        self.churn = churn
+
+        self.num_inference_steps = num_inference_steps
+
+        if strength is not None:
+            if start_offset is not None:
+                raise ValueError("Can't pass both start_offset and strength to set_timesteps")
+
+            init_timestep = int(num_inference_steps * strength)
+            init_timestep = min(init_timestep, num_inference_steps)
+            self.start_offset = max(num_inference_steps - init_timestep, 0)
+        elif start_offset is not None:
+            self.start_offset = start_offset
+        else:
+            self.start_offset = 0
+
+    def prepare_initial_latents(
+        self, 
+        latents: Tensor
+    ) -> Tensor:
+        return latents * self.sigmas[0]
+
+    def scale_latents(
+        self,
+        latents: Tensor,
+        t: int
+    ):
+        sigma = self._unet.t_to_sigma(t)
+        _, cin =  self._unet.get_scalings(sigma)
+        cin = k_utils.append_dims(cin, latents.ndim)
+        cin = cin.to(latents.dtype)
+        return latents * cin
+
+    def add_noise(
+        self,
+        latents: Tensor,
+        noise: Tensor,
+        step_idx: int
+    ) -> Tensor:
+        sigmas = self.match_shape(self.sigmas[step_idx], noise)
+        return latents + noise * sigmas
+
+    def loop(self, latents, progress_wrapper):
+        unet = self.unet
+        sigmas = self.sigmas[self.start_offset:].to(self.dtype)
+
+        def trange(i, **kwargs):
+            return progress_wrapper(range(i))
+
+        def tqdm(**kwargs):
+            return progress_wrapper(None)
+
+        k_sampling.trange = trange
+        k_sampling.tqdm = tqdm
+
+        scheduler_keys = inspect.signature(self.scheduler).parameters.keys()
+        accepts_sigmas = "sigmas" in scheduler_keys
+        accepts_n = "n" in scheduler_keys
+        accepts_eta = "eta" in scheduler_keys
+        accepts_s_churn = "s_churn" in scheduler_keys
+
+        kwargs = {}
+        if accepts_eta and self.eta is not None:
+            kwargs['eta'] = self.eta
+        if accepts_s_churn and self.churn is not None:
+            kwargs['s_churn'] = self.churn
+        if accepts_n:
+            kwargs['n'] = self.num_inference_steps
+
+        if accepts_sigmas:
+            kwargs['sigmas'] = sigmas
+        else:
+            kwargs['sigma_min']=self._unet.sigma_min
+            kwargs['sigma_max']=min(self._unet.sigma_max, sigmas[0])
+
+        def callback(d):
+            write_debug_latents(self.vae, "step", d['i'], d['denoised'])
+
+        return self.scheduler(unet, latents, callback=callback, **kwargs)
 
 def set_requires_grad(model, value):
     for param in model.parameters():
         param.requires_grad = value
 
-class NoisePredictor:
+class UNetWithEmbeddings():
 
-    def __init__(self, pipeline, text_embeddings):
-        self.pipeline = pipeline
+    def __init__(self, unet, text_embeddings):
+        self.unet = unet
         self.text_embeddings = text_embeddings
 
-    def __call__(self, unet, latents, i, t, sigma = None, second = False):
-        if isinstance(self.pipeline.scheduler, KSchedulerMixin): 
-            if sigma is None: sigma = self.pipeline.scheduler.sigmas[i] 
-            # the model input needs to be scaled to match the continuous ODE formulation in K-LMS
-            latents = latents / ((sigma**2 + 1) ** 0.5)
-        else:
-            latents = self.pipeline.scheduler.scale_model_input(latents, t)
+    def __call__(self, latents, t):
+        return self.unet(latents, t, encoder_hidden_states=self.text_embeddings).sample
 
-        # predict the noise residual
-        noise_pred = unet(latents, t, encoder_hidden_states=self.text_embeddings).sample
+class UNetGuided():
 
-        return noise_pred
-
-class GuidedNoisePredictor(NoisePredictor):
-
-    def __init__(self, pipeline, text_embeddings, guidance_scale):
-        super().__init__(pipeline, text_embeddings)
+    def __init__(self, unet, guidance_scale):
+        self.unet = unet
         self.guidance_scale = guidance_scale
 
-    def __call__(self, unet, latents, i, t, sigma = None, second = False):
+    def __call__(self, latents, t):
         # expand the latents if we are doing classifier free guidance
         latents = torch.cat([latents] * 2)
 
-        noise_pred = super().__call__(unet, latents, i, t, sigma = sigma)
-
-
+        noise_pred = self.unet(latents, t)
+    
         # perform guidance
         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
         noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
@@ -349,37 +706,44 @@ class ClipGuidedNoisePredictor:
         return grads, noise_pred_g
 
 
+def batched_randn(shape, generators, device, dtype):
+    latents = torch.cat([
+        torch.randn((1, *shape[1:]), generator=generator, device=generator.device, dtype=dtype) 
+        for generator in generators
+    ], dim=0)
+
+    return latents.to(device)
+
+
 class UnifiedMode(object):
 
-    def __init__(self, noise_predictor, **_):
+    def __init__(self, **_):
         self.t_start = 0
-        self.noise_predictor = noise_predictor
 
     def generateLatents(self):
         raise NotImplementedError('Subclasses must implement')
 
-    def unet(self, latent_model_input, t, encoder_hidden_states):
-        return self.pipeline.unet(latent_model_input, t, encoder_hidden_states=encoder_hidden_states)
+    def wrap_unet(self, unet: NoisePredictionUNet) -> NoisePredictionUNet:
+        return unet
 
-    def latentStep(self, latents, i, t, steppos):
-        return latents
-
-    def noise_predict(self, latents, i, t, sigma = None):
-        return self.noise_predictor(self.unet, latents, i, t, sigma = sigma)
+    def wrap_k_unet(self, unet: KDiffusionUNetWrapper) -> KDiffusionUNet:
+        return unet
+    
+    def wrap_d_unet(self, unet: DiffusersUNet) -> DiffusersUNet:
+        return unet
 
 class Txt2imgMode(UnifiedMode):
 
-    def __init__(self, pipeline, generator, height, width, latents_dtype, batch_total, **kwargs):
+    def __init__(self, pipeline, scheduler, generators, height, width, latents_dtype, batch_total, **kwargs):
         if height % 8 != 0 or width % 8 != 0:
             raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
 
         super().__init__(**kwargs)
 
         self.device = pipeline.device
-        self.scheduler = pipeline.scheduler
+        self.scheduler = scheduler
+        self.generators = generators
         self.pipeline = pipeline
-
-        self.generators = generator if isinstance(generator, list) else [generator] * batch_total
 
         self.latents_dtype = latents_dtype
         self.latents_shape = (
@@ -390,57 +754,30 @@ class Txt2imgMode(UnifiedMode):
         )
 
     def generateLatents(self):
-        # Unlike in other pipelines, latents need to be generated in the target device
-        # for 1-to-1 results reproducibility with the CompVis implementation.
-        # However this currently doesn't work in `mps`.
-        latents = torch.cat([
-            torch.randn((1, *self.latents_shape[1:]), generator=generator, device=generator.device, dtype=self.latents_dtype) 
-            for generator in self.generators
-        ], dim=0)
-        
-        latents = latents.to(self.device)
-
+        latents = batched_randn(self.latents_shape, self.generators, device=self.device, dtype=self.latents_dtype)
         # scale the initial noise by the standard deviation required by the scheduler
-        if isinstance(self.scheduler, KSchedulerMixin): 
-            return latents * self.scheduler.sigmas[0]
-        else:
-            return latents * self.scheduler.init_noise_sigma
+        return self.scheduler.prepare_initial_latents(latents)
 
 class Img2imgMode(UnifiedMode):
 
-    def __init__(self, pipeline, generator, init_image, latents_dtype, batch_total, num_inference_steps, strength, **kwargs):
+    def __init__(self, pipeline, scheduler, generators, init_image, latents_dtype, batch_total, num_inference_steps, strength, **kwargs):
         if strength < 0 or strength > 1:
             raise ValueError(f"The value of strength should in [0.0, 1.0] but is {strength}")
         
         super().__init__(**kwargs)
 
         self.device = pipeline.device
-        self.scheduler = pipeline.scheduler
+        self.scheduler = scheduler
+        self.generators = generators
         self.pipeline = pipeline
-
-        self.generators = generator if isinstance(generator, list) else [generator] * batch_total
 
         self.latents_dtype = latents_dtype
         self.batch_total = batch_total
         
-        self.offset = self.scheduler.config.get("steps_offset", 0)
-        self.init_timestep = int(num_inference_steps * strength) + self.offset
-        self.init_timestep = min(self.init_timestep, num_inference_steps)
-        self.t_start = max(num_inference_steps - self.init_timestep + self.offset, 0)
-
         if isinstance(init_image, PIL.Image.Image):
-            self.init_image = self.preprocess(init_image)
-        else:
-            self.init_image = self.preprocess_tensor(init_image)
+            init_image = images.fromPIL(init_image)
 
-    def preprocess(self, image):
-        w, h = image.size
-        w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
-        image = image.resize((w, h), resample=PIL.Image.LANCZOS)
-        image = np.array(image).astype(np.float32) / 255.0
-        image = image[None].transpose(0, 3, 1, 2)
-        image = torch.from_numpy(image)
-        return 2.0 * image - 1.0
+        self.init_image = self.preprocess_tensor(init_image)
 
     def preprocess_tensor(self, tensor):
         # Make sure it's BCHW not just CHW
@@ -449,6 +786,8 @@ class Img2imgMode(UnifiedMode):
         tensor = tensor[:, [0,1,2]]
         # Adjust to -1 .. 1
         tensor = 2.0 * tensor - 1.0
+        # TODO: resize & crop if it doesn't match width & height
+
         # Done
         return tensor
 
@@ -492,34 +831,13 @@ class Img2imgMode(UnifiedMode):
     def _buildInitialLatents(self):
         return self._convertToLatents(self.init_image)
 
-    def _getSchedulerNoiseTimestep(self, i, t = None):
-        """Figure out the timestep to pass to scheduler.add_noise
-        If it's an old-style scheduler:
-          - return the index as a single integer tensor
-
-        If it's a new-style scheduler:
-          - if we know the timestep use it
-          - otherwise look up the timestep in the scheduler
-          - either way, return a tensor * batch_total on our device
-        """
-        if isinstance(self.scheduler, KSchedulerMixin): 
-            return torch.tensor(i)
-        else:
-            timesteps = t if t != None else self.scheduler.timesteps[i]
-            return torch.tensor([timesteps] * self.batch_total, device=self.device)
-
     def _addInitialNoise(self, latents):
         # NOTE: We run K_LMS in float32, because it seems to have problems with float16
         noise_dtype=torch.float32 if isinstance(self.scheduler, LMSDiscreteScheduler) else self.latents_dtype
 
-        image_noise = torch.cat([
-            torch.randn((1, *latents.shape[1:]), generator=generator, device=generator.device, dtype=noise_dtype)
-            for generator in self.generators
-        ])
+        self.image_noise = batched_randn(latents.shape, self.generators, self.device, noise_dtype)
 
-        self.image_noise = image_noise.to(self.device)
-
-        result = self.scheduler.add_noise(latents.to(noise_dtype), self.image_noise, self._getSchedulerNoiseTimestep(self.t_start))
+        result = self.scheduler.add_noise(latents.to(noise_dtype), self.image_noise, self.scheduler.start_offset)
         return result.to(self.latents_dtype) # Old schedulers return float32, and we force K_LMS into float32, but we need to return float16
 
     def generateLatents(self):
@@ -528,14 +846,6 @@ class Img2imgMode(UnifiedMode):
         return init_latents
 
 class MaskProcessorMixin(object):
-
-    def preprocess_mask(self, mask, inputIs0K1R=True):
-        """
-        Load a mask from a PIL image
-        """
-        mask = mask.convert("L")
-        mask = np.array(mask).astype(np.float32) / 255.0
-        return self.preprocess_mask_tensor(torch.from_numpy(mask), inputIs0K1R=inputIs0K1R)
 
     def preprocess_mask_tensor(self, tensor, inputIs0K1R=True):
         """
@@ -580,162 +890,6 @@ class MaskProcessorMixin(object):
         """
         return self.round_mask(mask, 0.999)
 
-class OriginalInpaintMode(Img2imgMode, MaskProcessorMixin):
-
-    def __init__(self, mask_image, **kwargs):
-        super().__init__(**kwargs)
-
-        if isinstance(mask_image, PIL.Image.Image):
-            self.mask_image = self.preprocess_mask(mask_image)
-        else:
-            self.mask_image = self.preprocess_mask_tensor(mask_image)
-
-        self.mask = self.mask_image.to(device=self.device, dtype=self.latents_dtype)
-        self.mask = torch.cat([self.mask] * self.batch_total)
-
-    def generateLatents(self):
-        init_latents = self._buildInitialLatents()
-
-        self.init_latents_orig = init_latents
-
-        init_latents = self._addInitialNoise(init_latents)
-        return init_latents
-
-    def latentStep(self, latents, i, t, steppos):
-        # masking
-        init_latents_proper = self.scheduler.add_noise(self.init_latents_orig, self.image_noise, torch.tensor([t]))
-        return (init_latents_proper * self.mask) + (latents * (1 - self.mask))
-
-class RunwayInpaintMode(UnifiedMode):
-
-    def __init__(self, pipeline, generator, init_image, mask_image, latents_dtype, batch_total, num_inference_steps, strength, do_classifier_free_guidance, **kwargs):
-        if strength < 0 or strength > 1:
-            raise ValueError(f"The value of strength should in [0.0, 1.0] but is {strength}")
-        
-        super().__init__(**kwargs)
-
-        self.device = pipeline.device
-        self.scheduler = pipeline.scheduler
-        self.pipeline = pipeline
-
-        self.generators = generator if isinstance(generator, list) else [generator] * batch_total
-
-        if isinstance(init_image, PIL.Image.Image):
-            mask, masked_image = self._prepare_mask_and_masked_image(init_image, mask_image)
-        else:
-            mask, masked_image = self._prepare_mask_and_masked_image_tensor(init_image, mask_image)
-
-        height = mask_image.shape[2]
-        width = mask_image.shape[3]
-
-        self.latents_dtype = latents_dtype
-        self.num_channels_latents = self.pipeline.vae.config.latent_channels
-        self.latents_shape = (
-            batch_total, 
-            self.num_channels_latents, 
-            height // 8, 
-            width // 8
-        )
-
-        self.batch_total = batch_total
-        
-        self.offset = self.scheduler.config.get("steps_offset", 0)
-        self.init_timestep = int(num_inference_steps * strength) + self.offset
-        self.init_timestep = min(self.init_timestep, num_inference_steps)
-        self.t_start = max(num_inference_steps - self.init_timestep + self.offset, 0)
-
-        # -- Stage 2 prep --
-
-        # prepare mask and masked_image
-        mask = mask.to(device=self.device, dtype=self.latents_dtype)
-        masked_image = masked_image.to(device=self.device, dtype=self.latents_dtype)
-
-        # resize the mask to latents shape as we concatenate the mask to the latents
-        mask = torch.nn.functional.interpolate(mask, size=(height // 8, width // 8))
-
-        # encode the mask image into latents space so we can concatenate it to the latents
-        masked_image_latent_dist = self.pipeline.vae.encode(masked_image).latent_dist
-        
-        masked_image_latents = torch.cat([
-            masked_image_latent_dist.sample(generator=generator)
-            for generator in self.generators
-        ], dim=0)
-        
-        masked_image_latents = 0.18215 * masked_image_latents
-
-        # duplicate mask and masked_image_latents for each generation per prompt, using mps friendly method
-        mask = mask.repeat(batch_total, 1, 1, 1)
-        #masked_image_latents = masked_image_latents.repeat(num_images_per_prompt, 1, 1, 1)
-
-        mask = torch.cat([mask] * 2) if do_classifier_free_guidance else mask
-        masked_image_latents = (
-            torch.cat([masked_image_latents] * 2) if do_classifier_free_guidance else masked_image_latents
-        )
-
-        num_channels_mask = mask.shape[1]
-        num_channels_masked_image = masked_image_latents.shape[1]
-
-        if self.num_channels_latents + num_channels_mask + num_channels_masked_image != self.pipeline.inpaint_unet.config.in_channels:
-            raise ValueError(
-                f"Incorrect configuration settings! The config of `pipeline.inpaint_unet`: {self.pipeline.inpaint_unet.config} expects"
-                f" {self.pipeline.inpaint_unet.config.in_channels} but received `num_channels_latents`: {self.num_channels_latents} +"
-                f" `num_channels_mask`: {num_channels_mask} + `num_channels_masked_image`: {num_channels_masked_image}"
-                f" = {self.num_channels_latents+num_channels_masked_image+num_channels_mask}. Please verify the config of"
-                " `pipeline.unet` or your `mask_image` or `image` input."
-            )
-
-        self.mask = mask
-        self.masked_image_latents = masked_image_latents
-
-    def _prepare_mask_and_masked_image(image, mask):
-        image = np.array(image.convert("RGB"))
-        image = image[None].transpose(0, 3, 1, 2)
-        image = torch.from_numpy(image).to(dtype=torch.float32) / 255
-
-        mask = np.array(mask.convert("L"))
-        mask = mask.astype(np.float32) / 255.0
-        mask = torch.from_numpy(mask)
-
-        return self._prepare_mask_and_masked_image_tensor(image, mask)
-
-    def _prepare_mask_and_masked_image_tensor(self, image_tensor, mask_tensor):
-        # Make sure it's BCHW not just CHW
-        if image_tensor.ndim == 3: image_tensor = image_tensor[None, ...]
-        # Strip any alpha
-        image_tensor = image_tensor[:, [0,1,2]]
-        # Adjust to -1 .. 1
-        image_tensor = 2.0 * image_tensor - 1.0
-
-        # Make sure it's BCHW not just CHW
-        if mask_tensor.ndim == 3: mask_tensor = mask_tensor[None, ...]
-        # Ensure single channel
-        mask_tensor = mask_tensor[:, [0]]
-        # Harden
-        mask_tensor[mask_tensor < 0.5] = 0
-        mask_tensor[mask_tensor >= 0.5] = 1
-
-        masked_image_tensor = image_tensor * (mask_tensor < 0.5)
-
-        return mask_tensor, masked_image_tensor
-
-    def generateLatents(self):
-        latents = torch.cat([
-            torch.randn((1, *self.latents_shape[1:]), generator=generator, device=generator.device, dtype=self.latents_dtype) 
-            for generator in self.generators
-        ], dim=0)
-
-        latents = latents.to(self.device)
-
-        # scale the initial noise by the standard deviation required by the scheduler
-        if isinstance(self.scheduler, KSchedulerMixin): 
-            return latents * self.scheduler.sigmas[0]
-        else:
-            return latents * self.scheduler.init_noise_sigma
-
-    def unet(self, latent_model_input, t, encoder_hidden_states):
-        latent_model_input = torch.cat([latent_model_input, self.mask, self.masked_image_latents], dim=1)
-        return self.pipeline.inpaint_unet(latent_model_input, t, encoder_hidden_states=encoder_hidden_states)
-
 class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
 
     def __init__(self, mask_image, num_inference_steps, strength, **kwargs):
@@ -758,10 +912,9 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
 
         # Load mask in 1K0D, 1CHW L shape
         if isinstance(mask_image, PIL.Image.Image):
-            self.mask = self.preprocess_mask(mask_image)
-        else:
-            self.mask = self.preprocess_mask_tensor(mask_image)
+            mask_image = images.fromPIL(mask_image.convert("L"))
 
+        self.mask = self.preprocess_mask_tensor(mask_image)
         self.mask = self.mask.to(device=self.device, dtype=self.latents_dtype)
 
         # Remove any excluded pixels (0)
@@ -921,19 +1074,37 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         init_latents = self._addInitialNoise(init_latents)
 
         write_debug_latents(self.pipeline.vae, "initnoise", 0, init_latents)
+
         # And return
         return init_latents
 
-    def latentStep(self, latents, i, t, steppos):
-        # The type shifting here is due to note in Img2img._addInitialNoise
-        init_latents_proper = self.scheduler.add_noise(self.init_latents_orig.to(self.image_noise.dtype), self.image_noise, self._getSchedulerNoiseTimestep(i, t))
-        init_latents_proper = init_latents_proper.to(latents.dtype)
+    def _blend(self, t, orig, next):
+            steppos = 1 - (t+1) / 1000
+            steppos = steppos.clamp(0, 0.9999)
 
-        iteration_mask = self.latent_blend_mask.gt(steppos).to(self.latent_blend_mask.dtype)
+            iteration_mask = self.latent_blend_mask.gt(steppos).to(next.dtype)
 
-        write_debug_latents(self.pipeline.vae, "mask", i, self.init_latents_orig * iteration_mask)
+            return (orig * iteration_mask) + (next * (1 - iteration_mask))       
 
-        return (init_latents_proper * iteration_mask) + (latents * (1 - iteration_mask))       
+    def wrap_k_unet(self, unet: KDiffusionUNetWrapper):
+        def wrapped_unet(latents, sigma):
+            px0 = unet(latents, sigma)
+            orig = self.init_latents_orig.to(px0.dtype)
+
+            return self._blend(unet.sigma_to_t(sigma), orig, px0)
+
+        return wrapped_unet
+
+    def wrap_d_unet(self, unet: DiffusersUNet):
+        def wrapped_unet(latents, i, t, sigma = None):
+            xt = unet(latents, i, t, sigma = sigma)
+            orig = self.init_latents_orig.to(self.image_noise.dtype)
+            orig = self.scheduler.add_noise(orig, self.image_noise, i)
+            orig = orig.to(xt.dtype)
+
+            return self._blend(t, orig, xt)
+
+        return wrapped_unet
 
 
 class EnhancedRunwayInpaintMode(EnhancedInpaintMode):
@@ -954,17 +1125,32 @@ class EnhancedRunwayInpaintMode(EnhancedInpaintMode):
     def _fillWithShapedNoise(self, init_latents):
         return super()._fillWithShapedNoise(init_latents, noise_mode=5)
 
-    def unet(self, latent_model_input, t, encoder_hidden_states):
-        if latent_model_input.shape[0] == self.inpaint_mask.shape[0]:
-            latent_model_input = torch.cat([latent_model_input, self.inpaint_mask, self.masked_image_latents], dim=1)
-        else:
-            latent_model_input = torch.cat([latent_model_input, self.inpaint_mask_cfg, self.masked_image_latents_cfg], dim=1)
+    def wrap_unet(self, unet: NoisePredictionUNet) -> NoisePredictionUNet:
+        def wrapped_unet(latents, t):
+            if latents.shape[0] == self.inpaint_mask.shape[0]:
+                inpaint_mask = self.inpaint_mask
+                masked_latents = self.masked_image_latents
+            else:
+                inpaint_mask = self.inpaint_mask_cfg
+                masked_latents = self.masked_image_latents_cfg
 
-        return self.pipeline.inpaint_unet(latent_model_input, t, encoder_hidden_states=encoder_hidden_states)
+            expanded_latents = torch.cat([
+                latents, 
+                # Note: these specifically _do not_ get scaled by the 
+                # current timestep sigma like the latents above have been
+                inpaint_mask,
+                masked_latents
+            ], dim=1)
 
-    def latentStep(self, latents, i, t, steppos):
-        if False: return super().latentStep(latents, i, t, steppos)
-        return latents
+            return unet(expanded_latents, t)
+
+        return wrapped_unet
+
+    # def wrap_k_unet(self, unet: KDiffusionUNet) -> KDiffusionUNet:
+    #     return unet
+
+    # def wrap_d_unet(self, unet: DiffusersUNet) -> DiffusersUNet:
+    #     return unet
 
 class UnifiedPipelinePrompt():
     def __init__(self, prompts):
@@ -1028,7 +1214,7 @@ UnifiedPipelineImageType = Union[
     torch.FloatTensor, PIL.Image.Image
 ]
 
-class UnifiedPipeline(DiffusionPipeline):
+class NewUnifiedPipeline(DiffusionPipeline):
     r"""
     Pipeline for unified image generation using Stable Diffusion.
 
@@ -1209,7 +1395,7 @@ class UnifiedPipeline(DiffusionPipeline):
         init_image: Optional[UnifiedPipelineImageType] = None,
         mask_image: Optional[UnifiedPipelineImageType] = None,
         outmask_image: Optional[UnifiedPipelineImageType] = None,
-        strength: float = 0.0,
+        strength: float = None,
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
         negative_prompt: Optional[UnifiedPipelinePromptType] = None,
@@ -1229,6 +1415,7 @@ class UnifiedPipeline(DiffusionPipeline):
         vae_cutouts: Optional[int] = None,
         approx_cutouts: Optional[int] = None,
         no_cutouts: Optional[Union[str, bool]] = None,
+        scheduler = None
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -1288,6 +1475,9 @@ class UnifiedPipeline(DiffusionPipeline):
             (nsfw) content, according to the `safety_checker`.
         """
 
+        # If scheduler wasn't passed in, use pipeline default
+        if scheduler is None: scheduler = self.scheduler
+
         # Check CLIP before overwritting
         if clip_guidance_scale is not None and self.clip_model is None:
             print("Warning: CLIP guidance passed to a pipeline without a CLIP model. It will be ignored.")
@@ -1329,12 +1519,18 @@ class UnifiedPipeline(DiffusionPipeline):
 
         batch_total = batch_size * num_images_per_prompt
 
-        # Match the generator list to the batch_total
-        if isinstance(generator, list) and len(generator) != batch_total:
-            raise ValueError(
-                f"Generator passed as a list, but list length does not match "
-                f"batch size {batch_size} * number of images per prompt {num_images_per_prompt}, i.e. {batch_total}"
-            )
+        if isinstance(generator, list):
+            generators = generator
+            # Match the generator list to the batch_total
+            if len(generators) != batch_total:
+                raise ValueError(
+                    f"Generator passed as a list, but list length does not match "
+                    f"batch size {batch_size} * number of images per prompt {num_images_per_prompt}, i.e. {batch_total}"
+                )
+        else:
+            generators = [generator] * batch_total
+
+
 
         if (callback_steps is None) or (
             callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
@@ -1350,9 +1546,6 @@ class UnifiedPipeline(DiffusionPipeline):
         if (outmask_image != None and init_image == None):
             raise ValueError(f"Can't pass a outmask without an image")
 
-        # set timesteps
-        self.scheduler.set_timesteps(num_inference_steps)
-
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
@@ -1366,6 +1559,8 @@ class UnifiedPipeline(DiffusionPipeline):
             uncond_prompt=negative_prompt if do_classifier_free_guidance else None,
         )
         latents_dtype = text_embeddings.dtype
+
+
 
         if self._structured_diffusion:
             text_embedding_calculator = StructuredTextEmbedding(self, "align_seq")
@@ -1382,6 +1577,7 @@ class UnifiedPipeline(DiffusionPipeline):
 
         text_embeddings = text_embedding_calculator.repeat(text_embeddings, num_images_per_prompt)
 
+
         if do_classifier_free_guidance:
             uncond_embeddings = text_embedding_calculator.repeat(uncond_embeddings, num_images_per_prompt)
 
@@ -1390,46 +1586,22 @@ class UnifiedPipeline(DiffusionPipeline):
             else:
                 text_embeddings = (uncond_embeddings, text_embeddings)
 
-        # Batch structure for 2 per prompt, 3 prompts, guided is:
-        # p1u p1u p2u p2u p3u p3u p1g p1g p2g p2g p3g p3g
-
-        if self.clip_model is not None and clip_guidance_scale > 0:
-            clip_text_input = self.tokenizer(
-                clip_prompt.as_unweighted_string(),
-                padding="max_length",
-                max_length=self.tokenizer.model_max_length,
-                truncation=True,
-                return_tensors="pt",
-            ).input_ids.to(self.device)
-
-            text_embeddings_clip = self.clip_model.get_text_features(clip_text_input)
-            text_embeddings_clip = text_embeddings_clip / text_embeddings_clip.norm(p=2, dim=-1, keepdim=True)
-            # duplicate text embeddings clip for each generation per prompt
-            text_embeddings_clip = text_embeddings_clip.repeat_interleave(num_images_per_prompt, dim=0)
-
-            noise_predictor = ClipGuidedNoisePredictor(
-                pipeline=self, 
-                text_embeddings=text_embeddings,
-                guidance_scale=guidance_scale,
-                text_embeddings_clip=text_embeddings_clip,
-                clip_guidance_scale=clip_guidance_scale,
-                clip_gradient_threshold=clip_gradient_threshold,
-                vae_cutouts=vae_cutouts,
-                approx_cutouts=approx_cutouts,
-                no_cutouts=no_cutouts,
-                generator=generator,
-            )
-
-        elif do_classifier_free_guidance:
-            noise_predictor = GuidedNoisePredictor(
-                pipeline=self, 
-                text_embeddings=text_embeddings, 
-                guidance_scale=guidance_scale)
+        if mask_image is not None and self.inpaint_unet is not None: 
+            unet = self.inpaint_unet
         else:
-            noise_predictor = NoisePredictor(
-                pipeline=self, 
-                text_embeddings=text_embeddings
-            )
+            unet = self.unet
+        
+        unet = UNetWithEmbeddings(unet, text_embeddings)
+        if do_classifier_free_guidance: unet = UNetGuided(unet, guidance_scale)
+
+        if isinstance(scheduler, SchedulerMixin):
+            scheduler_wrapper = DiffusersScheduler
+        elif isinstance(scheduler, KSchedulerMixin):
+            scheduler_wrapper = DiffusersKScheduler
+        else:
+            scheduler_wrapper = KDiffusionScheduler
+        
+        scheduler = scheduler_wrapper(scheduler, generators, unet, self.device, latents_dtype, self.vae)
 
         mode_classes = []
 
@@ -1450,7 +1622,8 @@ class UnifiedPipeline(DiffusionPipeline):
 
         modes = [mode_class(
             pipeline=self, 
-            generator=generator,
+            scheduler=scheduler,
+            generators=generators,
             width=width, height=height,
             init_image=init_image, 
             mask_image=mask_image,
@@ -1458,9 +1631,22 @@ class UnifiedPipeline(DiffusionPipeline):
             batch_total=batch_total,
             num_inference_steps=num_inference_steps,
             strength=strength,
-            do_classifier_free_guidance=do_classifier_free_guidance,
-            noise_predictor=noise_predictor,
+            do_classifier_free_guidance=do_classifier_free_guidance
         ) for mode_class in mode_classes]
+
+        scheduler.unwrapped_unet = modes[0].wrap_unet(scheduler.unwrapped_unet)
+
+        if init_image is not None:
+            scheduler.set_timesteps(num_inference_steps, strength=strength)
+        else:
+            scheduler.set_timesteps(num_inference_steps)
+
+
+        if isinstance(scheduler, KDiffusionScheduler):
+            scheduler.unet = modes[0].wrap_k_unet(scheduler.unet)
+        else:
+            scheduler.unet = modes[0].wrap_d_unet(scheduler.unet)
+
 
         # Get the initial starting point - either pure random noise, or the source image with some noise depending on mode
         # We only actually use the latents for the first mode, but UnifiedMode instances expect it to be called
@@ -1468,61 +1654,9 @@ class UnifiedPipeline(DiffusionPipeline):
 
         write_debug_latents(self.vae, "initial", 0, latents)
 
-        # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
-        # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
-        # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
-        # and should be between [0, 1]
-        accepts_eta = "eta" in set(inspect.signature(self.scheduler.step).parameters.keys())
-        accepts_generator = "generator" in set(inspect.signature(self.scheduler.step).parameters.keys())
-        accepts_noise_predictor = "noise_predictor" in set(inspect.signature(self.scheduler.step).parameters.keys())
+        # set timestep
 
-        extra_step_kwargs = {}
-        if accepts_eta: extra_step_kwargs["eta"] = eta
-        if accepts_generator: extra_step_kwargs["generator"] = generator[0] if isinstance(generator, list) else generator
-
-        t_start = modes[0].t_start
-        timesteps_tensor = self.scheduler.timesteps[t_start:].to(self.device)
-
-        for i, t in enumerate(self.progress_bar(timesteps_tensor)):
-            t_index = t_start + i
-
-            outputs = []
-            for mode in modes:
-                input_latents = latents
-
-                # predict the noise residual
-                noise_pred = noise_predictor(mode.unet, input_latents, t_index, t)
-                # TODO: kind of a hack, deal with CLIP predictor returning latents too
-                if isinstance(noise_pred, tuple): noise_pred, input_latents = noise_pred
-
-                # compute the previous noisy sample x_t -> x_t-1
-                if accepts_noise_predictor: extra_step_kwargs["noise_predictor"] = lambda latents, i, t, sigma = None: noise_predictor(mode.unet, latents, i, t, sigma = sigma, second=True)
-
-                if isinstance(self.scheduler, KSchedulerMixin): 
-                    output = self.scheduler.step(noise_pred, t_index, input_latents, **extra_step_kwargs).prev_sample
-                else:
-                    output = self.scheduler.step(noise_pred, t, input_latents, **extra_step_kwargs).prev_sample
-
-                output = mode.latentStep(output, t_index, t, i / (timesteps_tensor.shape[0] + 1))
-                outputs.append(output)
-
-            if len(outputs) == 2:
-                randmap = torch.rand(latents.shape, dtype=latents.dtype, generator=generator[0], device=generator[0].device).to(latents.device)
-
-                # Linear blend between base and graft
-                p = max(0, t/1000)
-                p = p ** self._graft_factor
-                latents = torch.where(randmap >= p, outputs[1], outputs[0])
-
-            else:
-                latents = outputs[0]
-
-
-            write_debug_latents(self.vae, "step", i, latents)
-
-            # call the callback, if provided
-            if callback is not None and i % callback_steps == 0:
-                callback(i, t, latents)
+        latents = scheduler.loop(latents, self.progress_bar)
 
         latents = 1 / 0.18215 * latents
         image = self.vae.decode(latents).sample
