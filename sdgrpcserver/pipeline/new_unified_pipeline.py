@@ -245,6 +245,20 @@ class DiffusersScheduler(DiffusersSchedulerBase):
     ):
         return self.scheduler.scale_model_input(latents, t)           
 
+    def predict_x0(
+        self,
+        latents: Tensor,
+        noise_pred: Tensor,
+        t: int
+    ):
+        alpha_prod_t = self.scheduler.alphas_cumprod[t]
+        beta_prod_t = 1 - alpha_prod_t
+        pred_original_sample = (latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
+
+        return pred_original_sample
+        fac = torch.sqrt(beta_prod_t)
+        return pred_original_sample * (fac) + latents * (1 - fac)    
+
     def wrap_scaled_unet(self, unet: NoisePredictionUNet) -> DiffusersScalingUNet:
         def wrapped_unet(latents, i, t, sigma = None):
             latents = self.scheduler.scale_model_input(latents, t)
@@ -272,20 +286,31 @@ class DiffusersKScheduler(DiffusersSchedulerBase):
         timesteps = torch.tensor(step_idx)
         return self.scheduler.add_noise(latents, noise, timesteps)
 
-    def scale_latents(
-        self,
-        latents: Tensor,
-        t: int
-    ):
+    def _get_sigma_for_t(self, t: int):
         deltas = [abs(x-t) for x in self.scheduler.timesteps]
         i, best_delta = 0, deltas[0]
 
         for j, delta in enumerate(deltas):
             if delta < best_delta: i, best_delta = j, delta
 
-        sigma = self.scheduler.sigmas[i]
+        return self.scheduler.sigmas[i]
 
+    def scale_latents(
+        self,
+        latents: Tensor,
+        t: int
+    ):
+        sigma = self._get_sigma_for_t(t)
         return latents / ((sigma**2 + 1) ** 0.5)       
+
+    def predict_x0(
+        self,
+        latents: Tensor,
+        noise_pred: Tensor,
+        t: int
+    ):
+        sigma = self._get_sigma_for_t(t)
+        return latents - sigma * noise_pred
 
     def wrap_scaled_unet(self, unet: NoisePredictionUNet) -> DiffusersScalingUNet:
         def wrapped_unet(latents, i, t, sigma = None):
@@ -527,12 +552,14 @@ class ApproximateDecoder:
 
 CLIP_NO_CUTOUTS_TYPE = Literal[False, True, "vae", "approx"]
 
-class ClipGuidedNoisePredictor:
+class ClipGuidedMode:
 
-    def __init__(self, pipeline, text_embeddings, guidance_scale, text_embeddings_clip, clip_guidance_scale, clip_gradient_threshold, vae_cutouts, approx_cutouts, no_cutouts, generator):
+    def __init__(self, wrapped_mode, scheduler, pipeline, dtype, text_embeddings_clip, clip_guidance_scale, clip_gradient_threshold, vae_cutouts, approx_cutouts, no_cutouts, generator):
+        self.wrapped_mode = wrapped_mode
+
+        self.scheduler = scheduler
         self.pipeline = pipeline
-        self.guidance_scale = guidance_scale
-        self.text_embeddings_u, self.text_embeddings_g = text_embeddings.chunk(2)
+        self.dtype = dtype
 
         self.text_embeddings_clip = text_embeddings_clip
         self.clip_guidance_scale = clip_guidance_scale
@@ -547,44 +574,33 @@ class ClipGuidedNoisePredictor:
         self.make_cutouts = MakeCutouts(self.pipeline.feature_extractor.size // 8, generators=generator)
         self.make_cutouts_rgb = MakeCutouts(self.pipeline.feature_extractor.size, generators=generator)
 
-        self.approx_decoder = ApproximateDecoder(device = self.pipeline.device, dtype = text_embeddings.dtype)
+        self.approx_decoder = ApproximateDecoder(device = self.pipeline.device, dtype = dtype)
 
         self.generator = generator
 
         self.lossavg = []
         self.flatloss = False
 
-    def __call__(self, unet, latents, i, t, sigma = None, second = False):
-        if sigma is None and isinstance(self.pipeline.scheduler, KSchedulerMixin): 
-            sigma = self.pipeline.scheduler.sigmas[i] 
+    def generateLatents(self):
+        return self.wrapped_mode.generateLatents()
 
-        if isinstance(self.pipeline.scheduler, KSchedulerMixin): 
-            latent_model_input = latents / ((sigma**2 + 1) ** 0.5)
+    def wrap_unet(self, unet: NoisePredictionUNet) -> NoisePredictionUNet:
+        child_wrapped_unet = self.wrapped_mode.wrap_unet(unet)
+
+        def wrapped_unet(latents, t):
+            if self._has_flatloss():
+                return child_wrapped_unet(latents, t)
+            else:
+                return self.model_d_fn(child_wrapped_unet, latents, t)
+
+        if isinstance(self.scheduler, DiffusersSchedulerBase):
+            return wrapped_unet
         else:
-            latent_model_input = self.pipeline.scheduler.scale_model_input(latents, t)
+            return child_wrapped_unet
 
-        noise_pred_u = unet(latent_model_input, t, encoder_hidden_states=self.text_embeddings_u).sample
-
-        if second or self.flatloss:
-            noise_pred_g = unet(latent_model_input, t, encoder_hidden_states=self.text_embeddings_g).sample
-            return  noise_pred_u + self.guidance_scale * (noise_pred_g - noise_pred_u)
-
-        # perform guidance - in a seperate function as this contains the bits where grad is needed
-        grads, noise_pred_g = self.cond_fn(
-            unet,
-            latents,
-            t,
-            i,
-            self.text_embeddings_g,
-            self.text_embeddings_clip,
-            self.clip_guidance_scale,
-            self.vae_cutouts,
-            self.approx_cutouts,
-            self.no_cutouts,
-            sigma
-        )
-
-        if len(self.lossavg) > 10:
+    def _has_flatloss(self):
+        # Check to see if loss gradient has flattened out (i.e. guidance is no longer reducing loss) 
+        if not self.flatloss and len(self.lossavg) > 10:
             # Calculate gradient for loss
             x = np.linspace(0,1,10)
             X = np.vstack([x, np.ones(len(x))]).T
@@ -594,63 +610,85 @@ class ClipGuidedNoisePredictor:
             if abs(m) < self.clip_gradient_threshold:
                 self.flatloss = True
 
-        noise_pred_orig = noise_pred_u + self.guidance_scale * (noise_pred_g - noise_pred_u)
+        return self.flatloss
 
-        if isinstance(self.pipeline.scheduler, KSchedulerMixin): 
-            latents = latents + grads * (sigma**2)
-            return noise_pred_orig, latents
+    def wrap_k_unet(self, unet: KDiffusionUNetWrapper) -> KDiffusionUNet:
+        child_wrapped_unet = self.wrapped_mode.wrap_k_unet(unet)
+
+        def wrapped_unet(latents, sigma):
+            if self._has_flatloss():
+                return child_wrapped_unet(latents, sigma)
+            else:
+                return self.model_k_fn(child_wrapped_unet, latents, sigma)
+
+        return wrapped_unet
+    
+    def wrap_d_unet(self, unet: DiffusersUNet) -> DiffusersUNet:
+        return self.wrapped_mode.wrap_d_unet(unet)
+    
+    @torch.enable_grad()
+    def model_k_fn(self, unet, latents, sigma):
+        latents = latents.detach().requires_grad_()
+        sample = unet(latents, sigma)
+
+        # perform guidance - in a seperate function as this contains the bits where grad is needed
+        grads = self.cond_fn(
+            latents,
+            sample,
+            self.text_embeddings_clip,
+            # Adjust to match to non-KScheduler effect. Determined through experiment.
+            # self.clip_guidance_scale / 10 
+            self.clip_guidance_scale,
+            self.vae_cutouts,
+            self.approx_cutouts,
+            self.no_cutouts
+        )
+
+        return sample + grads * (sigma**2)
+
+
+    @torch.enable_grad()
+    def model_d_fn(self, unet, latents, t):
+        latents = latents.detach().requires_grad_()
+        noise_pred = unet(latents, t)
+
+        sample = self.scheduler.predict_x0(latents, noise_pred, t)
+
+        # perform guidance - in a seperate function as this contains the bits where grad is needed
+        grads = self.cond_fn(
+            latents,
+            sample,
+            self.text_embeddings_clip,
+            self.clip_guidance_scale,
+            self.vae_cutouts,
+            self.approx_cutouts,
+            self.no_cutouts
+        )
+
+        if isinstance(self.scheduler, DiffusersKScheduler):
+            sigma = self.scheduler._get_sigma_for_t(t)
+            return noise_pred + grads * (sigma**2) * -sigma
+
         else:
             # Todo: Don't duplicate this bit from cond_fn
-            alpha_prod_t = self.pipeline.scheduler.alphas_cumprod[t]
+            alpha_prod_t = self.scheduler.scheduler.alphas_cumprod[t]
             beta_prod_t = 1 - alpha_prod_t
-            return noise_pred_orig - torch.sqrt(beta_prod_t) * grads
+            return noise_pred - torch.sqrt(beta_prod_t) * grads
+
 
     @torch.enable_grad()
     def cond_fn(
         self,
-        unet,
         latents,
-        timestep,
-        index,
-        text_embeddings_g,
+        sample,
         text_embeddings_clip,
         clip_guidance_scale,
         vae_cutouts,
         approx_cutouts,
         no_cutouts,
-        sigma
     ):
         num_cutouts = vae_cutouts + approx_cutouts
         batch_total = latents.shape[0]
-
-        latents = latents.detach().requires_grad_()
-        resized_latents = latents
-
-        if isinstance(self.pipeline.scheduler, KSchedulerMixin):
-            latent_model_input = resized_latents / ((sigma**2 + 1) ** 0.5)
-        else:
-            latent_model_input = resized_latents        
-
-        # predict the noise residual
-        noise_pred_g = unet(latent_model_input, timestep, encoder_hidden_states=text_embeddings_g).sample
-
-        if isinstance(self.pipeline.scheduler, KSchedulerMixin):
-            # And calculate the output
-            sample = resized_latents - sigma * noise_pred_g
-            clip_guidance_scale = clip_guidance_scale / 10 # Adjust to match to non-KScheduler effect. Determined through experiment.
-        else:
-            alpha_prod_t = self.pipeline.scheduler.alphas_cumprod[timestep]
-            beta_prod_t = 1 - alpha_prod_t
-            # compute predicted original sample from predicted noise also called
-            # "predicted x_0" of formula (12) from https://arxiv.org/pdf/2010.02502.pdf
-            pred_original_sample = (resized_latents - beta_prod_t ** (0.5) * noise_pred_g) / alpha_prod_t ** (0.5)
-
-            fac = torch.sqrt(beta_prod_t)
-            sample = pred_original_sample * (fac) + resized_latents * (1 - fac)
-
-        # Convert sample (the whole denoised next image in latent space) to a set of images we check using CLIP
-        # For VAE we crop / resize _before_ VAE to limit size of grads. 
-        # For Approximation we crop / resize after fake-VAE to try and maximise signal (since the approximation doesn't include an automatic 8x upscale)
 
         if no_cutouts:
             if no_cutouts == "approx":
@@ -700,10 +738,10 @@ class ClipGuidedNoisePredictor:
             dists = dists.view([num_cutouts, latents.shape[0], -1])
             loss = dists.sum(2).mean(0).sum() 
 
+        print(loss)
         self.lossavg.append(float(loss))
 
-        grads = -torch.autograd.grad(loss * (clip_guidance_scale * 500), latents)[0]
-        return grads, noise_pred_g
+        return -torch.autograd.grad(loss * (clip_guidance_scale * 500), latents)[0]
 
 
 def batched_randn(shape, generators, device, dtype):
@@ -717,8 +755,8 @@ def batched_randn(shape, generators, device, dtype):
 
 class UnifiedMode(object):
 
-    def __init__(self, **_):
-        self.t_start = 0
+    def __init__(self, **kwargs):
+        pass
 
     def generateLatents(self):
         raise NotImplementedError('Subclasses must implement')
@@ -1633,6 +1671,35 @@ class NewUnifiedPipeline(DiffusionPipeline):
             strength=strength,
             do_classifier_free_guidance=do_classifier_free_guidance
         ) for mode_class in mode_classes]
+
+
+        if self.clip_model is not None and clip_guidance_scale > 0:
+            clip_text_input = self.tokenizer(
+                clip_prompt.as_unweighted_string(),
+                padding="max_length",
+                max_length=self.tokenizer.model_max_length,
+                truncation=True,
+                return_tensors="pt",
+            ).input_ids.to(self.device)
+
+            text_embeddings_clip = self.clip_model.get_text_features(clip_text_input)
+            text_embeddings_clip = text_embeddings_clip / text_embeddings_clip.norm(p=2, dim=-1, keepdim=True)
+            # duplicate text embeddings clip for each generation per prompt
+            text_embeddings_clip = text_embeddings_clip.repeat_interleave(num_images_per_prompt, dim=0)
+
+            modes[0] = ClipGuidedMode(
+                wrapped_mode=modes[0],
+                scheduler=scheduler,
+                pipeline=self,
+                dtype=latents_dtype,
+                text_embeddings_clip=text_embeddings_clip,
+                clip_guidance_scale=clip_guidance_scale,
+                clip_gradient_threshold=clip_gradient_threshold,
+                vae_cutouts=vae_cutouts,
+                approx_cutouts=approx_cutouts,
+                no_cutouts=no_cutouts,
+                generator=generator,
+            )
 
         scheduler.unwrapped_unet = modes[0].wrap_unet(scheduler.unwrapped_unet)
 

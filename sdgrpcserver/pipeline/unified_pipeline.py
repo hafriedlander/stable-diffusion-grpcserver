@@ -344,6 +344,7 @@ class ClipGuidedNoisePredictor:
             loss = dists.sum(2).mean(0).sum() 
 
         self.lossavg.append(float(loss))
+        print(loss)
 
         grads = -torch.autograd.grad(loss * (clip_guidance_scale * 500), latents)[0]
         return grads, noise_pred_g
