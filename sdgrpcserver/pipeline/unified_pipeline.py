@@ -33,7 +33,7 @@ from sdgrpcserver.pipeline.attention_replacer import replace_cross_attention
 from sdgrpcserver.pipeline.models.memory_efficient_cross_attention import has_xformers, MemoryEfficientCrossAttention
 from sdgrpcserver.pipeline.models.structured_cross_attention import StructuredCrossAttention
 
-from sdgrpcserver.resize_right import resize_right
+from sdgrpcserver import resize_right
 
 try:
     from nonfree import tome_patcher

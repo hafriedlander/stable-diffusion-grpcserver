@@ -26,7 +26,7 @@ from diffusers.utils import deprecate, logging
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 
-from k_diffusion import sampling as k_sampling, utils as k_utils, external as k_external
+from sdgrpcserver.k_diffusion import sampling as k_sampling, utils as k_utils, external as k_external
 
 from sdgrpcserver import images
 from sdgrpcserver.pipeline.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
@@ -37,7 +37,7 @@ from sdgrpcserver.pipeline.attention_replacer import replace_cross_attention
 from sdgrpcserver.pipeline.models.memory_efficient_cross_attention import has_xformers, MemoryEfficientCrossAttention
 from sdgrpcserver.pipeline.models.structured_cross_attention import StructuredCrossAttention
 
-from sdgrpcserver.resize_right import resize_right
+from sdgrpcserver import resize_right
 
 try:
     from nonfree import tome_patcher
@@ -89,21 +89,30 @@ DiffusersUNet = Callable[[XtTensor, int, int, float], XtTensor]
 
 
 class CommonScheduler:
+
+    # -- These methods are called by the pipeline itself
+
     def __init__(
         self, 
-        scheduler: Union[SchedulerMixin, KSchedulerMixin, Callable], 
-        generators: Iterable[torch.Generator], 
-        unet: NoisePredictionUNet,
+        scheduler: Union[SchedulerMixin, KSchedulerMixin, Callable],
+        generators: Iterable[torch.Generator],
         device: torch.device,
         dtype: torch.dtype,
         vae
     ):
         self.scheduler = scheduler
         self.generators = generators
-        self.unwrapped_unet = unet
         self.device = device
         self.dtype = dtype
         self.vae = vae
+
+        self.eps_unet = None
+
+    def set_eps_unet(
+        self,
+        eps_unet: NoisePredictionUNet
+    ):
+        self.eps_unet = eps_unet
 
     def set_timesteps(
         self, 
@@ -112,6 +121,15 @@ class CommonScheduler:
         strength: float = None,
     ):
         raise NotImplementedError("Subclass to implement")
+
+    def loop(
+        self, 
+        latents: Tensor,
+        progress_wrapper
+    ) -> Tensor:
+        raise NotImplementedError("Subclass to implement")
+
+    # -- These methods are for unet wrappers and modes
 
     def prepare_initial_latents(
         self, 
@@ -134,13 +152,9 @@ class CommonScheduler:
     ) -> Tensor:
         raise NotImplementedError("Subclass to implement")
 
-    def loop(
-        self, 
-        latents: Tensor,
-        progress_wrapper
-    ) -> Tensor:
-        raise NotImplementedError("Subclass to implement")
+    # -- Internal utility functions. 
 
+    # TODO: I suspect this isn't needed, (and k-diffusion comes with similar)
     def match_shape(self, values: Tensor, broadcast_array: Tensor):
         values = values.flatten()
 
@@ -151,13 +165,34 @@ class CommonScheduler:
 
 class DiffusersSchedulerBase(CommonScheduler):
 
+    def __init__(self, *args, **kargs):
+        super().__init__(*args, **kargs)
+
+        scheduler_step_args = set(inspect.signature(self.scheduler.step).parameters.keys())
+
+        self.accepts_eta = "eta" in scheduler_step_args
+        self.accepts_generator = "generator" in scheduler_step_args
+        self.accepts_noise_predictor = "noise_predictor" in scheduler_step_args
+
     def set_timesteps(
         self, 
         num_inference_steps: int,
         start_offset: int = None,
         strength: float = None,
+        kerras_rho: float = None,
         eta: float = None,
+        churn: float = None,
     ):
+        if self.eps_unet is None:
+            raise ValueError("Unet needs to be set before timesteps")
+
+        if kerras_rho is not None:
+            print("Warning: This scheduler doen't accept kerras_rho. Ignoring.")
+        if churn is not None:
+            print("Warning: This scheduler doen't accept churn. Ignoring.")
+        if eta is not None and not self.accepts_eta:
+            print("Warning: This scheduler doen't accept eta. Ignoring.")
+
         self.eta = eta
         self.num_inference_steps = num_inference_steps
 
@@ -176,7 +211,7 @@ class DiffusersSchedulerBase(CommonScheduler):
             self.start_offset = 0
 
         # Wrap the scheduler. TODO: Better place than here?
-        self.unet = self.wrap_unet(self.unwrapped_unet)
+        self.unet = self.wrap_unet(self.eps_unet)
 
         return self.scheduler.set_timesteps(num_inference_steps)
 
@@ -184,24 +219,19 @@ class DiffusersSchedulerBase(CommonScheduler):
         raise NotImplementedError("Subclass to implement")
 
     def wrap_unet(self, unet: DiffusersScalingUNet) -> DiffusersUNet:
-        scaled_unet = self.wrap_scaled_unet(unet)
-
-        scheduler_step_args = set(inspect.signature(self.scheduler.step).parameters.keys())
-
-        accepts_eta = "eta" in scheduler_step_args
-        accepts_generator = "generator" in scheduler_step_args
-        accepts_noise_predictor = "noise_predictor" in scheduler_step_args
-
         step_kwargs = {}
-        if accepts_eta and self.eta is not None: step_kwargs["eta"] = self.self.eta
-        if accepts_generator: step_kwargs["generator"] = self.generators[0]
-        if accepts_noise_predictor: step_kwargs["noise_predictor"] = scaled_unet
+        if self.accepts_eta and self.eta is not None: step_kwargs["eta"] = self.self.eta
+        if self.accepts_generator: step_kwargs["generator"] = self.generators[0]
+        if self.accepts_noise_predictor: step_kwargs["noise_predictor"] = self.eps_unet
 
         def wrapped_unet(latents, i, t, sigma = None):
             # predict the noise residual
-            noise_pred = scaled_unet(latents, i, t, sigma = sigma)
+            noise_pred = unet(latents, t)
             # TODO: kind of a hack, deal with CLIP predictor returning latents too
-            # if isinstance(noise_pred, tuple): noise_pred, input_latents = noise_pred
+            if isinstance(noise_pred, tuple): 
+                noise_pred, adjustment = noise_pred
+                latents = latents + adjustment
+
             return self.scheduler_step(noise_pred, t, i, latents, **step_kwargs).prev_sample
         
         return wrapped_unet
@@ -256,11 +286,14 @@ class DiffusersScheduler(DiffusersSchedulerBase):
         pred_original_sample = (latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
 
         return pred_original_sample
+
+        # From Diffusers CLIP pipeline, this blends some of the original latent back in
+        # Why? Don't know, and seems to make result worse. Add if compatibility most important
         fac = torch.sqrt(beta_prod_t)
         return pred_original_sample * (fac) + latents * (1 - fac)    
 
     def wrap_scaled_unet(self, unet: NoisePredictionUNet) -> DiffusersScalingUNet:
-        def wrapped_unet(latents, i, t, sigma = None):
+        def wrapped_unet(latents, t):
             latents = self.scheduler.scale_model_input(latents, t)
             return unet(latents, t)
 
@@ -313,9 +346,8 @@ class DiffusersKScheduler(DiffusersSchedulerBase):
         return latents - sigma * noise_pred
 
     def wrap_scaled_unet(self, unet: NoisePredictionUNet) -> DiffusersScalingUNet:
-        def wrapped_unet(latents, i, t, sigma = None):
-            if sigma is None: sigma = self.scheduler.sigmas[i]
-            # the model input needs to be scaled to match the continuous ODE formulation in K-LMS
+        def wrapped_unet(latents, t):
+            sigma = self._get_sigma_for_t(t)
             latents = latents / ((sigma**2 + 1) ** 0.5)            
             return unet(latents, t)
 
@@ -329,6 +361,16 @@ class KDiffusionUNetWrapper(k_external.DiscreteEpsDDPMDenoiser):
         super().__init__(unet, alphas_cumprod, quantize=True)
 
 class KDiffusionScheduler(CommonScheduler):
+
+    def __init__(self, *args, **kargs):
+        super().__init__(*args, **kargs)
+
+        scheduler_keys = inspect.signature(self.scheduler).parameters.keys()
+        self.accepts_sigmas = "sigmas" in scheduler_keys
+        self.accepts_n = "n" in scheduler_keys
+        self.accepts_eta = "eta" in scheduler_keys
+        self.accepts_s_churn = "s_churn" in scheduler_keys
+        self.accepts_noise_sampler = "noise_sampler" in scheduler_keys
 
     def get_betas(
         self,
@@ -353,11 +395,21 @@ class KDiffusionScheduler(CommonScheduler):
         eta: float = None,
         churn: float = None,
     ):
+        if self.eps_unet is None:
+            raise ValueError("Unet needs to be set before timesteps")
+
+        if kerras_rho is not None and not self.accepts_sigmas:
+            print("Warning: This scheduler doen't accept kerras_rho. Ignoring.")
+        if churn is not None and not self.accepts_s_churn:
+            print("Warning: This scheduler doen't accept churn. Ignoring.")
+        if eta is not None and not self.accepts_eta:
+            print("Warning: This scheduler doen't accept eta. Ignoring.")
+
         betas = self.get_betas()
         alphas = self.get_alphas(betas)
         alphas_cumprod = self.get_alphas_cumprod(alphas)
 
-        self._unet: KDiffusionUNetWrapper = KDiffusionUNetWrapper(self.unwrapped_unet, alphas_cumprod)
+        self._unet: KDiffusionUNetWrapper = KDiffusionUNetWrapper(self.eps_unet, alphas_cumprod)
         self.unet: KDiffusionUNet = self._unet
 
         if kerras_rho is not None:
@@ -429,25 +481,22 @@ class KDiffusionScheduler(CommonScheduler):
         k_sampling.trange = trange
         k_sampling.tqdm = tqdm
 
-        scheduler_keys = inspect.signature(self.scheduler).parameters.keys()
-        accepts_sigmas = "sigmas" in scheduler_keys
-        accepts_n = "n" in scheduler_keys
-        accepts_eta = "eta" in scheduler_keys
-        accepts_s_churn = "s_churn" in scheduler_keys
-
         kwargs = {}
-        if accepts_eta and self.eta is not None:
+        if self.accepts_eta and self.eta is not None:
             kwargs['eta'] = self.eta
-        if accepts_s_churn and self.churn is not None:
+        if self.accepts_s_churn and self.churn is not None:
             kwargs['s_churn'] = self.churn
-        if accepts_n:
+        if self.accepts_n:
             kwargs['n'] = self.num_inference_steps
 
-        if accepts_sigmas:
+        if self.accepts_sigmas:
             kwargs['sigmas'] = sigmas
         else:
             kwargs['sigma_min']=self._unet.sigma_min
             kwargs['sigma_max']=min(self._unet.sigma_max, sigmas[0])
+
+        if self.accepts_noise_sampler:
+            kwargs['noise_sampler'] = lambda _, __: batched_randn(latents.shape, self.generators, self.device, self.dtype)
 
         def callback(d):
             write_debug_latents(self.vae, "step", d['i'], d['denoised'])
@@ -467,22 +516,31 @@ class UNetWithEmbeddings():
     def __call__(self, latents, t):
         return self.unet(latents, t, encoder_hidden_states=self.text_embeddings).sample
 
-class UNetGuided():
+class UNetGuidedInner():
 
-    def __init__(self, unet, guidance_scale):
+    def __init__(self, unet):
         self.unet = unet
-        self.guidance_scale = guidance_scale
 
     def __call__(self, latents, t):
         # expand the latents if we are doing classifier free guidance
         latents = torch.cat([latents] * 2)
+        return self.unet(latents, t)
 
-        noise_pred = self.unet(latents, t)
-    
-        # perform guidance
-        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-        noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+class UNetGuidedOuter():
+    def __init__(self, unet_g, unet_u, guidance_scale, batch_total):
+        self.unet_g = unet_g
+        self.unet_u = unet_u
+        self.guidance_scale = guidance_scale
+        self.batch_total = batch_total
 
+    def __call__(self, latents, t):
+        noise_pred_g = self.unet_g(latents, t)
+        noise_pred_u = self.unet_u(latents, t)
+
+        # Detect if some deeper unet inside self.unet has already 
+        # done guidance (CLIP guidance will sometimes do this)
+        # if noise_pred.shape[0] > self.batch_total:
+        noise_pred = noise_pred_u + self.guidance_scale * (noise_pred_g - noise_pred_u)
         return noise_pred
 
 class MakeCutouts(torch.nn.Module):
@@ -554,15 +612,17 @@ CLIP_NO_CUTOUTS_TYPE = Literal[False, True, "vae", "approx"]
 
 class ClipGuidedMode:
 
-    def __init__(self, wrapped_mode, scheduler, pipeline, dtype, text_embeddings_clip, clip_guidance_scale, clip_gradient_threshold, vae_cutouts, approx_cutouts, no_cutouts, generator):
+    def __init__(self, wrapped_mode, scheduler, pipeline, dtype, guidance_scale, text_embeddings_clip, clip_guidance_scale, clip_gradient_length, clip_gradient_threshold, vae_cutouts, approx_cutouts, no_cutouts, generator):
         self.wrapped_mode = wrapped_mode
 
         self.scheduler = scheduler
         self.pipeline = pipeline
         self.dtype = dtype
+        self.guidance_scale = guidance_scale
 
         self.text_embeddings_clip = text_embeddings_clip
         self.clip_guidance_scale = clip_guidance_scale
+        self.clip_gradient_length = clip_gradient_length
         self.clip_gradient_threshold = clip_gradient_threshold
         self.vae_cutouts = vae_cutouts
         self.approx_cutouts = approx_cutouts
@@ -585,29 +645,64 @@ class ClipGuidedMode:
         return self.wrapped_mode.generateLatents()
 
     def wrap_unet(self, unet: NoisePredictionUNet) -> NoisePredictionUNet:
-        child_wrapped_unet = self.wrapped_mode.wrap_unet(unet)
+        return self.wrapped_mode.wrap_unet(unet)
 
-        def wrapped_unet(latents, t):
+    def wrap_guidance_unet(
+        self, 
+        unet_g: NoisePredictionUNet, 
+        unet_u: NoisePredictionUNet,
+        guidance_scale: float, 
+        batch_total: int
+    ) -> NoisePredictionUNet:
+        child_wrapped_unet = self.wrapped_mode.wrap_guidance_unet(unet_g, unet_u, guidance_scale, batch_total)
+
+        def wrapped_unet_ford(latents, t):
             if self._has_flatloss():
                 return child_wrapped_unet(latents, t)
             else:
-                return self.model_d_fn(child_wrapped_unet, latents, t)
+                noise_pred_u = unet_u(latents, t)
+                noise_pred_g, grads = self.model_d_fn(unet_g, latents, t)
+
+                noise_pred = noise_pred_u + guidance_scale * (noise_pred_g - noise_pred_u)
+
+                if isinstance(self.scheduler, DiffusersKScheduler):
+                    sigma = self.scheduler._get_sigma_for_t(t)
+                    return noise_pred - grads * sigma
+                    return noise_pred, grads * (sigma**2)
+
+                else:
+                    # Todo: Don't duplicate this bit from cond_fn
+                    alpha_prod_t = self.scheduler.scheduler.alphas_cumprod[t]
+                    beta_prod_t = 1 - alpha_prod_t
+                    return noise_pred - torch.sqrt(beta_prod_t) * grads
+
+        def wrapped_unet_fork(latents, t):
+            if self._has_flatloss():
+                return child_wrapped_unet(latents, t)
+            else:
+                if self.section == "g":
+                    self._cache_g = unet_g(latents, t)
+                    return self._cache_g 
+                else:
+                    noise_pred_u = unet_u(latents, t)
+                    return noise_pred_u + guidance_scale * (self._cache_g  - noise_pred_u)
 
         if isinstance(self.scheduler, DiffusersSchedulerBase):
-            return wrapped_unet
+            return wrapped_unet_ford
         else:
-            return child_wrapped_unet
+            return wrapped_unet_fork
 
     def _has_flatloss(self):
         # Check to see if loss gradient has flattened out (i.e. guidance is no longer reducing loss) 
-        if not self.flatloss and len(self.lossavg) > 10:
+        if not self.flatloss and len(self.lossavg) > self.clip_gradient_length:
             # Calculate gradient for loss
-            x = np.linspace(0,1,10)
+            x = np.linspace(0,1,self.clip_gradient_length)
             X = np.vstack([x, np.ones(len(x))]).T
-            y = np.asarray(self.lossavg[-10:])
+            y = np.asarray(self.lossavg[-self.clip_gradient_length:])
 
             m, c = np.linalg.lstsq(X, y, rcond=None)[0]
             if abs(m) < self.clip_gradient_threshold:
+                print("Flat", len(self.lossavg), m, c)
                 self.flatloss = True
 
         return self.flatloss
@@ -619,7 +714,13 @@ class ClipGuidedMode:
             if self._has_flatloss():
                 return child_wrapped_unet(latents, sigma)
             else:
-                return self.model_k_fn(child_wrapped_unet, latents, sigma)
+                self.section="g"
+                grads = self.model_k_fn(child_wrapped_unet, latents, sigma)
+                self.section="merged"
+                res = child_wrapped_unet(latents, sigma)
+                
+                return res + grads * (sigma**2)
+
 
         return wrapped_unet
     
@@ -644,13 +745,15 @@ class ClipGuidedMode:
             self.no_cutouts
         )
 
+        return grads
         return sample + grads * (sigma**2)
 
 
     @torch.enable_grad()
-    def model_d_fn(self, unet, latents, t):
+    def model_d_fn(self, unet_g, latents, t):
+
         latents = latents.detach().requires_grad_()
-        noise_pred = unet(latents, t)
+        noise_pred = unet_g(latents, t)
 
         sample = self.scheduler.predict_x0(latents, noise_pred, t)
 
@@ -665,9 +768,13 @@ class ClipGuidedMode:
             self.no_cutouts
         )
 
+        return noise_pred, grads
+
         if isinstance(self.scheduler, DiffusersKScheduler):
             sigma = self.scheduler._get_sigma_for_t(t)
-            return noise_pred + grads * (sigma**2) * -sigma
+            # TODO: Neither of these work?
+            # return noise_pred - grads * (sigma**2+1)**0.5
+            return noise_pred - grads * sigma
 
         else:
             # Todo: Don't duplicate this bit from cond_fn
@@ -738,7 +845,6 @@ class ClipGuidedMode:
             dists = dists.view([num_cutouts, latents.shape[0], -1])
             loss = dists.sum(2).mean(0).sum() 
 
-        print(loss)
         self.lossavg.append(float(loss))
 
         return -torch.autograd.grad(loss * (clip_guidance_scale * 500), latents)[0]
@@ -763,6 +869,16 @@ class UnifiedMode(object):
 
     def wrap_unet(self, unet: NoisePredictionUNet) -> NoisePredictionUNet:
         return unet
+
+    def wrap_guidance_unet(
+        self, 
+        unet_g: NoisePredictionUNet, 
+        unet_u: NoisePredictionUNet,
+        guidance_scale: float, 
+        batch_total: int
+    ) -> NoisePredictionUNet:
+        print ("Guiding", guidance_scale)
+        return UNetGuidedOuter(unet_g,unet_u, guidance_scale, batch_total)
 
     def wrap_k_unet(self, unet: KDiffusionUNetWrapper) -> KDiffusionUNet:
         return unet
@@ -1332,6 +1448,7 @@ class NewUnifiedPipeline(DiffusionPipeline):
             "approx_cutouts": 2,
             "no_cutouts": False,
             "guidance_scale": 0.0,
+            "gradient_length": 15,
             "gradient_threshold": 0.01
         }
 
@@ -1388,6 +1505,8 @@ class NewUnifiedPipeline(DiffusionPipeline):
                         self.clip_defaults["no_cutouts"] = bool(subval)
                     elif subkey == "guidance_scale": 
                         self.clip_defaults["guidance_scale"] = float(subval)
+                    elif subkey == "gradient_length":
+                        self.clip_defaults["gradient_length"] = int(subval)
                     elif subkey == "gradient_threshold":
                         self.clip_defaults["gradient_threshold"] = float(subval)
                     else:
@@ -1438,7 +1557,9 @@ class NewUnifiedPipeline(DiffusionPipeline):
         guidance_scale: float = 7.5,
         negative_prompt: Optional[UnifiedPipelinePromptType] = None,
         num_images_per_prompt: Optional[int] = 1,
-        eta: Optional[float] = 0.0,
+        eta: Optional[float] = None,
+        churn: Optional[float] = None,
+        kerras_rho: Optional[float] = None,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.FloatTensor] = None,
         max_embeddings_multiples: Optional[int] = 3,
@@ -1448,6 +1569,7 @@ class NewUnifiedPipeline(DiffusionPipeline):
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
         clip_guidance_scale: Optional[float] = None,
+        clip_gradient_length: Optional[int] = None,
         clip_gradient_threshold: Optional[float] = None,
         clip_prompt: Optional[Union[str, List[str]]] = None,
         vae_cutouts: Optional[int] = None,
@@ -1522,6 +1644,7 @@ class NewUnifiedPipeline(DiffusionPipeline):
 
         # Set defaults for clip
         if clip_guidance_scale is None: clip_guidance_scale = self.clip_defaults["guidance_scale"]
+        if clip_gradient_length is None: clip_gradient_length = self.clip_defaults["gradient_length"]
         if clip_gradient_threshold is None: clip_gradient_threshold = self.clip_defaults["gradient_threshold"]
         if vae_cutouts is None: vae_cutouts = self.clip_defaults["vae_cutouts"]
         if approx_cutouts is None: approx_cutouts = self.clip_defaults["approx_cutouts"]
@@ -1599,6 +1722,11 @@ class NewUnifiedPipeline(DiffusionPipeline):
         latents_dtype = text_embeddings.dtype
 
 
+        if mask_image is not None and self.inpaint_unet is not None: 
+            unet = self.inpaint_unet
+        else:
+            unet = self.unet
+
 
         if self._structured_diffusion:
             text_embedding_calculator = StructuredTextEmbedding(self, "align_seq")
@@ -1614,23 +1742,18 @@ class NewUnifiedPipeline(DiffusionPipeline):
         )
 
         text_embeddings = text_embedding_calculator.repeat(text_embeddings, num_images_per_prompt)
-
+        
+        unet_g = UNetWithEmbeddings(unet, text_embeddings)
 
         if do_classifier_free_guidance:
             uncond_embeddings = text_embedding_calculator.repeat(uncond_embeddings, num_images_per_prompt)
+            unet_u = UNetWithEmbeddings(unet, uncond_embeddings)
 
-            if isinstance(text_embeddings, torch.Tensor):
-                text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
-            else:
-                text_embeddings = (uncond_embeddings, text_embeddings)
+            # if isinstance(text_embeddings, torch.Tensor):
+            #     text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
+            # else:
+            #     text_embeddings = (uncond_embeddings, text_embeddings)
 
-        if mask_image is not None and self.inpaint_unet is not None: 
-            unet = self.inpaint_unet
-        else:
-            unet = self.unet
-        
-        unet = UNetWithEmbeddings(unet, text_embeddings)
-        if do_classifier_free_guidance: unet = UNetGuided(unet, guidance_scale)
 
         if isinstance(scheduler, SchedulerMixin):
             scheduler_wrapper = DiffusersScheduler
@@ -1639,7 +1762,7 @@ class NewUnifiedPipeline(DiffusionPipeline):
         else:
             scheduler_wrapper = KDiffusionScheduler
         
-        scheduler = scheduler_wrapper(scheduler, generators, unet, self.device, latents_dtype, self.vae)
+        scheduler = scheduler_wrapper(scheduler, generators, self.device, latents_dtype, self.vae)
 
         mode_classes = []
 
@@ -1692,8 +1815,10 @@ class NewUnifiedPipeline(DiffusionPipeline):
                 scheduler=scheduler,
                 pipeline=self,
                 dtype=latents_dtype,
+                guidance_scale=guidance_scale,
                 text_embeddings_clip=text_embeddings_clip,
                 clip_guidance_scale=clip_guidance_scale,
+                clip_gradient_length=clip_gradient_length,
                 clip_gradient_threshold=clip_gradient_threshold,
                 vae_cutouts=vae_cutouts,
                 approx_cutouts=approx_cutouts,
@@ -1701,13 +1826,28 @@ class NewUnifiedPipeline(DiffusionPipeline):
                 generator=generator,
             )
 
-        scheduler.unwrapped_unet = modes[0].wrap_unet(scheduler.unwrapped_unet)
 
-        if init_image is not None:
-            scheduler.set_timesteps(num_inference_steps, strength=strength)
+        if isinstance(scheduler, DiffusersSchedulerBase):
+            unet_g = scheduler.wrap_scaled_unet(unet_g)
+            if do_classifier_free_guidance: unet_u = scheduler.wrap_scaled_unet(unet_u)
+
+        if do_classifier_free_guidance:
+            unet_g = modes[0].wrap_unet(unet_g)
+            unet_u = modes[0].wrap_unet(unet_u)
+            unet = modes[0].wrap_guidance_unet(unet_g, unet_u, guidance_scale, batch_total)
         else:
-            scheduler.set_timesteps(num_inference_steps)
+            unet_g = modes[0].wrap_unet(unet_g)
+            unet = unet_g
 
+        scheduler.set_eps_unet(unet)
+
+        timestep_args = {}
+        if init_image is not None: timestep_args["strength"] = strength
+        if eta: timestep_args["eta"] = eta
+        if churn: timestep_args["churn"] = churn
+        if kerras_rho: timestep_args["kerras_rho"] = kerras_rho
+
+        scheduler.set_timesteps(num_inference_steps, **timestep_args)
 
         if isinstance(scheduler, KDiffusionScheduler):
             scheduler.unet = modes[0].wrap_k_unet(scheduler.unet)

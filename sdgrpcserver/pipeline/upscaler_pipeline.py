@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as T
-import k_diffusion as K
+import sdgrpcserver.k_diffusion as K
 
 import PIL
 from transformers import CLIPTextModel, CLIPTokenizer

@@ -4,3 +4,9 @@
 [submodule "nonfree/ToMe"]
 	path = nonfree/ToMe
 	url = https://github.com/facebookresearch/ToMe.git
+[submodule "sdgrpcserver/src/k-diffusion"]
+	path = sdgrpcserver/src/k-diffusion
+	url = https://github.com/crowsonkb/k-diffusion.git
+[submodule "sdgrpcserver/src/ResizeRight"]
+	path = sdgrpcserver/src/ResizeRight
+	url = https://github.com/assafshocher/ResizeRight.git

@@ -325,7 +325,10 @@ class PipelineWrapper(object):
         sampler: generation_pb2.DiffusionSampler = None,
         scheduler = None,
 
-        eta: Optional[float] = 0.0,
+        eta: Optional[float] = None,
+        churn: Optional[float] = None,
+        kerras_rho: Optional[float] = None,
+
         num_inference_steps: int = 50,
 
         # Providing these changes from txt2img into either img2img (no mask) or inpaint (mask) mode
@@ -379,7 +382,7 @@ class PipelineWrapper(object):
         self._pipeline.scheduler = scheduler
         self._pipeline.progress_bar = ProgressBarWrapper(progress_callback, stop_event, suppress_output)
 
-        images = self._pipeline(
+        pipeline_args = dict(
             prompt=prompt,
             negative_prompt=negative_prompt if negative_prompt else None,
             num_images_per_prompt=num_images_per_prompt,
@@ -389,6 +392,8 @@ class PipelineWrapper(object):
             guidance_scale=guidance_scale,
             clip_guidance_scale=clip_guidance_scale,
             eta=eta,
+            churn=churn,
+            kerras_rho=kerras_rho,
             num_inference_steps=num_inference_steps,
             init_image=init_image,
             mask_image=mask_image,
@@ -397,6 +402,15 @@ class PipelineWrapper(object):
             output_type="tensor",
             return_dict=False
         )
+
+        pipeline_keys = inspect.signature(self._pipeline).parameters.keys()
+        for k, v in pipeline_args.items():
+            if v and k not in pipeline_keys:
+                print(f"Warning: Pipeline doesn't understand argument {k} (set to {v}) - ignoring")
+                # TODO: is it OK to mutate dictionary while looping over it?
+                del pipeline_args[k]
+
+        images = self._pipeline(**pipeline_args)
 
         return images
 

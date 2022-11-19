@@ -28,6 +28,9 @@ dependencies = [
   # For Structured Diffusion
   "nltk ~= 3.7",
   "stanza ~= 1.4.2",
+  # For K-Diffusion
+  "torchdiffeq ~= 0.2.3",
+  "torchsde ~= 0.2.5",
   # For Server
   "protobuf ~= 3.20",
   "grpcio ~= 1.48.1",
