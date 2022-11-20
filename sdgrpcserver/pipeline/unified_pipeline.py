@@ -257,7 +257,7 @@ class DiffusersSchedulerBase(CommonScheduler):
 
     def wrap_unet(self, unet: NoisePredictionUNet) -> DiffusersXtUNet:
         step_kwargs = {}
-        if self.accepts_eta and self.eta is not None: step_kwargs["eta"] = self.self.eta
+        if self.accepts_eta and self.eta is not None: step_kwargs["eta"] = self.eta
         if self.accepts_generator: step_kwargs["generator"] = self.generators[0]
         if self.accepts_noise_predictor: step_kwargs["noise_predictor"] = self.eps_unet
 
@@ -295,7 +295,7 @@ class DiffusersSchedulerBase(CommonScheduler):
         noise: Tensor,
         t: ScheduleTimestep
     ) -> Tensor:
-        return self.scheduler.add_noise(latents, noise, t)
+        return self.scheduler.add_noise(latents, noise, torch.tensor([t], device=self.device))
 
     def scale_latents(
         self,
@@ -1364,7 +1364,7 @@ UnifiedPipelineImageType = Union[
     torch.FloatTensor, PIL.Image.Image
 ]
 
-class NewUnifiedPipeline(DiffusionPipeline):
+class UnifiedPipeline(DiffusionPipeline):
     r"""
     Pipeline for unified image generation using Stable Diffusion.
 

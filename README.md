@@ -145,6 +145,7 @@ sdgrpcserver
 
 - Seamless outpainting https://github.com/parlance-zz/g-diffuser-bot/tree/g-diffuser-bot-beta2
 - Additional schedulers https://github.com/hlky/diffusers
+- K-Diffusion integration example https://github.com/Birch-san/diffusers/blob/1472b70194ae6d7e51646c0d6787815a5bc65f75/examples/community/play.py
 
 # Roadmap
 

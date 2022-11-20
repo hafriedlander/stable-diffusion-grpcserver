@@ -23,8 +23,7 @@ from diffusers.pipeline_utils import DiffusionPipeline
 
 import generation_pb2
 
-from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipeline, UnifiedPipelinePromptType, UnifiedPipelineImageType
-from sdgrpcserver.pipeline.new_unified_pipeline import NewUnifiedPipeline, SCHEDULER_NOISE_TYPE
+from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipeline, UnifiedPipelinePromptType, UnifiedPipelineImageType, SCHEDULER_NOISE_TYPE
 from sdgrpcserver.pipeline.upscaler_pipeline import NoiseLevelAndTextConditionedUpscaler, UpscalerPipeline
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 

@@ -10,3 +10,4 @@
 [submodule "sdgrpcserver/src/ResizeRight"]
 	path = sdgrpcserver/src/ResizeRight
 	url = https://github.com/assafshocher/ResizeRight.git
+	ignore = dirty
