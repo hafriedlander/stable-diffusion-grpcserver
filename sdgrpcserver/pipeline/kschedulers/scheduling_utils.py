@@ -17,7 +17,6 @@ from typing import Union
 import numpy as np
 import torch
 
-
 SCHEDULER_CONFIG_NAME = "scheduler_config.json"
 
 class KSchedulerMixin:
@@ -27,35 +26,6 @@ class KSchedulerMixin:
 
     config_name = SCHEDULER_CONFIG_NAME
     ignore_for_config = ["tensor_format"]
-
-    def set_format(self, tensor_format="pt"):
-        self.tensor_format = tensor_format
-        if tensor_format == "pt":
-            for key, value in vars(self).items():
-                if isinstance(value, np.ndarray):
-                    setattr(self, key, torch.from_numpy(value))
-
-        return self
-
-    def clip(self, tensor, min_value=None, max_value=None):
-        tensor_format = getattr(self, "tensor_format", "pt")
-
-        if tensor_format == "np":
-            return np.clip(tensor, min_value, max_value)
-        elif tensor_format == "pt":
-            return torch.clamp(tensor, min_value, max_value)
-
-        raise ValueError(f"`self.tensor_format`: {self.tensor_format} is not valid.")
-
-    def log(self, tensor):
-        tensor_format = getattr(self, "tensor_format", "pt")
-
-        if tensor_format == "np":
-            return np.log(tensor)
-        elif tensor_format == "pt":
-            return torch.log(tensor)
-
-        raise ValueError(f"`self.tensor_format`: {self.tensor_format} is not valid.")
 
     def match_shape(self, values: Union[np.ndarray, torch.Tensor], broadcast_array: Union[np.ndarray, torch.Tensor]):
         """
@@ -69,40 +39,88 @@ class KSchedulerMixin:
             a tensor of shape [batch_size, 1, ...] where the shape has K dims.
         """
 
-        tensor_format = getattr(self, "tensor_format", "pt")
         values = values.flatten()
 
         while len(values.shape) < len(broadcast_array.shape):
             values = values[..., None]
-        if tensor_format == "pt":
-            values = values.to(broadcast_array.device)
+            
+        values = values.to(broadcast_array.device)
 
         return values
 
-    def norm(self, tensor):
-        tensor_format = getattr(self, "tensor_format", "pt")
-        if tensor_format == "np":
-            return np.linalg.norm(tensor)
-        elif tensor_format == "pt":
-            return torch.norm(tensor.reshape(tensor.shape[0], -1), dim=-1).mean()
+    """
+    All the K-Schedulers handle these methods in the same way
+    """
 
-        raise ValueError(f"`self.tensor_format`: {self.tensor_format} is not valid.")
+    def scale_model_input(
+        self, sample: torch.FloatTensor, timestep: Union[float, torch.FloatTensor]
+    ) -> torch.FloatTensor:
+        """
+        Scales the denoising model input by `(sigma**2 + 1) ** 0.5` to match the K-LMS algorithm.
 
-    def randn_like(self, tensor, generator=None):
-        tensor_format = getattr(self, "tensor_format", "pt")
-        if tensor_format == "np":
-            return np.random.randn(*np.shape(tensor))
-        elif tensor_format == "pt":
-            # return torch.randn_like(tensor)
-            return torch.randn(tensor.shape, layout=tensor.layout, generator=generator).to(tensor.device)
+        Args:
+            sample (`torch.FloatTensor`): input sample
+            timestep (`float` or `torch.FloatTensor`): the current timestep in the diffusion chain
 
-        raise ValueError(f"`self.tensor_format`: {self.tensor_format} is not valid.")
+        Returns:
+            `torch.FloatTensor`: scaled input sample
+        """
+        sigma = self.t_to_sigma(timestep)
+        sample = sample / ((sigma**2 + 1) ** 0.5)
+        return sample
 
-    def zeros_like(self, tensor):
-        tensor_format = getattr(self, "tensor_format", "pt")
-        if tensor_format == "np":
-            return np.zeros_like(tensor)
-        elif tensor_format == "pt":
-            return torch.zeros_like(tensor)
+    def add_noise(
+        self,
+        original_samples: Union[torch.FloatTensor, np.ndarray],
+        noise: Union[torch.FloatTensor, np.ndarray],
+        timesteps: Union[float, torch.FloatTensor],
+    ) -> Union[torch.FloatTensor, np.ndarray]:
+        index = self.t_to_index(timesteps)
+        sigmas = self.match_shape(self.sigmas[index], noise)
+        noisy_samples = original_samples + noise * sigmas
 
-        raise ValueError(f"`self.tensor_format`: {self.tensor_format} is not valid.")
+        return noisy_samples
+
+    def __len__(self):
+        return self.config.num_train_timesteps
+
+    """
+    Taken from https://github.com/crowsonkb/k-diffusion/blob/master/k_diffusion/external.py
+
+    These assume that:
+    len(self.timesteps) is num_inference_steps (not num_train_timesteps)
+    len(self.sigmas) is num_inference_steps (not num_train_timesteps)
+    
+    BUT
+    
+    len(self.log_sigmas) is num_train_timesteps (not num_inference_steps)
+    """
+
+    def t_to_index(self, timestep):
+        self.timesteps = self.timesteps.to(timestep.device)
+
+        dists = timestep - self.timesteps
+        return dists.abs().argmin().item()
+
+    def sigma_to_t(self, sigma, quantize=True):
+        self.log_sigmas = self.log_sigmas.to(sigma.device)
+
+        log_sigma = sigma.log()
+        dists = log_sigma - self.log_sigmas[:, None]
+        # Stable Diffusion should be quantized
+        if quantize:
+            return dists.abs().argmin(dim=0).view(sigma.shape)
+        # For continuous distributions
+        low_idx = dists.ge(0).cumsum(dim=0).argmax(dim=0).clamp(max=self.log_sigmas.shape[0] - 2)
+        high_idx = low_idx + 1
+        low, high = self.log_sigmas[low_idx], self.log_sigmas[high_idx]
+        w = (low - log_sigma) / (low - high)
+        w = w.clamp(0, 1)
+        t = (1 - w) * low_idx + w * high_idx
+        return t.view(sigma.shape)
+
+    def t_to_sigma(self, t):
+        t = t.float()
+        low_idx, high_idx, w = t.floor().long(), t.ceil().long(), t.frac()
+        log_sigma = (1 - w) * self.log_sigmas[low_idx] + w * self.log_sigmas[high_idx]
+        return log_sigma.exp()

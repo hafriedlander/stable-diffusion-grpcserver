@@ -246,9 +246,6 @@ class PipelineWrapper(object):
         ))
 
     def _prepScheduler(self, scheduler):
-        if isinstance(scheduler, KSchedulerMixin):
-            scheduler = scheduler.set_format("pt")
-
         if hasattr(scheduler.config, "steps_offset") and scheduler.config.steps_offset != 1:
             deprecation_message = (
                 f"The configuration file of this scheduler: {scheduler} is outdated. `steps_offset`"
@@ -408,10 +405,11 @@ class PipelineWrapper(object):
         )
 
         pipeline_keys = inspect.signature(self._pipeline).parameters.keys()
-        for k, v in pipeline_args.items():
-            if v and k not in pipeline_keys:
-                print(f"Warning: Pipeline doesn't understand argument {k} (set to {v}) - ignoring")
-                # TODO: is it OK to mutate dictionary while looping over it?
+        self_params = inspect.signature(self.generate).parameters
+        for k, v in list(pipeline_args.items()):
+            if k not in pipeline_keys:
+                if v != self_params[k].default:
+                    print(f"Warning: Pipeline doesn't understand argument {k} (set to {v}) - ignoring")
                 del pipeline_args[k]
 
         images = self._pipeline(**pipeline_args)

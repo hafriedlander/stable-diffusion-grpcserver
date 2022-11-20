@@ -344,7 +344,6 @@ class ClipGuidedNoisePredictor:
             loss = dists.sum(2).mean(0).sum() 
 
         self.lossavg.append(float(loss))
-        print(loss)
 
         grads = -torch.autograd.grad(loss * (clip_guidance_scale * 500), latents)[0]
         return grads, noise_pred_g
@@ -503,11 +502,8 @@ class Img2imgMode(UnifiedMode):
           - otherwise look up the timestep in the scheduler
           - either way, return a tensor * batch_total on our device
         """
-        if isinstance(self.scheduler, KSchedulerMixin): 
-            return torch.tensor(i)
-        else:
-            timesteps = t if t != None else self.scheduler.timesteps[i]
-            return torch.tensor([timesteps] * self.batch_total, device=self.device)
+        timesteps = t if t != None else self.scheduler.timesteps[i]
+        return torch.tensor([timesteps] * self.batch_total, device=self.device)
 
     def _addInitialNoise(self, latents):
         # NOTE: We run K_LMS in float32, because it seems to have problems with float16
@@ -1478,7 +1474,7 @@ class UnifiedPipeline(DiffusionPipeline):
         accepts_noise_predictor = "noise_predictor" in set(inspect.signature(self.scheduler.step).parameters.keys())
 
         extra_step_kwargs = {}
-        if accepts_eta: extra_step_kwargs["eta"] = eta
+        if accepts_eta and eta: extra_step_kwargs["eta"] = eta
         if accepts_generator: extra_step_kwargs["generator"] = generator[0] if isinstance(generator, list) else generator
 
         t_start = modes[0].t_start
@@ -1497,10 +1493,10 @@ class UnifiedPipeline(DiffusionPipeline):
                 if isinstance(noise_pred, tuple): noise_pred, input_latents = noise_pred
 
                 # compute the previous noisy sample x_t -> x_t-1
-                if accepts_noise_predictor: extra_step_kwargs["noise_predictor"] = lambda latents, i, t, sigma = None: noise_predictor(mode.unet, latents, i, t, sigma = sigma, second=True)
+                if accepts_noise_predictor: extra_step_kwargs["noise_predictor"] = lambda latents, t: noise_predictor(mode.unet, latents, self.scheduler.t_to_index(t), t, second=True)
 
                 if isinstance(self.scheduler, KSchedulerMixin): 
-                    output = self.scheduler.step(noise_pred, t_index, input_latents, **extra_step_kwargs).prev_sample
+                    output = self.scheduler.step(noise_pred, t, input_latents, **extra_step_kwargs).prev_sample
                 else:
                     output = self.scheduler.step(noise_pred, t, input_latents, **extra_step_kwargs).prev_sample
 
