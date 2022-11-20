@@ -24,7 +24,7 @@ from diffusers.pipeline_utils import DiffusionPipeline
 import generation_pb2
 
 from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipeline, UnifiedPipelinePromptType, UnifiedPipelineImageType
-from sdgrpcserver.pipeline.new_unified_pipeline import NewUnifiedPipeline
+from sdgrpcserver.pipeline.new_unified_pipeline import NewUnifiedPipeline, SCHEDULER_NOISE_TYPE
 from sdgrpcserver.pipeline.upscaler_pipeline import NoiseLevelAndTextConditionedUpscaler, UpscalerPipeline
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 
@@ -320,7 +320,8 @@ class PipelineWrapper(object):
         # Guidance control    
         guidance_scale: float = 7.5,
         clip_guidance_scale: Optional[float] = None,
- 
+        clip_guidance_base: Optional[str] = None,
+
         # Sampler control
         sampler: generation_pb2.DiffusionSampler = None,
         scheduler = None,
@@ -328,6 +329,7 @@ class PipelineWrapper(object):
         eta: Optional[float] = None,
         churn: Optional[float] = None,
         kerras_rho: Optional[float] = None,
+        scheduler_noise_type: Optional[SCHEDULER_NOISE_TYPE] = "normal",
 
         num_inference_steps: int = 50,
 
@@ -391,9 +393,11 @@ class PipelineWrapper(object):
             height=height,
             guidance_scale=guidance_scale,
             clip_guidance_scale=clip_guidance_scale,
+            clip_guidance_base=clip_guidance_base,
             eta=eta,
             churn=churn,
             kerras_rho=kerras_rho,
+            scheduler_noise_type=scheduler_noise_type,
             num_inference_steps=num_inference_steps,
             init_image=init_image,
             mask_image=mask_image,

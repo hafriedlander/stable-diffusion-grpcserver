@@ -87,6 +87,7 @@ DiffusersScalingUNet = Callable[[XtTensor, int, int, float], PredictedNoiseTenso
 # The main DiffusersScheduler wrapped UNet
 DiffusersUNet = Callable[[XtTensor, int, int, float], XtTensor]
 
+SCHEDULER_NOISE_TYPE = Literal["brownian", "normal"]
 
 class CommonScheduler:
 
@@ -119,6 +120,10 @@ class CommonScheduler:
         num_inference_steps: int,
         start_offset: int = None,
         strength: float = None,
+        kerras_rho: float = None,
+        eta: float = None,
+        churn: float = None,
+        noise_type: SCHEDULER_NOISE_TYPE = "normal"
     ):
         raise NotImplementedError("Subclass to implement")
 
@@ -182,16 +187,19 @@ class DiffusersSchedulerBase(CommonScheduler):
         kerras_rho: float = None,
         eta: float = None,
         churn: float = None,
+        noise_type: SCHEDULER_NOISE_TYPE = "normal"
     ):
         if self.eps_unet is None:
             raise ValueError("Unet needs to be set before timesteps")
 
         if kerras_rho is not None:
-            print("Warning: This scheduler doen't accept kerras_rho. Ignoring.")
+            print("Warning: This scheduler doesn't accept kerras_rho. Ignoring.")
         if churn is not None:
-            print("Warning: This scheduler doen't accept churn. Ignoring.")
+            print("Warning: This scheduler doesn't accept churn. Ignoring.")
         if eta is not None and not self.accepts_eta:
-            print("Warning: This scheduler doen't accept eta. Ignoring.")
+            print("Warning: This scheduler doesn't accept eta. Ignoring.")
+        if noise_type != "normal":
+            print("Warning: This scheduler only accepts normal noise. Ignoring.")
 
         self.eta = eta
         self.num_inference_steps = num_inference_steps
@@ -356,6 +364,7 @@ class DiffusersKScheduler(DiffusersSchedulerBase):
     def scheduler_step(self, noise_pred, t, t_index, latents, **step_kwargs):
         return self.scheduler.step(noise_pred, t_index, latents, **step_kwargs)
 
+
 class KDiffusionUNetWrapper(k_external.DiscreteEpsDDPMDenoiser):
     def __init__(self, unet: UNet2DConditionModel, alphas_cumprod: Tensor):
         super().__init__(unet, alphas_cumprod, quantize=True)
@@ -394,6 +403,7 @@ class KDiffusionScheduler(CommonScheduler):
         kerras_rho: float = None,
         eta: float = None,
         churn: float = None,
+        noise_type: SCHEDULER_NOISE_TYPE = "normal"
     ):
         if self.eps_unet is None:
             raise ValueError("Unet needs to be set before timesteps")
@@ -427,6 +437,7 @@ class KDiffusionScheduler(CommonScheduler):
 
         self.eta = eta
         self.churn = churn
+        self.noise_type = noise_type
 
         self.num_inference_steps = num_inference_steps
 
@@ -472,6 +483,9 @@ class KDiffusionScheduler(CommonScheduler):
         unet = self.unet
         sigmas = self.sigmas[self.start_offset:].to(self.dtype)
 
+        sigma_min = min(self._unet.sigma_min, sigmas[sigmas > 0].min())
+        sigma_max = max(self._unet.sigma_max, sigmas.max())
+
         def trange(i, **kwargs):
             return progress_wrapper(range(i))
 
@@ -492,11 +506,21 @@ class KDiffusionScheduler(CommonScheduler):
         if self.accepts_sigmas:
             kwargs['sigmas'] = sigmas
         else:
-            kwargs['sigma_min']=self._unet.sigma_min
-            kwargs['sigma_max']=min(self._unet.sigma_max, sigmas[0])
+            kwargs['sigma_min']=sigma_min
+            kwargs['sigma_max']=sigma_max
 
         if self.accepts_noise_sampler:
-            kwargs['noise_sampler'] = lambda _, __: batched_randn(latents.shape, self.generators, self.device, self.dtype)
+            if self.noise_type == "brownian":
+                print("Brown Town")
+                seeds = [
+                    torch.randint(0, 2 ** 63 - 1, [], generator=g, device=g.device).item()
+                    for g in self.generators
+                ]
+                kwargs['noise_sampler'] = \
+                    k_sampling.BrownianTreeNoiseSampler(latents, sigma_min, sigma_max, seed=seeds)
+            else:
+                kwargs['noise_sampler'] = \
+                    lambda _, __: batched_randn(latents.shape, self.generators, self.device, self.dtype)
 
         def callback(d):
             write_debug_latents(self.vae, "step", d['i'], d['denoised'])
@@ -609,10 +633,11 @@ class ApproximateDecoder:
         return torch.einsum('...lhw,lr -> ...rhw', latents, self.latent_rgb_factors)
 
 CLIP_NO_CUTOUTS_TYPE = Literal[False, True, "vae", "approx"]
+CLIP_GUIDANCE_BASE = Literal["guided", "mixed"]
 
 class ClipGuidedMode:
 
-    def __init__(self, wrapped_mode, scheduler, pipeline, dtype, guidance_scale, text_embeddings_clip, clip_guidance_scale, clip_gradient_length, clip_gradient_threshold, vae_cutouts, approx_cutouts, no_cutouts, generator):
+    def __init__(self, wrapped_mode, scheduler, pipeline, dtype, guidance_scale, text_embeddings_clip, clip_guidance_scale, clip_guidance_base, clip_gradient_length, clip_gradient_threshold, vae_cutouts, approx_cutouts, no_cutouts, generator):
         self.wrapped_mode = wrapped_mode
 
         self.scheduler = scheduler
@@ -622,6 +647,7 @@ class ClipGuidedMode:
 
         self.text_embeddings_clip = text_embeddings_clip
         self.clip_guidance_scale = clip_guidance_scale
+        self.clip_guidance_base = clip_guidance_base
         self.clip_gradient_length = clip_gradient_length
         self.clip_gradient_threshold = clip_gradient_threshold
         self.vae_cutouts = vae_cutouts
@@ -640,6 +666,8 @@ class ClipGuidedMode:
 
         self.lossavg = []
         self.flatloss = False
+
+        self._cache_g = None
 
     def generateLatents(self):
         return self.wrapped_mode.generateLatents()
@@ -660,15 +688,18 @@ class ClipGuidedMode:
             if self._has_flatloss():
                 return child_wrapped_unet(latents, t)
             else:
-                noise_pred_u = unet_u(latents, t)
-                noise_pred_g, grads = self.model_d_fn(unet_g, latents, t)
+                if self.clip_guidance_base == "guided":
+                    noise_pred_u = unet_u(latents, t)
+                    noise_pred_g, grads = self.model_d_fn(unet_g, latents, t)
 
-                noise_pred = noise_pred_u + guidance_scale * (noise_pred_g - noise_pred_u)
+                    noise_pred = noise_pred_u + guidance_scale * (noise_pred_g - noise_pred_u)
+                else:
+                    noise_pred, grads = self.model_d_fn(child_wrapped_unet, latents, t)
+
 
                 if isinstance(self.scheduler, DiffusersKScheduler):
                     sigma = self.scheduler._get_sigma_for_t(t)
                     return noise_pred - grads * sigma
-                    return noise_pred, grads * (sigma**2)
 
                 else:
                     # Todo: Don't duplicate this bit from cond_fn
@@ -681,11 +712,22 @@ class ClipGuidedMode:
                 return child_wrapped_unet(latents, t)
             else:
                 if self.section == "g":
-                    self._cache_g = unet_g(latents, t)
-                    return self._cache_g 
+                    noise_pred_g = unet_g(latents, t)
+                    self._cache_g = (noise_pred_g, t)
+                    return noise_pred_g
                 else:
                     noise_pred_u = unet_u(latents, t)
-                    return noise_pred_u + guidance_scale * (self._cache_g  - noise_pred_u)
+
+                    noise_pred_g = None
+
+                    if self._cache_g:
+                        noise_pred_g, cache_t = self._cache_g
+                        if cache_t != t: noise_pred_g = None
+
+                    if noise_pred_g is None: 
+                        noise_pred_g = unet_g(latents, t)
+
+                    return noise_pred_u + guidance_scale * (noise_pred_g  - noise_pred_u)
 
         if isinstance(self.scheduler, DiffusersSchedulerBase):
             return wrapped_unet_ford
@@ -699,11 +741,14 @@ class ClipGuidedMode:
             x = np.linspace(0,1,self.clip_gradient_length)
             X = np.vstack([x, np.ones(len(x))]).T
             y = np.asarray(self.lossavg[-self.clip_gradient_length:])
-
-            m, c = np.linalg.lstsq(X, y, rcond=None)[0]
-            if abs(m) < self.clip_gradient_threshold:
-                print("Flat", len(self.lossavg), m, c)
-                self.flatloss = True
+            
+            try:
+                m, c = np.linalg.lstsq(X, y, rcond=None)[0]
+                if abs(m) < self.clip_gradient_threshold:
+                    print("Flat", len(self.lossavg), m, c)
+                    self.flatloss = c < 1
+            except np.linalg.LinAlgError:
+                pass
 
         return self.flatloss
 
@@ -714,11 +759,15 @@ class ClipGuidedMode:
             if self._has_flatloss():
                 return child_wrapped_unet(latents, sigma)
             else:
-                self.section="g"
-                grads = self.model_k_fn(child_wrapped_unet, latents, sigma)
-                self.section="merged"
-                res = child_wrapped_unet(latents, sigma)
-                
+                if self.clip_guidance_base == "guided":
+                    self.section="g"
+                    _, grads = self.model_k_fn(child_wrapped_unet, latents, sigma)
+                    self.section="merged"
+                    res = child_wrapped_unet(latents, sigma)
+                else:
+                    self.section="merged"
+                    res, grads = self.model_k_fn(child_wrapped_unet, latents, sigma)
+
                 return res + grads * (sigma**2)
 
 
@@ -745,15 +794,15 @@ class ClipGuidedMode:
             self.no_cutouts
         )
 
-        return grads
+        return sample, grads
         return sample + grads * (sigma**2)
 
 
     @torch.enable_grad()
-    def model_d_fn(self, unet_g, latents, t):
+    def model_d_fn(self, unet, latents, t):
 
         latents = latents.detach().requires_grad_()
-        noise_pred = unet_g(latents, t)
+        noise_pred = unet(latents, t)
 
         sample = self.scheduler.predict_x0(latents, noise_pred, t)
 
@@ -769,19 +818,6 @@ class ClipGuidedMode:
         )
 
         return noise_pred, grads
-
-        if isinstance(self.scheduler, DiffusersKScheduler):
-            sigma = self.scheduler._get_sigma_for_t(t)
-            # TODO: Neither of these work?
-            # return noise_pred - grads * (sigma**2+1)**0.5
-            return noise_pred - grads * sigma
-
-        else:
-            # Todo: Don't duplicate this bit from cond_fn
-            alpha_prod_t = self.scheduler.scheduler.alphas_cumprod[t]
-            beta_prod_t = 1 - alpha_prod_t
-            return noise_pred - torch.sqrt(beta_prod_t) * grads
-
 
     @torch.enable_grad()
     def cond_fn(
@@ -1448,6 +1484,7 @@ class NewUnifiedPipeline(DiffusionPipeline):
             "approx_cutouts": 2,
             "no_cutouts": False,
             "guidance_scale": 0.0,
+            "guidance_base": "guided",
             "gradient_length": 15,
             "gradient_threshold": 0.01
         }
@@ -1560,6 +1597,7 @@ class NewUnifiedPipeline(DiffusionPipeline):
         eta: Optional[float] = None,
         churn: Optional[float] = None,
         kerras_rho: Optional[float] = None,
+        scheduler_noise_type: Optional[SCHEDULER_NOISE_TYPE] = "normal",
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.FloatTensor] = None,
         max_embeddings_multiples: Optional[int] = 3,
@@ -1569,6 +1607,7 @@ class NewUnifiedPipeline(DiffusionPipeline):
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: Optional[int] = 1,
         clip_guidance_scale: Optional[float] = None,
+        clip_guidance_base: Optional[CLIP_GUIDANCE_BASE] = None,
         clip_gradient_length: Optional[int] = None,
         clip_gradient_threshold: Optional[float] = None,
         clip_prompt: Optional[Union[str, List[str]]] = None,
@@ -1644,6 +1683,7 @@ class NewUnifiedPipeline(DiffusionPipeline):
 
         # Set defaults for clip
         if clip_guidance_scale is None: clip_guidance_scale = self.clip_defaults["guidance_scale"]
+        if clip_guidance_base is None: clip_guidance_base = self.clip_defaults["guidance_base"]
         if clip_gradient_length is None: clip_gradient_length = self.clip_defaults["gradient_length"]
         if clip_gradient_threshold is None: clip_gradient_threshold = self.clip_defaults["gradient_threshold"]
         if vae_cutouts is None: vae_cutouts = self.clip_defaults["vae_cutouts"]
@@ -1818,6 +1858,7 @@ class NewUnifiedPipeline(DiffusionPipeline):
                 guidance_scale=guidance_scale,
                 text_embeddings_clip=text_embeddings_clip,
                 clip_guidance_scale=clip_guidance_scale,
+                clip_guidance_base=clip_guidance_base,
                 clip_gradient_length=clip_gradient_length,
                 clip_gradient_threshold=clip_gradient_threshold,
                 vae_cutouts=vae_cutouts,
@@ -1846,6 +1887,7 @@ class NewUnifiedPipeline(DiffusionPipeline):
         if eta: timestep_args["eta"] = eta
         if churn: timestep_args["churn"] = churn
         if kerras_rho: timestep_args["kerras_rho"] = kerras_rho
+        timestep_args["noise_type"] = scheduler_noise_type
 
         scheduler.set_timesteps(num_inference_steps, **timestep_args)
 
