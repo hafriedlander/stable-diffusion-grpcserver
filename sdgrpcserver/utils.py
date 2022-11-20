@@ -10,6 +10,7 @@ import torch
 import generation_pb2
 
 from sdgrpcserver import images
+from sdgrpcserver.pipeline.vae_approximator import VaeApproximator
 
 def artifact_to_image(artifact):
     if artifact.type == generation_pb2.ARTIFACT_IMAGE or artifact.type == generation_pb2.ARTIFACT_MASK:
@@ -41,3 +42,12 @@ def image_to_artifact(im, artifact_type=generation_pb2.ARTIFACT_IMAGE, meta=None
         mime="image/png"
     )
 
+class CallbackImageWrapper:
+    def __init__(self, callback, device, dtype):
+        self.callback = callback
+        self.vae_approximator = VaeApproximator()
+    
+    def __call__(self, i, t, latents):
+        pixels = self.vae_approximator(latents)
+        pixels = (pixels / 2 + 0.5).clamp(0, 1)
+        self.callback(i, t, pixels)

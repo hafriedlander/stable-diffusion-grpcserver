@@ -29,9 +29,9 @@ from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionS
 from sdgrpcserver.k_diffusion import sampling as k_sampling, utils as k_utils, external as k_external
 
 from sdgrpcserver import images
-from sdgrpcserver.pipeline.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
-from sdgrpcserver.pipeline.kschedulers.scheduling_utils import KSchedulerMixin
+from sdgrpcserver.pipeline.vae_approximator import VaeApproximator
 from sdgrpcserver.pipeline.text_embedding import *
+from sdgrpcserver.pipeline.kschedulers.scheduling_utils import KSchedulerMixin
 
 from sdgrpcserver.pipeline.attention_replacer import replace_cross_attention
 from sdgrpcserver.pipeline.models.memory_efficient_cross_attention import has_xformers, MemoryEfficientCrossAttention
@@ -67,28 +67,34 @@ def write_debug_latents(vae, label, i, latents):
 
 # Some types to describe the various structures of unet. First some return types
 
-# An Xt (ie a sample that includes some amount of noise)
-XtTensor = NewType('XtTensor', Tensor)
-# The input to some UNets needs to be scaled depending on current timestep
-ScaledXtTensor = NewType('SCaledXtTensor', Tensor)
-# The predicted noise in a sample
+# An Xt (ie a sample that includes some amount of noise), not scaled for scheduler purposes yet
+UnscaledXtTensor = NewType('UnscaledXtTensor', Tensor)
+# An Xt scaled depending on current timestep
+PrescaledXtTensor = NewType('PrescaledXtTensor', Tensor)
+# And XtTensor, either Pre or Unscaled
+XtTensor = Union[UnscaledXtTensor, PrescaledXtTensor]
+
+# The predicted noise in a sample (eps)
 PredictedNoiseTensor = NewType('PredictedNoiseTensor', Tensor)
 # The predicted X0 (i.e Xt - PredictedNoise)
 PX0Tensor = NewType('PX0Tensor', Tensor)
 
+# Sigma
 ScheduleSigma = NewType('Sigma', float)
+# Timestep (from 1000 to 0 usually)
 ScheduleTimestep = NewType('Timestep', float)
 
 # The Diffusers UNet
-DiffusersUNet = Callable[[ScaledXtTensor, ScheduleTimestep, Tensor], PredictedNoiseTensor]
+DiffusersUNet = Callable[[PrescaledXtTensor, ScheduleTimestep, Tensor], PredictedNoiseTensor]
 # A Wrapped UNet where the hidden_state argument inside the wrapping
-NoisePredictionUNet = Callable[[ScaledXtTensor, ScheduleTimestep], PredictedNoiseTensor]
+NoisePredictionUNet = Callable[[XtTensor, ScheduleTimestep], PredictedNoiseTensor]
 # A KDiffusion wrapped UNet
-KDiffusionUNet = Callable[[XtTensor, ScheduleSigma], PX0Tensor]
+KDiffusionUNet = Callable[[UnscaledXtTensor, ScheduleSigma], PX0Tensor]
+# The main DiffusersScheduler wrapped UNet
+DiffusersXtUNet = Callable[[UnscaledXtTensor, ScheduleTimestep], XtTensor]
+
 # The internal Diffusers UNet that wraps a NoisePredictionUNet to take an XtTensor instead of a ScaledXtTensor
 DiffusersScalingUNet = Callable[[XtTensor, ScheduleTimestep], PredictedNoiseTensor]
-# The main DiffusersScheduler wrapped UNet
-DiffusersUNet = Callable[[XtTensor, ScheduleTimestep], XtTensor]
 
 SCHEDULER_NOISE_TYPE = Literal["brownian", "normal"]
 
@@ -102,7 +108,9 @@ class CommonScheduler:
         generators: Iterable[torch.Generator],
         device: torch.device,
         dtype: torch.dtype,
-        vae
+        vae,
+        callback: Callable[[int, int, PX0Tensor], None] = None,
+        callback_steps: int = None
     ):
         self.scheduler = scheduler
         self.generators = generators
@@ -112,10 +120,15 @@ class CommonScheduler:
 
         self.eps_unet = None
 
+        self.callback = callback
+        self.callback_steps = callback_steps
+
     def set_eps_unet(
         self,
         eps_unet: NoisePredictionUNet
     ):
+        if getattr(self, "unet", False):
+            raise RuntimeError("Can't set eps_unet once set_timesteps has been called")
         self.eps_unet = eps_unet
 
     def set_timesteps(
@@ -170,6 +183,14 @@ class CommonScheduler:
             values = values[..., None]
 
         return values.to(broadcast_array.device)
+
+    def t_to_index(self, timestep):
+        timesteps = self.scheduler.timesteps
+        timesteps = timesteps.to(timestep.device)
+
+        dists = timestep - self.timesteps
+        return dists.abs().argmin().item()
+
 
 class DiffusersSchedulerBase(CommonScheduler):
 
@@ -234,7 +255,7 @@ class DiffusersSchedulerBase(CommonScheduler):
 
         return wrapped_unet
 
-    def wrap_unet(self, unet: DiffusersScalingUNet) -> DiffusersUNet:
+    def wrap_unet(self, unet: NoisePredictionUNet) -> DiffusersXtUNet:
         step_kwargs = {}
         if self.accepts_eta and self.eta is not None: step_kwargs["eta"] = self.self.eta
         if self.accepts_generator: step_kwargs["generator"] = self.generators[0]
@@ -243,6 +264,12 @@ class DiffusersSchedulerBase(CommonScheduler):
         def wrapped_unet(latents, t):
             # predict the noise residual
             noise_pred = unet(latents, t)
+
+            if self.callback:
+                i = self.t_to_index(t)
+                if i % self.callback_steps == 0:
+                    self.callback(i, t, self.predict_x0(latents, noise_pred, t))
+
             return self.scheduler.step(noise_pred, t, latents, **step_kwargs).prev_sample
         
         return wrapped_unet
@@ -466,10 +493,17 @@ class KDiffusionScheduler(CommonScheduler):
                 kwargs['noise_sampler'] = \
                     lambda _, __: batched_randn(latents.shape, self.generators, self.device, self.dtype)
 
-        def callback(d):
-            write_debug_latents(self.vae, "step", d['i'], d['denoised'])
 
-        return self.scheduler(unet, latents, callback=callback, **kwargs)
+        def callback_wrapper(d):
+            i, sigma, denoised = d["i"], d["sigma"], d["denoised"]
+            if i % self.callback_steps == 0:
+                t = self._unet.sigma_to_t(sigma)
+                self.callback(i, t, denoised)
+
+        if self.callback:
+            kwargs['callback'] = callback_wrapper
+
+        return self.scheduler(unet, latents, **kwargs)
 
 def set_requires_grad(model, value):
     for param in model.parameters():
@@ -483,16 +517,6 @@ class UNetWithEmbeddings():
 
     def __call__(self, latents, t):
         return self.unet(latents, t, encoder_hidden_states=self.text_embeddings).sample
-
-class UNetGuidedInner():
-
-    def __init__(self, unet):
-        self.unet = unet
-
-    def __call__(self, latents, t):
-        # expand the latents if we are doing classifier free guidance
-        latents = torch.cat([latents] * 2)
-        return self.unet(latents, t)
 
 class UNetGuidedOuter_Seperated():
     def __init__(self, unet_g, unet_u, unet_f, guidance_scale, batch_total):
@@ -566,37 +590,6 @@ def spherical_dist_loss(x, y):
     y = torch.nn.functional.normalize(y, dim=-1)
     return (x - y).norm(dim=-1).div(2).arcsin().pow(2).mul(2)
 
-class ApproximateDecoder:
-    """Decodes latent data to an approximate representation in RGB.
-    Values determined experimentally for Stable Diffusion 1.4.
-    See https://discuss.huggingface.co/t/decoding-latents-to-rgb-without-upscaling/23204/2
-    """
-
-    # grayscale_factors = torch.tensor([
-    #    #    R       G       B
-    #    [ 0.342,  0.341,  0.343 ], # L1
-    #    [ 0.342,  0.342,  0.340 ], # L2
-    #    [-0.110, -0.110, -0.113 ], # L3
-    #    [-0.208, -0.209, -0.208 ]  # L4
-    # ])
-
-    def __init__(self, device: torch.device, dtype: torch.dtype):
-        self.latent_rgb_factors = torch.tensor([
-            #   R        G        B
-            [0.298, 0.207, 0.208],  # L1
-            [0.187, 0.286, 0.173],  # L2
-            [-0.158, 0.189, 0.264],  # L3
-            [-0.184, -0.271, -0.473],  # L4
-        ], dtype=dtype, device=device)
-
-    @classmethod
-    def for_pipeline(cls, pipeline: "diffusers.DiffusionPipeline"):
-        return cls(device=pipeline.device, dtype=pipeline.unet.dtype)
-
-    def __call__(self, latents):
-        """Get an RGB JPEG representation of the latent data."""
-        return torch.einsum('...lhw,lr -> ...rhw', latents, self.latent_rgb_factors)
-
 CLIP_NO_CUTOUTS_TYPE = Literal[False, True, "vae", "approx"]
 CLIP_GUIDANCE_BASE = Literal["guided", "mixed"]
 
@@ -626,7 +619,7 @@ class ClipGuidedMode:
         self.make_cutouts = MakeCutouts(self.pipeline.feature_extractor.size // 8, generators=generator)
         self.make_cutouts_rgb = MakeCutouts(self.pipeline.feature_extractor.size, generators=generator)
 
-        self.approx_decoder = ApproximateDecoder(device = self.pipeline.device, dtype = dtype)
+        self.approx_decoder = VaeApproximator(device = self.pipeline.device, dtype = dtype)
 
         self.generator = generator
 
@@ -1871,6 +1864,9 @@ class NewUnifiedPipeline(DiffusionPipeline):
 
         scheduler.set_timesteps(num_inference_steps, **timestep_args)
 
+        if callback:
+            scheduler.set_callback(callback, callback_steps)
+
         if isinstance(scheduler, KDiffusionScheduler):
             scheduler.unet = modes[0].wrap_k_unet(scheduler.unet)
         else:
@@ -1880,7 +1876,6 @@ class NewUnifiedPipeline(DiffusionPipeline):
         # Get the initial starting point - either pure random noise, or the source image with some noise depending on mode
         # We only actually use the latents for the first mode, but UnifiedMode instances expect it to be called
         latents = [mode.generateLatents() for mode in modes][0]
-
         write_debug_latents(self.vae, "initial", 0, latents)
 
         # set timestep
