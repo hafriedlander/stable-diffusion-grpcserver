@@ -23,6 +23,8 @@ from diffusers.pipeline_utils import DiffusionPipeline
 
 import generation_pb2
 
+from sdgrpcserver.k_diffusion import sampling as k_sampling
+
 from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipeline, UnifiedPipelinePromptType, UnifiedPipelineImageType, SCHEDULER_NOISE_TYPE
 from sdgrpcserver.pipeline.upscaler_pipeline import NoiseLevelAndTextConditionedUpscaler, UpscalerPipeline
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
@@ -298,6 +300,26 @@ class PipelineWrapper(object):
         
         if self.mode.device == "cuda": torch.cuda.empty_cache()
 
+    def get_samplers(self):
+        return {
+            generation_pb2.SAMPLER_DDPM: self._plms,
+            generation_pb2.SAMPLER_K_LMS: k_sampling.sample_lms, # self._klms
+            generation_pb2.SAMPLER_DDIM: self._ddim,
+            generation_pb2.SAMPLER_K_EULER: k_sampling.sample_euler, # self._euler
+            generation_pb2.SAMPLER_K_EULER_ANCESTRAL: k_sampling.sample_euler_ancestral, # self._eulera
+            generation_pb2.SAMPLER_K_DPM_2: k_sampling.sample_dpm_2, # self._dpm2
+            generation_pb2.SAMPLER_K_DPM_2_ANCESTRAL: k_sampling.sample_dpm_2_ancestral, # self._dpm2a
+            generation_pb2.SAMPLER_K_HEUN: k_sampling.sample_heun, # self._heun
+            generation_pb2.SAMPLER_DPMSOLVERPP_1ORDER: self._dpmspp1,
+            generation_pb2.SAMPLER_DPMSOLVERPP_2ORDER: self._dpmspp2,
+            generation_pb2.SAMPLER_DPMSOLVERPP_3ORDER: self._dpmspp3,
+            generation_pb2.SAMPLER_DPM_FAST: k_sampling.sample_dpm_fast,
+            generation_pb2.SAMPLER_DPM_ADAPTIVE: k_sampling.sample_dpm_adaptive,
+            generation_pb2.SAMPLER_DPMSOLVERPP_2S_ANCESTRAL: k_sampling.sample_dpmpp_2s_ancestral,
+            generation_pb2.SAMPLER_DPMSOLVERPP_SDE: k_sampling.sample_dpmpp_sde,
+            generation_pb2.SAMPLER_DPMSOLVERPP_2M: k_sampling.sample_dpmpp_2m,
+        }
+
     def generate(
         self,
 
@@ -324,7 +346,11 @@ class PipelineWrapper(object):
 
         eta: Optional[float] = None,
         churn: Optional[float] = None,
-        kerras_rho: Optional[float] = None,
+        churn_tmin: Optional[float] = None,
+        churn_tmax: Optional[float] = None,
+        sigma_min: Optional[float] = None,
+        sigma_max: Optional[float] = None,
+        karras_rho: Optional[float] = None,
         scheduler_noise_type: Optional[SCHEDULER_NOISE_TYPE] = "normal",
 
         num_inference_steps: int = 50,
@@ -352,30 +378,14 @@ class PipelineWrapper(object):
             generator = torch.Generator(generator_device).manual_seed(seed)
 
         if scheduler is None:
-            if sampler is None or sampler == generation_pb2.SAMPLER_DDPM:
-                scheduler=self._plms
-            elif sampler == generation_pb2.SAMPLER_K_LMS:
-                scheduler=self._klms
-            elif sampler == generation_pb2.SAMPLER_DDIM:
-                scheduler=self._ddim
-            elif sampler == generation_pb2.SAMPLER_K_EULER:
-                scheduler=self._euler
-            elif sampler == generation_pb2.SAMPLER_K_EULER_ANCESTRAL:
-                scheduler=self._eulera
-            elif sampler == generation_pb2.SAMPLER_K_DPM_2:
-                scheduler=self._dpm2
-            elif sampler == generation_pb2.SAMPLER_K_DPM_2_ANCESTRAL:
-                scheduler=self._dpm2a
-            elif sampler == generation_pb2.SAMPLER_K_HEUN:
-                scheduler=self._heun
-            elif sampler == generation_pb2.SAMPLER_DPMSOLVERPP_1ORDER:
-                scheduler=self._dpmspp1
-            elif sampler == generation_pb2.SAMPLER_DPMSOLVERPP_2ORDER:
-                scheduler=self._dpmspp2
-            elif sampler == generation_pb2.SAMPLER_DPMSOLVERPP_3ORDER:
-                scheduler=self._dpmspp3
+            samplers = self.get_samplers()
+            if sampler is None:
+                scheduler = samplers.items()[0]
             else:
-                raise NotImplementedError("Scheduler not implemented")
+                scheduler = samplers.get(sampler, None)
+
+        if not scheduler: raise NotImplementedError("Scheduler not implemented")
+        print(scheduler)
 
         self._pipeline.scheduler = scheduler
         self._pipeline.progress_bar = ProgressBarWrapper(progress_callback, stop_event, suppress_output)
@@ -392,7 +402,11 @@ class PipelineWrapper(object):
             clip_guidance_base=clip_guidance_base,
             eta=eta,
             churn=churn,
-            kerras_rho=kerras_rho,
+            churn_tmin=churn_tmin,
+            churn_tmax=churn_tmax,
+            sigma_min=sigma_min,
+            sigma_max=sigma_max,
+            karras_rho=karras_rho,
             scheduler_noise_type=scheduler_noise_type,
             num_inference_steps=num_inference_steps,
             init_image=init_image,

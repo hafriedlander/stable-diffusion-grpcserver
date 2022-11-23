@@ -98,6 +98,50 @@ DiffusersScalingUNet = Callable[[XtTensor, ScheduleTimestep], PredictedNoiseTens
 
 SCHEDULER_NOISE_TYPE = Literal["brownian", "normal"]
 
+def batched_randn(shape, generators, device, dtype):
+    latents = torch.cat([
+        torch.randn((1, *shape[1:]), generator=generator, device=generator.device, dtype=dtype) 
+        for generator in generators
+    ], dim=0)
+
+    return latents.to(device)
+
+class TorchRandOverride:
+    def __init__(self, generators):
+        self.generators = generators
+
+    def randn_like(self, input, *args, dtype=None, layout=None, device=None, **kwargs):
+        if len(self.generators) != input.shape[0]:
+            print("Skip")
+            return torch.randn_like(input, dtype=dtype, layout=layout, device=device, **kwargs)
+
+        if device is None: device = input.device
+        if dtype is None: dtype = input.dtype
+        return batched_randn(input.shape, self.generators, device, dtype)
+
+    def randint_like(self, input, *args, high=None, low=None, dtype=None, layout=torch.strided, device=None, **kwargs):
+        if len(args) == 1:
+            high = args[0]
+        elif args:
+            low = args[0]
+            high = args[1]
+        if low is None: 
+            low = 0
+
+        if len(self.generators) != input.shape[0]:
+            print("Skip")
+            return torch.randint_like(input, low=low, high=high, dtype=dtype, layout=layout, device=device, **kwargs)
+            
+        latents = torch.cat([
+            torch.randint((1, *input.shape[1:]), low=low, high=high, generator=generator, device=generator.device, dtype=dtype) 
+            for generator in self.generators
+        ], dim=0)
+
+        return latents.to(device)
+
+    def __getattr__(self, item):
+        return getattr(torch, item)
+
 class CommonScheduler:
 
     # -- These methods are called by the pipeline itself
@@ -136,9 +180,13 @@ class CommonScheduler:
         num_inference_steps: int,
         start_offset: int = None,
         strength: float = None,
-        kerras_rho: float = None,
+        sigma_min: float = None,
+        sigma_max: float = None,
+        karras_rho: float = None,
         eta: float = None,
         churn: float = None,
+        churn_tmin: float = None,
+        churn_tmax: float = None,
         noise_type: SCHEDULER_NOISE_TYPE = "normal"
     ):
         raise NotImplementedError("Subclass to implement")
@@ -208,17 +256,23 @@ class DiffusersSchedulerBase(CommonScheduler):
         num_inference_steps: int,
         start_offset: int = None,
         strength: float = None,
-        kerras_rho: float = None,
+        sigma_min: float = None,
+        sigma_max: float = None,
+        karras_rho: float = None,
         eta: float = None,
         churn: float = None,
+        churn_tmin: float = None,
+        churn_tmax: float = None,
         noise_type: SCHEDULER_NOISE_TYPE = "normal"
     ):
         if self.eps_unet is None:
             raise ValueError("Unet needs to be set before timesteps")
 
-        if kerras_rho is not None:
-            print("Warning: This scheduler doesn't accept kerras_rho. Ignoring.")
-        if churn is not None:
+        if sigma_min is not None or sigma_max is not None:
+            print("Warning: This scheduler doen't accept sigma_min or sigma_max. Ignoring.")
+        if karras_rho is not None:
+            print("Warning: This scheduler doesn't accept karras_rho. Ignoring.")
+        if churn is not None or churn_tmin is not None or churn_tmax is not None:
             print("Warning: This scheduler doesn't accept churn. Ignoring.")
         if eta is not None and not self.accepts_eta:
             print("Warning: This scheduler doesn't accept eta. Ignoring.")
@@ -344,6 +398,7 @@ class KDiffusionScheduler(CommonScheduler):
         super().__init__(*args, **kargs)
 
         scheduler_keys = inspect.signature(self.scheduler).parameters.keys()
+        self.accepts_sigma_min = "sigma_min" in scheduler_keys
         self.accepts_sigmas = "sigmas" in scheduler_keys
         self.accepts_n = "n" in scheduler_keys
         self.accepts_eta = "eta" in scheduler_keys
@@ -369,16 +424,22 @@ class KDiffusionScheduler(CommonScheduler):
         num_inference_steps: int,
         start_offset: int = None,
         strength: float = None,
-        kerras_rho: float = None,
+        sigma_min: float = None,
+        sigma_max: float = None,
+        karras_rho: float = None,
         eta: float = None,
         churn: float = None,
+        churn_tmin: float = None,
+        churn_tmax: float = None,
         noise_type: SCHEDULER_NOISE_TYPE = "normal"
     ):
         if self.eps_unet is None:
             raise ValueError("Unet needs to be set before timesteps")
 
-        if kerras_rho is not None and not self.accepts_sigmas:
-            print("Warning: This scheduler doen't accept kerras_rho. Ignoring.")
+        if (sigma_min is not None or sigma_max is not None) and not (self.accepts_sigma_min or self.accepts_sigmas):
+            print("Warning: This scheduler doen't accept sigma_min or sigma_max. Ignoring.")
+        if karras_rho is not None and not self.accepts_sigmas:
+            print("Warning: This scheduler doen't accept karras_rho. Ignoring.")
         if churn is not None and not self.accepts_s_churn:
             print("Warning: This scheduler doen't accept churn. Ignoring.")
         if eta is not None and not self.accepts_eta:
@@ -391,21 +452,40 @@ class KDiffusionScheduler(CommonScheduler):
         self._unet: KDiffusionUNetWrapper = KDiffusionUNetWrapper(self.eps_unet, alphas_cumprod)
         self.unet: KDiffusionUNet = self._unet
 
-        if kerras_rho is not None:
+        # clamp sigma_min and sigma_max
+        if sigma_min is not None: sigma_min = max(self._unet.sigma_min, sigma_min)
+        if sigma_max is not None: sigma_max = min(self._unet.sigma_max, sigma_max)
+
+        # Calculate the Karras schedule if Rho is provided
+        if karras_rho is not None:
+            # quantize sigma min and max
+            if sigma_min is not None: 
+                sigma_min = self.unet.t_to_sigma(self.unet.sigma_to_t(torch.tensor(sigma_min, device=self.device))).to('cpu')
+            if sigma_max is not None: 
+                sigma_max = self.unet.t_to_sigma(self.unet.sigma_to_t(torch.tensor(sigma_max, device=self.device))).to('cpu')
+
             self.sigmas = k_sampling.get_sigmas_karras(
                 n=num_inference_steps,
-                sigma_max=self.unet.sigma_max.to('cpu'),
-                sigma_min=self.unet.sigma_min.to('cpu'),
-                rho=7.,
+                sigma_max=sigma_max if sigma_max is not None else self.unet.sigma_max.to('cpu'),
+                sigma_min=sigma_min if sigma_min is not None else self.unet.sigma_min.to('cpu'),
+                rho=karras_rho,
                 device=self.device,
             )
+
+        # Calculate the linear schedule - this is the same as DiscreteSchedule.get_sigmas but it supports truncated schedules
         else:
-            self.sigmas = self.unet.get_sigmas(
-                n=num_inference_steps
-            )
+            t_min = 0
+            if sigma_min is not None: t_min = self.unet.sigma_to_t(torch.tensor(sigma_min, device=self.device))
+            t_max = len(self.unet.sigmas) - 1
+            if sigma_max is not None: t_max = self.unet.sigma_to_t(torch.tensor(sigma_max, device=self.device))
+
+            t = torch.linspace(t_max, t_min, num_inference_steps, device=self.device)
+            self.sigmas = k_sampling.append_zero(self.unet.t_to_sigma(t))
 
         self.eta = eta
         self.churn = churn
+        self.churn_tmin = churn_tmin
+        self.churn_tmax = churn_tmax
         self.noise_type = noise_type
 
         self.num_inference_steps = num_inference_steps
@@ -455,8 +535,8 @@ class KDiffusionScheduler(CommonScheduler):
         unet = self.unet
         sigmas = self.sigmas[self.start_offset:].to(self.dtype)
 
-        sigma_min = min(self._unet.sigma_min, sigmas[sigmas > 0].min())
-        sigma_max = max(self._unet.sigma_max, sigmas.max())
+        sigma_min = sigmas[sigmas > 0].min()
+        sigma_max = sigmas.max()
 
         def trange(i, **kwargs):
             return progress_wrapper(range(i))
@@ -472,6 +552,8 @@ class KDiffusionScheduler(CommonScheduler):
             kwargs['eta'] = self.eta
         if self.accepts_s_churn and self.churn is not None:
             kwargs['s_churn'] = self.churn
+            if self.churn_tmin is not None: kwargs['s_tmin'] = self.churn_tmin
+            if self.churn_tmax is not None: kwargs['s_tmax'] = self.churn_tmax
         if self.accepts_n:
             kwargs['n'] = self.num_inference_steps
 
@@ -844,16 +926,6 @@ class ClipGuidedMode:
         self.lossavg.append(float(loss))
 
         return -torch.autograd.grad(loss * (clip_guidance_scale * 500), latents)[0]
-
-
-def batched_randn(shape, generators, device, dtype):
-    latents = torch.cat([
-        torch.randn((1, *shape[1:]), generator=generator, device=generator.device, dtype=dtype) 
-        for generator in generators
-    ], dim=0)
-
-    return latents.to(device)
-
 
 class UnifiedMode(object):
 
@@ -1561,7 +1633,11 @@ class UnifiedPipeline(DiffusionPipeline):
         num_images_per_prompt: Optional[int] = 1,
         eta: Optional[float] = None,
         churn: Optional[float] = None,
-        kerras_rho: Optional[float] = None,
+        churn_tmin: Optional[float] = None,
+        churn_tmax: Optional[float] = None,
+        sigma_min: Optional[float] = None,
+        sigma_max: Optional[float] = None,
+        karras_rho: Optional[float] = None,
         scheduler_noise_type: Optional[SCHEDULER_NOISE_TYPE] = "normal",
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.FloatTensor] = None,
@@ -1698,7 +1774,7 @@ class UnifiedPipeline(DiffusionPipeline):
         else:
             generators = [generator] * batch_total
 
-
+        inspect.getmodule(scheduler).torch = TorchRandOverride(generators)
 
         if (callback_steps is None) or (
             callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
@@ -1859,7 +1935,11 @@ class UnifiedPipeline(DiffusionPipeline):
         if init_image is not None: timestep_args["strength"] = strength
         if eta: timestep_args["eta"] = eta
         if churn: timestep_args["churn"] = churn
-        if kerras_rho: timestep_args["kerras_rho"] = kerras_rho
+        if churn_tmin: timestep_args["churn_tmin"] = churn_tmin
+        if churn_tmax: timestep_args["churn_tmax"] = churn_tmax
+        if sigma_min: timestep_args["sigma_min"] = sigma_min
+        if sigma_max: timestep_args["sigma_max"] = sigma_max
+        if karras_rho: timestep_args["karras_rho"] = karras_rho
         timestep_args["noise_type"] = scheduler_noise_type
 
         scheduler.set_timesteps(num_inference_steps, **timestep_args)

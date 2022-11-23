@@ -181,6 +181,35 @@ class ParameterExtractor:
     def eta(self):
         return self._image_stepparameter("sampler.eta")
 
+    def churn(self):
+        churn_settings = self._image_stepparameter("sampler.churn")
+        return churn_settings.churn if churn_settings else None
+
+    def churn_tmin(self):
+        return self._image_stepparameter("sampler.churn.churn_tmin")
+
+    def churn_tmax(self):
+        return self._image_stepparameter("sampler.churn.churn_tmax")
+
+    def sigma_min(self):
+        return self._image_stepparameter("sampler.sigma.sigma_min")
+
+    def sigma_max(self):
+        return self._image_stepparameter("sampler.sigma.sigma_max")
+
+    def karras_rho(self):
+        return self._image_stepparameter("sampler.sigma.karras_rho")
+
+    def scheduler_noise_type(self):
+        noise_type = self._image_stepparameter("sampler.noise_type")
+
+        if noise_type == generation_pb2.SAMPLER_NOISE_NORMAL: 
+            return "normal"
+        if noise_type == generation_pb2.SAMPLER_NOISE_BROWNIAN: 
+            return "brownian"
+
+        return None
+
     def init_image(self):
         for prompt in self._prompt_of_type("artifact"):
             if prompt.artifact.type == generation_pb2.ARTIFACT_IMAGE:

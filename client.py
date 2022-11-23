@@ -51,9 +51,19 @@ SAMPLERS: Dict[str, int] = {
     "k_dpm_2": generation.SAMPLER_K_DPM_2,
     "k_dpm_2_ancestral": generation.SAMPLER_K_DPM_2_ANCESTRAL,
     "k_lms": generation.SAMPLER_K_LMS,
+    "dpm_fast": generation.SAMPLER_DPM_FAST,
+    "dpm_adaptive": generation.SAMPLER_DPM_ADAPTIVE,
     "dpmspp_1": generation.SAMPLER_DPMSOLVERPP_1ORDER,
     "dpmspp_2": generation.SAMPLER_DPMSOLVERPP_2ORDER,
     "dpmspp_3": generation.SAMPLER_DPMSOLVERPP_3ORDER,
+    "dpmspp_2s_ancestral": generation.SAMPLER_DPMSOLVERPP_2S_ANCESTRAL,
+    "dpmspp_sde": generation.SAMPLER_DPMSOLVERPP_SDE,
+    "dpmspp_2m": generation.SAMPLER_DPMSOLVERPP_2M,
+}
+
+NOISE_TYPES: Dict[str, int] = {
+    "normal": generation.SAMPLER_NOISE_NORMAL,
+    "brownian": generation.SAMPLER_NOISE_BROWNIAN,
 }
 
 def get_sampler_from_str(s: str) -> generation.DiffusionSampler:
@@ -70,6 +80,16 @@ def get_sampler_from_str(s: str) -> generation.DiffusionSampler:
     
     return algorithm
    
+def get_noise_type_from_str(s: str) -> generation.SamplerNoiseType:
+    noise_key = s.lower().strip()
+    noise_type = NOISE_TYPES.get(noise_key, None)
+
+    if noise_type is None:
+        raise ValueError(f"unknown noise type {s}")
+
+    return noise_type
+
+
 def open_images(
     images: Union[
         Sequence[Tuple[str, generation.Artifact]],
@@ -244,6 +264,13 @@ class StabilityInference:
         end_schedule: float = 0.01,
         cfg_scale: float = 7.0,
         eta: float = 0.0,
+        churn: float = None,
+        churn_tmin: float = None,
+        churn_tmax: float = None,
+        sigma_min: float = None,
+        sigma_max: float = None,
+        karras_rho: float = None,
+        noise_type: int = None,
         sampler: generation.DiffusionSampler = generation.SAMPLER_K_LMS,
         steps: int = 50,
         seed: Union[Sequence[int], int] = 0,
@@ -309,12 +336,34 @@ class StabilityInference:
                 parameters=generation.PromptParameters(weight=-1)
             )]
 
+        sampler_parameters = dict(
+            cfg_scale=cfg_scale
+        )
+
+        if eta: sampler_parameters['eta'] = eta
+        if noise_type: sampler_parameters['noise_type'] = noise_type
+
+        if churn:
+            churn_parameters = dict(
+                churn=churn
+            )
+
+            if churn_tmin: churn_parameters["churn_tmin"] = churn_tmin
+            if churn_tmax: churn_parameters["churn_tmax"] = churn_tmax
+
+            sampler_parameters["churn"] = generation.ChurnSettings(**churn_parameters)
+
+        sigma_parameters = {}
+
+        if sigma_min: sigma_parameters['sigma_min'] = sigma_min
+        if sigma_max: sigma_parameters['sigma_max'] = sigma_max
+        if karras_rho: sigma_parameters['karras_rho'] = karras_rho
+
+        sampler_parameters["sigma"] = generation.SigmaParameters(**sigma_parameters)
+
         step_parameters = dict(
             scaled_step=0,
-            sampler=generation.SamplerParameters(
-                cfg_scale=cfg_scale,
-                eta=eta,
-            ),
+            sampler=generation.SamplerParameters(**sampler_parameters)
         )
 
         # NB: Specifying schedule when there's no init image causes washed out results
@@ -495,7 +544,28 @@ if __name__ == "__main__":
         help="[k_lms] (" + ", ".join(SAMPLERS.keys()) + ")",
     )
     parser.add_argument(
-        "--eta", "-E", type=float, default=None, help="[0.0] ETA factor (for DDIM scheduler)"
+        "--eta", "-E", type=float, default=None, help="[None] ETA factor (for DDIM scheduler)"
+    )
+    parser.add_argument(
+        "--churn", type=float, default=None, help="[None] churn factor (for Euler, Heun, DPM2 scheduler)"
+    )
+    parser.add_argument(
+        "--churn_tmin", type=float, default=None, help="[None] churn sigma minimum (for Euler, Heun, DPM2 scheduler)"
+    )
+    parser.add_argument(
+        "--churn_tmax", type=float, default=None, help="[None] churn sigma maximum (for Euler, Heun, DPM2 scheduler)"
+    )
+    parser.add_argument(
+        "--sigma_min", type=float, default=None, help="[None] use this sigma min"
+    )
+    parser.add_argument(
+        "--sigma_max", type=float, default=None, help="[None] use this sigma max"
+    )
+    parser.add_argument(
+        "--karras_rho", type=float, default=None, help="[None] use Karras sigma schedule with this Rho"
+    )
+    parser.add_argument(
+        "--noise_type", type=str, default="normal", help="[normal] (" + ", ".join(NOISE_TYPES.keys()) + ")"
     )
     parser.add_argument(
         "--steps", "-s", type=int, default=50, help="[50] number of steps"
@@ -571,6 +641,13 @@ if __name__ == "__main__":
         "guidance_strength": args.guidance_strength,
         "sampler": get_sampler_from_str(args.sampler),
         "eta": args.eta,
+        "churn": args.churn,
+        "churn_tmin": args.churn_tmin,
+        "churn_tmax": args.churn_tmax,
+        "sigma_min": args.sigma_min,
+        "sigma_max": args.sigma_max,
+        "karras_rho": args.karras_rho,
+        "noise_type": get_noise_type_from_str(args.noise_type),
         "steps": args.steps,
         "seed": args.seed,
         "samples": args.num_samples,
