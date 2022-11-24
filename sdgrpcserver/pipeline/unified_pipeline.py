@@ -187,7 +187,8 @@ class CommonScheduler:
         churn: float = None,
         churn_tmin: float = None,
         churn_tmax: float = None,
-        noise_type: SCHEDULER_NOISE_TYPE = "normal"
+        noise_type: SCHEDULER_NOISE_TYPE = "normal",
+        prediction_type = "epsilon"
     ):
         raise NotImplementedError("Subclass to implement")
 
@@ -263,7 +264,8 @@ class DiffusersSchedulerBase(CommonScheduler):
         churn: float = None,
         churn_tmin: float = None,
         churn_tmax: float = None,
-        noise_type: SCHEDULER_NOISE_TYPE = "normal"
+        noise_type: SCHEDULER_NOISE_TYPE = "normal",
+        prediction_type = "epsilon"
     ):
         if self.eps_unet is None:
             raise ValueError("Unet needs to be set before timesteps")
@@ -392,6 +394,10 @@ class KDiffusionUNetWrapper(k_external.DiscreteEpsDDPMDenoiser):
     def __init__(self, unet: UNet2DConditionModel, alphas_cumprod: Tensor):
         super().__init__(unet, alphas_cumprod, quantize=True)
 
+class KDiffusionVUNetWrapper(k_external.DiscreteVDDPMDenoiser):
+    def __init__(self, unet: UNet2DConditionModel, alphas_cumprod: Tensor):
+        super().__init__(unet, alphas_cumprod, quantize=True)
+
 class KDiffusionScheduler(CommonScheduler):
 
     def __init__(self, *args, **kargs):
@@ -431,7 +437,8 @@ class KDiffusionScheduler(CommonScheduler):
         churn: float = None,
         churn_tmin: float = None,
         churn_tmax: float = None,
-        noise_type: SCHEDULER_NOISE_TYPE = "normal"
+        noise_type: SCHEDULER_NOISE_TYPE = "normal",
+        prediction_type = "epsilon"
     ):
         if self.eps_unet is None:
             raise ValueError("Unet needs to be set before timesteps")
@@ -449,8 +456,12 @@ class KDiffusionScheduler(CommonScheduler):
         alphas = self.get_alphas(betas)
         alphas_cumprod = self.get_alphas_cumprod(alphas)
 
-        self._unet: KDiffusionUNetWrapper = KDiffusionUNetWrapper(self.eps_unet, alphas_cumprod)
-        self.unet: KDiffusionUNet = self._unet
+        if prediction_type == "velocity":
+            self._unet = KDiffusionVUNetWrapper(self.eps_unet, alphas_cumprod)
+        else:
+            self._unet = KDiffusionUNetWrapper(self.eps_unet, alphas_cumprod)
+
+        self.unet = self._unet
 
         # clamp sigma_min and sigma_max
         if sigma_min is not None: sigma_min = max(self._unet.sigma_min, sigma_min)
@@ -1640,6 +1651,7 @@ class UnifiedPipeline(DiffusionPipeline):
         guidance_scale: float = 7.5,
         negative_prompt: Optional[UnifiedPipelinePromptType] = None,
         num_images_per_prompt: Optional[int] = 1,
+        prediction_type: Optional[str] = "epsilon",
         eta: Optional[float] = None,
         churn: Optional[float] = None,
         churn_tmin: Optional[float] = None,
@@ -1887,10 +1899,15 @@ class UnifiedPipeline(DiffusionPipeline):
 
 
         if self.clip_model is not None and clip_guidance_scale > 0:
+            max_length = min(
+                self.tokenizer.model_max_length,
+                self.text_encoder.config.max_position_embeddings
+            )
+
             clip_text_input = self.tokenizer(
                 clip_prompt.as_unweighted_string(),
                 padding="max_length",
-                max_length=self.tokenizer.model_max_length,
+                max_length=max_length,
                 truncation=True,
                 return_tensors="pt",
             ).input_ids.to(self.device)
@@ -1942,6 +1959,7 @@ class UnifiedPipeline(DiffusionPipeline):
 
         timestep_args = {}
         if init_image is not None: timestep_args["strength"] = strength
+        if prediction_type: timestep_args["prediction_type"] = prediction_type
         if eta: timestep_args["eta"] = eta
         if churn: timestep_args["churn"] = churn
         if churn_tmin: timestep_args["churn_tmin"] = churn_tmin

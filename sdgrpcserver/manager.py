@@ -173,7 +173,7 @@ class PipelineWrapper(object):
             for key, value in self._pipeline.__dict__.items():
                 if isinstance(value, torch.nn.Module): accelerate.cpu_offload(value, self.mode.device)
 
-        prediction_type = getattr(self._pipeline.scheduler, "prediction_type", "epsilon")
+        self.prediction_type = getattr(self._pipeline.scheduler, "prediction_type", "epsilon")
 
         self._plms = self._prepScheduler(PNDMScheduler(
                 beta_start=0.00085, 
@@ -194,7 +194,7 @@ class PipelineWrapper(object):
                 beta_schedule="scaled_linear", 
                 clip_sample=False, 
                 set_alpha_to_one=False,
-                prediction_type=prediction_type
+                prediction_type=self.prediction_type
             ))
         self._euler = self._prepScheduler(EulerDiscreteScheduler(
                 beta_start=0.00085, 
@@ -248,6 +248,32 @@ class PipelineWrapper(object):
                 num_train_timesteps=1000,
                 solver_order=3
         ))
+
+        # Common set of samplers that can handle epsilon or velocity unets
+        self._samplers = {
+            generation_pb2.SAMPLER_DDIM: self._ddim,
+            generation_pb2.SAMPLER_K_LMS: k_sampling.sample_lms, # self._klms
+            generation_pb2.SAMPLER_K_EULER: k_sampling.sample_euler, # self._euler
+            generation_pb2.SAMPLER_K_EULER_ANCESTRAL: k_sampling.sample_euler_ancestral, # self._eulera
+            generation_pb2.SAMPLER_K_DPM_2: k_sampling.sample_dpm_2, # self._dpm2
+            generation_pb2.SAMPLER_K_DPM_2_ANCESTRAL: k_sampling.sample_dpm_2_ancestral, # self._dpm2a
+            generation_pb2.SAMPLER_K_HEUN: k_sampling.sample_heun, # self._heun
+            generation_pb2.SAMPLER_DPM_FAST: k_sampling.sample_dpm_fast,
+            generation_pb2.SAMPLER_DPM_ADAPTIVE: k_sampling.sample_dpm_adaptive,
+            generation_pb2.SAMPLER_DPMSOLVERPP_2S_ANCESTRAL: k_sampling.sample_dpmpp_2s_ancestral,
+            generation_pb2.SAMPLER_DPMSOLVERPP_SDE: k_sampling.sample_dpmpp_sde,
+            generation_pb2.SAMPLER_DPMSOLVERPP_2M: k_sampling.sample_dpmpp_2m,
+        }
+
+        # If we're not using a velocity unet, add in the samplers that can only handle epsilon too
+        if self.prediction_type != "velocity":
+            self._samplers = {
+                **self._samplers,
+                generation_pb2.SAMPLER_DDPM: self._plms,
+                generation_pb2.SAMPLER_DPMSOLVERPP_1ORDER: self._dpmspp1,
+                generation_pb2.SAMPLER_DPMSOLVERPP_2ORDER: self._dpmspp2,
+                generation_pb2.SAMPLER_DPMSOLVERPP_3ORDER: self._dpmspp3,
+            }
 
     def _prepScheduler(self, scheduler):
         if hasattr(scheduler.config, "steps_offset") and scheduler.config.steps_offset != 1:
@@ -304,24 +330,7 @@ class PipelineWrapper(object):
         if self.mode.device == "cuda": torch.cuda.empty_cache()
 
     def get_samplers(self):
-        return {
-            generation_pb2.SAMPLER_DDPM: self._plms,
-            generation_pb2.SAMPLER_K_LMS: k_sampling.sample_lms, # self._klms
-            generation_pb2.SAMPLER_DDIM: self._ddim,
-            generation_pb2.SAMPLER_K_EULER: k_sampling.sample_euler, # self._euler
-            generation_pb2.SAMPLER_K_EULER_ANCESTRAL: k_sampling.sample_euler_ancestral, # self._eulera
-            generation_pb2.SAMPLER_K_DPM_2: k_sampling.sample_dpm_2, # self._dpm2
-            generation_pb2.SAMPLER_K_DPM_2_ANCESTRAL: k_sampling.sample_dpm_2_ancestral, # self._dpm2a
-            generation_pb2.SAMPLER_K_HEUN: k_sampling.sample_heun, # self._heun
-            generation_pb2.SAMPLER_DPMSOLVERPP_1ORDER: self._dpmspp1,
-            generation_pb2.SAMPLER_DPMSOLVERPP_2ORDER: self._dpmspp2,
-            generation_pb2.SAMPLER_DPMSOLVERPP_3ORDER: self._dpmspp3,
-            generation_pb2.SAMPLER_DPM_FAST: k_sampling.sample_dpm_fast,
-            generation_pb2.SAMPLER_DPM_ADAPTIVE: k_sampling.sample_dpm_adaptive,
-            generation_pb2.SAMPLER_DPMSOLVERPP_2S_ANCESTRAL: k_sampling.sample_dpmpp_2s_ancestral,
-            generation_pb2.SAMPLER_DPMSOLVERPP_SDE: k_sampling.sample_dpmpp_sde,
-            generation_pb2.SAMPLER_DPMSOLVERPP_2M: k_sampling.sample_dpmpp_2m,
-        }
+        return self._samplers
 
     def generate(
         self,
@@ -402,6 +411,7 @@ class PipelineWrapper(object):
             guidance_scale=guidance_scale,
             clip_guidance_scale=clip_guidance_scale,
             clip_guidance_base=clip_guidance_base,
+            prediction_type=self.prediction_type,
             eta=eta,
             churn=churn,
             churn_tmin=churn_tmin,

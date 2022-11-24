@@ -13,11 +13,16 @@ class BasicTextEmbedding(TextEmbedding):
     def _get_embeddedings(self, strings, label):
         tokenizer = self.pipe.tokenizer
 
+        max_length = min(
+            tokenizer.model_max_length,
+            self.pipe.text_encoder.config.max_position_embeddings
+        )
+
         # get prompt text embeddings
         text_inputs = tokenizer(
             strings,
             padding="max_length",
-            max_length=77, #tokenizer.model_max_length,
+            max_length=max_length,
             return_tensors="pt",
         )
         text_input_ids = text_inputs.input_ids
