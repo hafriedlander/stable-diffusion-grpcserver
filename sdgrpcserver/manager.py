@@ -173,6 +173,8 @@ class PipelineWrapper(object):
             for key, value in self._pipeline.__dict__.items():
                 if isinstance(value, torch.nn.Module): accelerate.cpu_offload(value, self.mode.device)
 
+        prediction_type = getattr(self._pipeline.scheduler, "prediction_type", "epsilon")
+
         self._plms = self._prepScheduler(PNDMScheduler(
                 beta_start=0.00085, 
                 beta_end=0.012, 
@@ -191,7 +193,8 @@ class PipelineWrapper(object):
                 beta_end=0.012, 
                 beta_schedule="scaled_linear", 
                 clip_sample=False, 
-                set_alpha_to_one=False
+                set_alpha_to_one=False,
+                prediction_type=prediction_type
             ))
         self._euler = self._prepScheduler(EulerDiscreteScheduler(
                 beta_start=0.00085, 
@@ -277,7 +280,7 @@ class PipelineWrapper(object):
 
         self._previous = {}
 
-        module_names, _ = self._pipeline.extract_init_dict(dict(self._pipeline.config))
+        module_names, *_ = self._pipeline.extract_init_dict(dict(self._pipeline.config))
         for name in module_names.keys():
             module = getattr(self._pipeline, name)
             if isinstance(module, torch.nn.Module):
@@ -290,7 +293,7 @@ class PipelineWrapper(object):
         if self._previous is None: 
             raise Exception("Deactivate called without previous activate")
 
-        module_names, _ = self._pipeline.extract_init_dict(dict(self._pipeline.config))
+        module_names, *_ = self._pipeline.extract_init_dict(dict(self._pipeline.config))
         for name in module_names.keys():
             module = self._previous.get(name, None)
             if module and isinstance(module, torch.nn.Module):
@@ -385,7 +388,6 @@ class PipelineWrapper(object):
                 scheduler = samplers.get(sampler, None)
 
         if not scheduler: raise NotImplementedError("Scheduler not implemented")
-        print(scheduler)
 
         self._pipeline.scheduler = scheduler
         self._pipeline.progress_bar = ProgressBarWrapper(progress_callback, stop_event, suppress_output)

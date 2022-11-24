@@ -1499,6 +1499,9 @@ class UnifiedPipeline(DiffusionPipeline):
         self._graft_factor = 0.8
         self._structured_diffusion = False
 
+        # Some models use a different text embedding layer
+        self._text_embedding_layer = "final"
+
         self.register_modules(
             vae=vae,
             text_encoder=text_encoder,
@@ -1587,6 +1590,8 @@ class UnifiedPipeline(DiffusionPipeline):
                         raise ValueError(f"Unknown option {subkey}: {subval} passed as part of clip settings")
             elif key == "clip_vae_grad":
                 set_requires_grad(self.vae, bool(value))
+            elif key == "text_embedding_layer":
+                self._text_embedding_layer = str(value)
             else:
                 raise ValueError(f"Unknown option {key}: {value} passed to UnifiedPipeline")
 
@@ -1603,6 +1608,10 @@ class UnifiedPipeline(DiffusionPipeline):
                 a number is provided, uses as many slices as `attention_head_dim // slice_size`. In this case,
                 `attention_head_dim` must be a multiple of `slice_size`.
         """
+        if isinstance(self.unet.config.attention_head_dim, list):
+            print("Attention slicing currently doesn't work with Stable Diffusion 2.0. Ignoring.")
+            return
+
         if slice_size == "auto":
             # half the attention head size is usually a good trade-off between
             # speed and memory
@@ -1797,7 +1806,7 @@ class UnifiedPipeline(DiffusionPipeline):
 
 
         # Get the latents dtype based on the text_embeddings dtype
-        text_embedding_calculator = BasicTextEmbedding(self)
+        text_embedding_calculator = BasicTextEmbedding(self, layer=self._text_embedding_layer)
         text_embeddings, uncond_embeddings = text_embedding_calculator.get_embeddings(
             prompt=prompt,
             uncond_prompt=negative_prompt if do_classifier_free_guidance else None,
@@ -1812,18 +1821,18 @@ class UnifiedPipeline(DiffusionPipeline):
         else:
             unet = self.unet
 
-        if self._structured_diffusion:
-            text_embedding_calculator = StructuredTextEmbedding(self, "align_seq")
-        else:
-            # AFAIK there's no scenario where just BasicTextEmbedding is better than LPWTextEmbedding
-            # text_embedding_calculator = BasicTextEmbedding(self)
-            text_embedding_calculator = LPWTextEmbedding(self, max_embeddings_multiples=max_embeddings_multiples)
+        # if self._structured_diffusion:
+        #     text_embedding_calculator = StructuredTextEmbedding(self, "align_seq")
+        # else:
+        #     # AFAIK there's no scenario where just BasicTextEmbedding is better than LPWTextEmbedding
+        #     # text_embedding_calculator = BasicTextEmbedding(self)
+        #     text_embedding_calculator = LPWTextEmbedding(self, max_embeddings_multiples=max_embeddings_multiples)
 
-        # get unconditional embeddings for classifier free guidance
-        text_embeddings, uncond_embeddings = text_embedding_calculator.get_embeddings(
-            prompt=prompt,
-            uncond_prompt=negative_prompt if do_classifier_free_guidance else None,
-        )
+        # # get unconditional embeddings for classifier free guidance
+        # text_embeddings, uncond_embeddings = text_embedding_calculator.get_embeddings(
+        #     prompt=prompt,
+        #     uncond_prompt=negative_prompt if do_classifier_free_guidance else None,
+        # )
 
         text_embeddings = text_embedding_calculator.repeat(text_embeddings, num_images_per_prompt)
         # unet_g is the guided unet, for when we aren't doing CFG, or we want to run seperately to unet_u
