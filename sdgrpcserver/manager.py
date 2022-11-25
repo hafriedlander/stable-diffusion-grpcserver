@@ -531,7 +531,11 @@ class EngineManager(object):
             # We always download the file ourselves, rather than passing model path through to from_pretrained
             # This lets us control the behaviour if the model fails to download
             extra_kwargs={}
-            extra_kwargs["ignore_patterns"] = ["*.ckpt"]
+            
+            ignore_patterns = opts.get('ignore_patterns', [])
+            if isinstance(ignore_patterns, str): ignore_patterns = [ignore_patterns]
+            extra_kwargs["ignore_patterns"] = ignore_patterns + ["*.ckpt"]
+
             if subfolder: extra_kwargs["allow_patterns"]=[f"{subfolder}*"]
             if use_auth_token: extra_kwargs["use_auth_token"]=use_auth_token
             if usefp16: extra_kwargs["revision"] = "fp16"

@@ -1619,14 +1619,15 @@ class UnifiedPipeline(DiffusionPipeline):
                 a number is provided, uses as many slices as `attention_head_dim // slice_size`. In this case,
                 `attention_head_dim` must be a multiple of `slice_size`.
         """
-        if isinstance(self.unet.config.attention_head_dim, list):
-            print("Attention slicing currently doesn't work with Stable Diffusion 2.0. Ignoring.")
-            return
-
         if slice_size == "auto":
-            # half the attention head size is usually a good trade-off between
-            # speed and memory
-            slice_size = self.unet.config.attention_head_dim // 2
+            if isinstance(self.unet.config.attention_head_dim, int):
+                # half the attention head size is usually a good trade-off between
+                # speed and memory
+                slice_size = self.unet.config.attention_head_dim // 2
+            else:
+                # if `attention_head_dim` is a list, take the smallest head size
+                slice_size = min(self.unet.config.attention_head_dim)
+
         self.unet.set_attention_slice(slice_size)
 
     def disable_attention_slicing(self):
