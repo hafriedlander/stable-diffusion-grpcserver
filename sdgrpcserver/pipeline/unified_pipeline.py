@@ -456,7 +456,7 @@ class KDiffusionScheduler(CommonScheduler):
         alphas = self.get_alphas(betas)
         alphas_cumprod = self.get_alphas_cumprod(alphas)
 
-        if prediction_type == "velocity":
+        if prediction_type == "v_prediction":
             self._unet = KDiffusionVUNetWrapper(self.eps_unet, alphas_cumprod)
         else:
             self._unet = KDiffusionUNetWrapper(self.eps_unet, alphas_cumprod)

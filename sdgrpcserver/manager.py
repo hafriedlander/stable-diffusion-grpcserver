@@ -180,7 +180,8 @@ class PipelineWrapper(object):
                 beta_end=0.012, 
                 beta_schedule="scaled_linear",
                 num_train_timesteps=1000,
-                skip_prk_steps=True
+                skip_prk_steps=True,
+                steps_offset=1,
         ))
         self._klms = self._prepScheduler(LMSDiscreteScheduler(
                 beta_start=0.00085, 
@@ -194,6 +195,7 @@ class PipelineWrapper(object):
                 beta_schedule="scaled_linear", 
                 clip_sample=False, 
                 set_alpha_to_one=False,
+                steps_offset=1,
                 prediction_type=self.prediction_type
             ))
         self._euler = self._prepScheduler(EulerDiscreteScheduler(
@@ -249,7 +251,7 @@ class PipelineWrapper(object):
                 solver_order=3
         ))
 
-        # Common set of samplers that can handle epsilon or velocity unets
+        # Common set of samplers that can handle epsilon or v_prediction unets
         self._samplers = {
             generation_pb2.SAMPLER_DDIM: self._ddim,
             generation_pb2.SAMPLER_K_LMS: k_sampling.sample_lms, # self._klms
@@ -265,8 +267,8 @@ class PipelineWrapper(object):
             generation_pb2.SAMPLER_DPMSOLVERPP_2M: k_sampling.sample_dpmpp_2m,
         }
 
-        # If we're not using a velocity unet, add in the samplers that can only handle epsilon too
-        if self.prediction_type != "velocity":
+        # If we're not using a v_prediction unet, add in the samplers that can only handle epsilon too
+        if self.prediction_type != "v_prediction":
             self._samplers = {
                 **self._samplers,
                 generation_pb2.SAMPLER_DDPM: self._plms,
@@ -529,8 +531,10 @@ class EngineManager(object):
             # We always download the file ourselves, rather than passing model path through to from_pretrained
             # This lets us control the behaviour if the model fails to download
             extra_kwargs={}
-            if subfolder: extra_kwargs["allow_patterns"]=f"{subfolder}*"
+            extra_kwargs["ignore_patterns"] = ["*.ckpt"]
+            if subfolder: extra_kwargs["allow_patterns"]=[f"{subfolder}*"]
             if use_auth_token: extra_kwargs["use_auth_token"]=use_auth_token
+            if usefp16: extra_kwargs["revision"] = "fp16"
 
             if force_redownload:
                 try:
@@ -651,7 +655,9 @@ class EngineManager(object):
 
     def _weightRetry(self, callback, *args, **kwargs):
         try: return callback(*args, **kwargs)
-        except: pass
+        except Exception as e: 
+            print(e)
+            pass
 
         return callback(*args, **kwargs, force_redownload=True)
 
@@ -667,12 +673,12 @@ class EngineManager(object):
 
     def _nakedFromLoaded(self, opts):
         local_model = self.loadModel(opts["model"][1:])
-        if not isinstance(local_model, SN): raise ValueError(f"{model} is not a pipeline, it's a {local_model}")
+        if not isinstance(local_model, SN): raise ValueError(f"Model is not a pipeline, it's a {local_model}")
         return local_model
 
     def _nakedFromWeights(self, opts, force_redownload=False):
         weight_path = self._getWeightPath(opts, force_redownload=force_redownload)
-        config_dict = DiffusionPipeline.get_config_dict(weight_path)
+        config_dict = DiffusionPipeline.load_config(weight_path)
 
         whitelist = opts.get("whitelist", None)
         if isinstance(whitelist, str): whitelist = [whitelist]
@@ -682,9 +688,14 @@ class EngineManager(object):
         if blacklist: blacklist = set(blacklist)
 
         pipeline = {}
-        for name, (library_name, class_name) in [item for item in config_dict.items() if item[0][0] != "_"]:
+
+        class_items = [item for item in config_dict.items() if isinstance(item[1], list)]
+        for name, (library_name, class_name) in class_items:
             if whitelist and name not in whitelist: continue
             if blacklist and name in blacklist: continue
+            if class_name is None:
+                pipeline[name] = None
+                continue
 
             if name == "safety_checker":
                 if self._nsfw == 'flag':
@@ -787,9 +798,6 @@ class EngineManager(object):
 
             elif klass == "UnifiedPipeline":
                 pipeline = self.fromPretrained(UnifiedPipeline, engine, extra_kwargs)
-
-            elif klass == "NewUnifiedPipeline":
-                pipeline = self.fromPretrained(NewUnifiedPipeline, engine, extra_kwargs)
 
             elif klass == "UpscalerPipeline":
                 pipeline = self.fromPretrained(UpscalerPipeline, engine, extra_kwargs)
