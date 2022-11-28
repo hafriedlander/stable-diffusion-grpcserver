@@ -343,16 +343,18 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                         answer.request_id=request.request_id
                         answer.answer_id=f"{request.request_id}-{ctr}"
 
+                        img_seed = seeds[i] if i < len(seeds) else 0
+
                         if self._supress_metadata:
                             artifact=image_to_artifact(result_image)
                         else:
                             meta["image"]["samples"] = 1
-                            meta["image"]["seed"] = [seeds[i]]
+                            meta["image"]["seed"] = [img_seed]
                             artifact=image_to_artifact(result_image, meta={"generation_parameters": json.dumps(meta)})
 
                         artifact.finish_reason=generation_pb2.FILTER if nsfw else generation_pb2.NULL
                         artifact.index=ctr
-                        artifact.seed=seeds[i]
+                        artifact.seed=img_seed
                         answer.artifacts.append(artifact)
 
                         recorder.store('pipe.generate result', artifact)

@@ -13,4 +13,4 @@
 	ignore = dirty
 [submodule "sdgrpcserver/src/diffusers"]
 	path = sdgrpcserver/src/diffusers
-	url = https://github.com/hafriedlander/diffusers.git
+	url = https://github.com/huggingface/diffusers.git

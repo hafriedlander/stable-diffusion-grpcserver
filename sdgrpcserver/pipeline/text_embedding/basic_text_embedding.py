@@ -27,13 +27,13 @@ class BasicTextEmbedding(TextEmbedding):
         )
         text_input_ids = text_inputs.input_ids
 
-        if text_input_ids.shape[-1] > tokenizer.model_max_length:
-            removed_text = tokenizer.batch_decode(text_input_ids[:, tokenizer.model_max_length :])
+        if text_input_ids.shape[-1] > max_length:
+            removed_text = tokenizer.batch_decode(text_input_ids[:, max_length :])
             logger.warning(
                 f"The following part of your {label} input was truncated because CLIP can only handle sequences up to "
-                f"{tokenizer.model_max_length} tokens: {removed_text}"
+                f"{max_length} tokens: {removed_text}"
             )
-            text_input_ids = text_input_ids[:, :tokenizer.model_max_length]
+            text_input_ids = text_input_ids[:, :max_length]
 
         text_embeddings = self.pipe.text_encoder(
             text_input_ids.to(self.pipe.device), 

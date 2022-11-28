@@ -13,7 +13,7 @@ from huggingface_hub.file_download import http_get
 
 from tqdm.auto import tqdm
 
-from transformers import PreTrainedModel, CLIPFeatureExtractor, CLIPModel
+from transformers import PreTrainedModel, CLIPFeatureExtractor, CLIPModel, CLIPTokenizer
 
 from diffusers import pipelines, ModelMixin, ConfigMixin, StableDiffusionPipeline, LMSDiscreteScheduler, PNDMScheduler
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
@@ -759,6 +759,8 @@ class EngineManager(object):
             return self.fromPretrained(CLIPFeatureExtractor, opts)
         elif name == "upscaler":
             return self.fromPretrained(NoiseLevelAndTextConditionedUpscaler, opts)
+        elif name == "tokenizer" or name == "clip_tokenizer":
+            return self.fromPretrained(CLIPTokenizer, opts)
         else:
             raise ValueError(f"Unknown model {name}")   
 
@@ -888,7 +890,10 @@ class EngineManager(object):
         if self._active and id == self._active.id: return self._active
 
         # Otherwise deactivate it
-        if self._active: self._active.deactivate()
+        if self._active: 
+            self._active.deactivate()
+            # Explicitly mark as not active, in case there's an error later
+            self._active = None 
 
         self._active = self._pipelines[id]
         self._active.activate()
