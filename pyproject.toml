@@ -45,6 +45,13 @@ dependencies = [
   "pynvml ~= 11.4.1",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "black ~= 22.10.0",
+    "flake8 ~= 6.0.0",
+    "flake8-pyproject ~= 1.2.1"
+]
+
 [project.urls]
 Home = "https://github.com/hafriedlander/stable-diffusion-grpcserver"
 
@@ -53,3 +60,11 @@ sdgrpcserver = "sdgrpcserver.server:main"
 
 [tool.flit.module]
 name = "sdgrpcserver"
+
+[tool.isort]
+profile = "black"
+
+[tool.flake8]
+max-line-length = 88
+select = "C,E,F,W,B,B950"
+extend-ignore = "E203, E501, W503"

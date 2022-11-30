@@ -128,7 +128,7 @@ dmypy.json
 
 # vscode
 .vs
-.vscode
+.vscode/*
 
 # Pycharm
 .idea
@@ -172,3 +172,4 @@ tags
 
 # Always include .gitkeep files
 !.gitkeep
+!.vscode/settings.json

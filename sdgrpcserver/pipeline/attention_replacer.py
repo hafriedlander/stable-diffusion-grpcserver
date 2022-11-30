@@ -1,11 +1,15 @@
 # Originally from https://github.com/shunk031/training-free-structured-diffusion-guidance/blob/main/tfsdg/utils/replace_layer.py
 
 import inspect
-import torch
+from typing import Type
+
 import torch.nn as nn
 from diffusers.models.attention import CrossAttention
 
-def replace_cross_attention(target: nn.Module, crossattention: nn.Module, name: str) -> None:
+
+def replace_cross_attention(
+    target: nn.Module, crossattention: Type[nn.Module], name: str
+) -> None:
     for attr_str in dir(target):
         target_attr = getattr(target, attr_str)
 
@@ -25,13 +29,18 @@ def replace_cross_attention(target: nn.Module, crossattention: nn.Module, name: 
                 "dropout": dropout,
             }
 
-            accepts_struct_attention = "struct_attention" in set(inspect.signature(crossattention.__init__).parameters.keys())
+            accepts_struct_attention = "struct_attention" in set(
+                inspect.signature(crossattention.__init__).parameters.keys()
+            )
 
             if accepts_struct_attention:
-                ca_kwargs["struct_attention"] = (attr_str == "attn2")
+                ca_kwargs["struct_attention"] = attr_str == "attn2"
 
             ca = crossattention(**ca_kwargs)
-            ca.to(device=target_attr.to_q.weight.device, dtype=target_attr.to_q.weight.dtype)
+            ca.to(
+                device=target_attr.to_q.weight.device,
+                dtype=target_attr.to_q.weight.dtype,
+            )
 
             original_params = list(target_attr.parameters())
             proposed_params = list(ca.parameters())
@@ -43,4 +52,6 @@ def replace_cross_attention(target: nn.Module, crossattention: nn.Module, name: 
             setattr(target, attr_str, ca)
 
     for name, immediate_child_module in target.named_children():
-        replace_cross_attention(target=immediate_child_module, crossattention=crossattention, name=name)
+        replace_cross_attention(
+            target=immediate_child_module, crossattention=crossattention, name=name
+        )
