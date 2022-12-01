@@ -1,41 +1,63 @@
-
-from functools import cache
-import os, warnings, traceback, math, json, importlib, inspect, tempfile
-from fnmatch import fnmatch
+import importlib
+import inspect
+import json
+import math
+import os
+import tempfile
+import traceback
+import warnings
 from copy import deepcopy
+from fnmatch import fnmatch
+from functools import cache
 from types import SimpleNamespace as SN
-from typing import Callable, List, Tuple, Optional, Union, Literal, Iterable
+from typing import Callable, Iterable, List, Literal, Optional, Tuple, Union
 
-import torch
 import accelerate
-import huggingface_hub
-from huggingface_hub.file_download import http_get
-
-from tqdm.auto import tqdm
-
-from transformers import PreTrainedModel, CLIPFeatureExtractor, CLIPModel, CLIPTokenizer
-
-from diffusers import pipelines, ModelMixin, ConfigMixin, StableDiffusionPipeline, LMSDiscreteScheduler, PNDMScheduler
-from diffusers.models import AutoencoderKL, UNet2DConditionModel
-from diffusers.configuration_utils import FrozenDict
-from diffusers.utils import deprecate, logging
-from diffusers.pipeline_utils import DiffusionPipeline
-
 import generation_pb2
+import huggingface_hub
+import torch
+from diffusers import (
+    ConfigMixin,
+    LMSDiscreteScheduler,
+    ModelMixin,
+    PNDMScheduler,
+    StableDiffusionPipeline,
+    pipelines,
+)
+from diffusers.configuration_utils import FrozenDict
+from diffusers.models import AutoencoderKL, UNet2DConditionModel
+from diffusers.pipeline_utils import DiffusionPipeline
+from diffusers.utils import deprecate, logging
+from huggingface_hub.file_download import http_get
+from tqdm.auto import tqdm
+from transformers import (
+    CLIPFeatureExtractor,
+    CLIPModel,
+    CLIPTextModel,
+    CLIPTokenizer,
+    PreTrainedModel,
+)
 
 from sdgrpcserver.k_diffusion import sampling as k_sampling
-
-from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipeline, UnifiedPipelinePromptType, UnifiedPipelineImageType, SCHEDULER_NOISE_TYPE
-from sdgrpcserver.pipeline.upscaler_pipeline import NoiseLevelAndTextConditionedUpscaler, UpscalerPipeline
-from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
-
-from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
-from sdgrpcserver.pipeline.schedulers.scheduling_dpmsolver_multistep import DPMSolverMultistepScheduler
 from sdgrpcserver.pipeline.kschedulers import *
+from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
+from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
+from sdgrpcserver.pipeline.schedulers.scheduling_dpmsolver_multistep import (
+    DPMSolverMultistepScheduler,
+)
+from sdgrpcserver.pipeline.unified_pipeline import (
+    SCHEDULER_NOISE_TYPE,
+    UnifiedPipeline,
+    UnifiedPipelineImageType,
+    UnifiedPipelinePromptType,
+)
+from sdgrpcserver.pipeline.upscaler_pipeline import (
+    NoiseLevelAndTextConditionedUpscaler,
+    UpscalerPipeline,
+)
 
 
 class ProgressBarWrapper(object):
-
     class InternalTqdm(tqdm):
         def __init__(self, progress_callback, stop_event, suppress_output, iterable):
             self._progress_callback = progress_callback
@@ -44,12 +66,13 @@ class ProgressBarWrapper(object):
 
         def update(self, n=1):
             displayed = super().update(n)
-            if displayed and self._progress_callback: self._progress_callback(**self.format_dict)
+            if displayed and self._progress_callback:
+                self._progress_callback(**self.format_dict)
             return displayed
 
         def __iter__(self):
             for x in super().__iter__():
-                if self._stop_event and self._stop_event.is_set(): 
+                if self._stop_event and self._stop_event.is_set():
                     self.set_description("ABORTED")
                     break
                 yield x
@@ -60,19 +83,29 @@ class ProgressBarWrapper(object):
         self._suppress_output = suppress_output
 
     def __call__(self, iterable):
-        return ProgressBarWrapper.InternalTqdm(self._progress_callback, self._stop_event, self._suppress_output, iterable)
-    
+        return ProgressBarWrapper.InternalTqdm(
+            self._progress_callback, self._stop_event, self._suppress_output, iterable
+        )
+
 
 class EngineMode(object):
-    def __init__(self, vram_optimisation_level=0, enable_cuda = True, enable_mps = False):
+    def __init__(self, vram_optimisation_level=0, enable_cuda=True, enable_mps=False):
         self._vramO = vram_optimisation_level
         self._enable_cuda = enable_cuda
         self._enable_mps = enable_mps
-    
+
     @property
     def device(self):
-        self._hasCuda = self._enable_cuda and getattr(torch, 'cuda', False) and torch.cuda.is_available()
-        self._hasMps = self._enable_mps and getattr(torch.backends, 'mps', False) and torch.backends.mps.is_available()
+        self._hasCuda = (
+            self._enable_cuda
+            and getattr(torch, "cuda", False)
+            and torch.cuda.is_available()
+        )
+        self._hasMps = (
+            self._enable_mps
+            and getattr(torch.backends, "mps", False)
+            and torch.backends.mps.is_available()
+        )
         return "cuda" if self._hasCuda else "mps" if self._hasMps else "cpu"
 
     @property
@@ -94,11 +127,12 @@ class BatchMode:
         self.points = json.loads(points) if isinstance(points, str) else points
         self.simplemax = simplemax
         self.safety_margin = safety_margin
-    
+
     def batchmax(self, pixels):
         if self.points:
             # If pixels less than first point, return that max
-            if pixels <= self.points[0][0]: return self.points[0][1]
+            if pixels <= self.points[0][0]:
+                return self.points[0][1]
 
             # Linear interpolate between bracketing points
             pairs = zip(self.points[:-1], self.points[1:])
@@ -109,41 +143,50 @@ class BatchMode:
 
             # Off top of points - assume max of 1
             return 1
-        
+
         if self.simplemax is not None:
             return self.simplemax
 
         return 1
 
     def run_autodetect(self, manager, resmax=2048, resstep=256):
-        torch.cuda.set_per_process_memory_fraction(1-self.safety_margin)
+        torch.cuda.set_per_process_memory_fraction(1 - self.safety_margin)
 
         pipe = manager.getPipe()
-        params = SN(height=512, width=512, cfg_scale=7.5, sampler=generation_pb2.SAMPLER_DDIM, eta=0, steps=8, strength=1, seed=-1)
+        params = SN(
+            height=512,
+            width=512,
+            cfg_scale=7.5,
+            sampler=generation_pb2.SAMPLER_DDIM,
+            eta=0,
+            steps=8,
+            strength=1,
+            seed=-1,
+        )
 
-        l = 32 # Starting value - 512x512 fails inside PyTorch at 32, no amount of VRAM can help
+        l = 32  # Starting value - 512x512 fails inside PyTorch at 32, no amount of VRAM can help
 
-        pixels=[]
-        batchmax=[]
+        pixels = []
+        batchmax = []
 
         for x in range(512, resmax, resstep):
             params.width = x
             print(f"Determining max batch for {x}")
             # Quick binary search
-            r = l # Start with the max from the previous run
+            r = l  # Start with the max from the previous run
             l = 1
 
-            while l < r-1:
-                b = (l+r)//2;
-                print (f"Trying {b}")
+            while l < r - 1:
+                b = (l + r) // 2
+                print(f"Trying {b}")
                 try:
-                    pipe.generate(["A Crocodile"]*b, params, suppress_output=True)
+                    pipe.generate(["A Crocodile"] * b, params, suppress_output=True)
                 except Exception as e:
                     r = b
                 else:
                     l = b
-            
-            print (f"Max for {x} is {l}")
+
+            print(f"Max for {x} is {l}")
 
             pixels.append(params.width * params.height)
             batchmax.append(l)
@@ -151,15 +194,17 @@ class BatchMode:
             if l == 1:
                 print(f"Max res is {x}x512")
                 break
-            
 
-        self.points=list(zip(pixels, batchmax))
-        print("To save these for next time, use these for batch_points:", json.dumps(self.points))
+        self.points = list(zip(pixels, batchmax))
+        print(
+            "To save these for next time, use these for batch_points:",
+            json.dumps(self.points),
+        )
 
         torch.cuda.set_per_process_memory_fraction(1.0)
 
-class PipelineWrapper(object):
 
+class PipelineWrapper(object):
     def __init__(self, id, mode, pipeline):
         self._id = id
         self._mode = mode
@@ -167,99 +212,126 @@ class PipelineWrapper(object):
         self._pipeline = pipeline
         self._previous = None
 
-        self._pipeline.enable_attention_slicing(1 if self.mode.attention_slice else None)
+        self._pipeline.enable_attention_slicing(
+            1 if self.mode.attention_slice else None
+        )
 
         if self.mode.cpu_offload:
             for key, value in self._pipeline.__dict__.items():
-                if isinstance(value, torch.nn.Module): accelerate.cpu_offload(value, self.mode.device)
+                if isinstance(value, torch.nn.Module):
+                    accelerate.cpu_offload(value, self.mode.device)
 
-        self.prediction_type = getattr(self._pipeline.scheduler, "prediction_type", "epsilon")
+        self.prediction_type = getattr(
+            self._pipeline.scheduler, "prediction_type", "epsilon"
+        )
 
-        self._plms = self._prepScheduler(PNDMScheduler(
-                beta_start=0.00085, 
-                beta_end=0.012, 
+        self._plms = self._prepScheduler(
+            PNDMScheduler(
+                beta_start=0.00085,
+                beta_end=0.012,
                 beta_schedule="scaled_linear",
                 num_train_timesteps=1000,
                 skip_prk_steps=True,
                 steps_offset=1,
-        ))
-        self._klms = self._prepScheduler(LMSDiscreteScheduler(
-                beta_start=0.00085, 
-                beta_end=0.012, 
+            )
+        )
+        self._klms = self._prepScheduler(
+            LMSDiscreteScheduler(
+                beta_start=0.00085,
+                beta_end=0.012,
                 beta_schedule="scaled_linear",
-                num_train_timesteps=1000
-            ))
-        self._ddim = self._prepScheduler(DDIMScheduler(
-                beta_start=0.00085, 
-                beta_end=0.012, 
-                beta_schedule="scaled_linear", 
-                clip_sample=False, 
+                num_train_timesteps=1000,
+            )
+        )
+        self._ddim = self._prepScheduler(
+            DDIMScheduler(
+                beta_start=0.00085,
+                beta_end=0.012,
+                beta_schedule="scaled_linear",
+                clip_sample=False,
                 set_alpha_to_one=False,
                 steps_offset=1,
-                prediction_type=self.prediction_type
-            ))
-        self._euler = self._prepScheduler(EulerDiscreteScheduler(
-                beta_start=0.00085, 
-                beta_end=0.012, 
+                prediction_type=self.prediction_type,
+            )
+        )
+        self._euler = self._prepScheduler(
+            EulerDiscreteScheduler(
+                beta_start=0.00085,
+                beta_end=0.012,
                 beta_schedule="scaled_linear",
-                num_train_timesteps=1000
-            ))
-        self._eulera = self._prepScheduler(EulerAncestralDiscreteScheduler(
-                beta_start=0.00085, 
-                beta_end=0.012, 
+                num_train_timesteps=1000,
+            )
+        )
+        self._eulera = self._prepScheduler(
+            EulerAncestralDiscreteScheduler(
+                beta_start=0.00085,
+                beta_end=0.012,
                 beta_schedule="scaled_linear",
-                num_train_timesteps=1000
-            ))
-        self._dpm2 = self._prepScheduler(DPM2DiscreteScheduler(
-                beta_start=0.00085, 
-                beta_end=0.012, 
+                num_train_timesteps=1000,
+            )
+        )
+        self._dpm2 = self._prepScheduler(
+            DPM2DiscreteScheduler(
+                beta_start=0.00085,
+                beta_end=0.012,
                 beta_schedule="scaled_linear",
-                num_train_timesteps=1000
-            ))
-        self._dpm2a = self._prepScheduler(DPM2AncestralDiscreteScheduler(
-                beta_start=0.00085, 
-                beta_end=0.012, 
+                num_train_timesteps=1000,
+            )
+        )
+        self._dpm2a = self._prepScheduler(
+            DPM2AncestralDiscreteScheduler(
+                beta_start=0.00085,
+                beta_end=0.012,
                 beta_schedule="scaled_linear",
-                num_train_timesteps=1000
-            ))
-        self._heun = self._prepScheduler(HeunDiscreteScheduler(
-                beta_start=0.00085, 
-                beta_end=0.012, 
+                num_train_timesteps=1000,
+            )
+        )
+        self._heun = self._prepScheduler(
+            HeunDiscreteScheduler(
+                beta_start=0.00085,
+                beta_end=0.012,
                 beta_schedule="scaled_linear",
-                num_train_timesteps=1000
-            ))
+                num_train_timesteps=1000,
+            )
+        )
 
-        self._dpmspp1 = self._prepScheduler(DPMSolverMultistepScheduler(
-                beta_start=0.00085, 
-                beta_end=0.012, 
-                beta_schedule="scaled_linear", 
+        self._dpmspp1 = self._prepScheduler(
+            DPMSolverMultistepScheduler(
+                beta_start=0.00085,
+                beta_end=0.012,
+                beta_schedule="scaled_linear",
                 num_train_timesteps=1000,
-                solver_order=1
-        ))
-        self._dpmspp2 = self._prepScheduler(DPMSolverMultistepScheduler(
-                beta_start=0.00085, 
-                beta_end=0.012, 
-                beta_schedule="scaled_linear", 
+                solver_order=1,
+            )
+        )
+        self._dpmspp2 = self._prepScheduler(
+            DPMSolverMultistepScheduler(
+                beta_start=0.00085,
+                beta_end=0.012,
+                beta_schedule="scaled_linear",
                 num_train_timesteps=1000,
-                solver_order=2
-        ))
-        self._dpmspp3 = self._prepScheduler(DPMSolverMultistepScheduler(
-                beta_start=0.00085, 
-                beta_end=0.012, 
-                beta_schedule="scaled_linear", 
+                solver_order=2,
+            )
+        )
+        self._dpmspp3 = self._prepScheduler(
+            DPMSolverMultistepScheduler(
+                beta_start=0.00085,
+                beta_end=0.012,
+                beta_schedule="scaled_linear",
                 num_train_timesteps=1000,
-                solver_order=3
-        ))
+                solver_order=3,
+            )
+        )
 
         # Common set of samplers that can handle epsilon or v_prediction unets
         self._samplers = {
             generation_pb2.SAMPLER_DDIM: self._ddim,
-            generation_pb2.SAMPLER_K_LMS: k_sampling.sample_lms, # self._klms
-            generation_pb2.SAMPLER_K_EULER: k_sampling.sample_euler, # self._euler
-            generation_pb2.SAMPLER_K_EULER_ANCESTRAL: k_sampling.sample_euler_ancestral, # self._eulera
-            generation_pb2.SAMPLER_K_DPM_2: k_sampling.sample_dpm_2, # self._dpm2
-            generation_pb2.SAMPLER_K_DPM_2_ANCESTRAL: k_sampling.sample_dpm_2_ancestral, # self._dpm2a
-            generation_pb2.SAMPLER_K_HEUN: k_sampling.sample_heun, # self._heun
+            generation_pb2.SAMPLER_K_LMS: k_sampling.sample_lms,  # self._klms
+            generation_pb2.SAMPLER_K_EULER: k_sampling.sample_euler,  # self._euler
+            generation_pb2.SAMPLER_K_EULER_ANCESTRAL: k_sampling.sample_euler_ancestral,  # self._eulera
+            generation_pb2.SAMPLER_K_DPM_2: k_sampling.sample_dpm_2,  # self._dpm2
+            generation_pb2.SAMPLER_K_DPM_2_ANCESTRAL: k_sampling.sample_dpm_2_ancestral,  # self._dpm2a
+            generation_pb2.SAMPLER_K_HEUN: k_sampling.sample_heun,  # self._heun
             generation_pb2.SAMPLER_DPM_FAST: k_sampling.sample_dpm_fast,
             generation_pb2.SAMPLER_DPM_ADAPTIVE: k_sampling.sample_dpm_adaptive,
             generation_pb2.SAMPLER_DPMSOLVERPP_2S_ANCESTRAL: k_sampling.sample_dpmpp_2s_ancestral,
@@ -278,7 +350,10 @@ class PipelineWrapper(object):
             }
 
     def _prepScheduler(self, scheduler):
-        if hasattr(scheduler.config, "steps_offset") and scheduler.config.steps_offset != 1:
+        if (
+            hasattr(scheduler.config, "steps_offset")
+            and scheduler.config.steps_offset != 1
+        ):
             deprecation_message = (
                 f"The configuration file of this scheduler: {scheduler} is outdated. `steps_offset`"
                 f" should be set to 1 instead of {scheduler.config.steps_offset}. Please make sure "
@@ -287,7 +362,9 @@ class PipelineWrapper(object):
                 " it would be very nice if you could open a Pull request for the `scheduler/scheduler_config.json`"
                 " file"
             )
-            deprecate("steps_offset!=1", "1.0.0", deprecation_message, standard_warn=False)
+            deprecate(
+                "steps_offset!=1", "1.0.0", deprecation_message, standard_warn=False
+            )
             new_config = dict(scheduler.config)
             new_config["steps_offset"] = 1
             scheduler._internal_dict = FrozenDict(new_config)
@@ -295,15 +372,18 @@ class PipelineWrapper(object):
         return scheduler
 
     @property
-    def id(self): return self._id
+    def id(self):
+        return self._id
 
     @property
-    def mode(self): return self._mode
+    def mode(self):
+        return self._mode
 
     def activate(self):
-        if self.mode.cpu_offload: return
+        if self.mode.cpu_offload:
+            return
 
-        if self._previous is not None: 
+        if self._previous is not None:
             raise Exception("Activate called without previous deactivate")
 
         self._previous = {}
@@ -316,9 +396,10 @@ class PipelineWrapper(object):
                 setattr(self._pipeline, name, deepcopy(module).to(self.mode.device))
 
     def deactivate(self):
-        if self.mode.cpu_offload: return
+        if self.mode.cpu_offload:
+            return
 
-        if self._previous is None: 
+        if self._previous is None:
             raise Exception("Deactivate called without previous activate")
 
         module_names, *_ = self._pipeline.extract_init_dict(dict(self._pipeline.config))
@@ -326,38 +407,33 @@ class PipelineWrapper(object):
             module = self._previous.get(name, None)
             if module and isinstance(module, torch.nn.Module):
                 setattr(self._pipeline, name, module)
-                
+
         self._previous = None
-        
-        if self.mode.device == "cuda": torch.cuda.empty_cache()
+
+        if self.mode.device == "cuda":
+            torch.cuda.empty_cache()
 
     def get_samplers(self):
         return self._samplers
 
     def generate(
         self,
-
         # The prompt, negative_prompt, and number of images per prompt
         prompt: UnifiedPipelinePromptType,
         negative_prompt: Optional[UnifiedPipelinePromptType] = None,
         num_images_per_prompt: Optional[int] = 1,
-
         # The seeds - len must match len(prompt) * num_images_per_prompt if provided
         seed: Optional[Union[int, Iterable[int]]] = None,
-
         # The size - ignored if an init_image is passed
         height: int = 512,
         width: int = 512,
-
-        # Guidance control    
+        # Guidance control
         guidance_scale: float = 7.5,
         clip_guidance_scale: Optional[float] = None,
         clip_guidance_base: Optional[str] = None,
-
         # Sampler control
         sampler: generation_pb2.DiffusionSampler = None,
-        scheduler = None,
-
+        scheduler=None,
         eta: Optional[float] = None,
         churn: Optional[float] = None,
         churn_tmin: Optional[float] = None,
@@ -366,28 +442,24 @@ class PipelineWrapper(object):
         sigma_max: Optional[float] = None,
         karras_rho: Optional[float] = None,
         scheduler_noise_type: Optional[SCHEDULER_NOISE_TYPE] = "normal",
-
         num_inference_steps: int = 50,
-
         # Providing these changes from txt2img into either img2img (no mask) or inpaint (mask) mode
         init_image: Optional[UnifiedPipelineImageType] = None,
         mask_image: Optional[UnifiedPipelineImageType] = None,
         outmask_image: Optional[UnifiedPipelineImageType] = None,
-
         # The strength of the img2img or inpaint process, if init_image is provided
         strength: float = None,
-
         # Process controll
-        progress_callback=None, 
-        stop_event=None, 
-        suppress_output=False
+        progress_callback=None,
+        stop_event=None,
+        suppress_output=False,
     ):
-        generator=None
+        generator = None
 
         generator_device = "cpu" if self.mode.device == "mps" else self.mode.device
 
         if isinstance(seed, Iterable):
-            generator = [torch.Generator(generator_device).manual_seed(s) for s in seed] 
+            generator = [torch.Generator(generator_device).manual_seed(s) for s in seed]
         elif seed > 0:
             generator = torch.Generator(generator_device).manual_seed(seed)
 
@@ -398,10 +470,13 @@ class PipelineWrapper(object):
             else:
                 scheduler = samplers.get(sampler, None)
 
-        if not scheduler: raise NotImplementedError("Scheduler not implemented")
+        if not scheduler:
+            raise NotImplementedError("Scheduler not implemented")
 
         self._pipeline.scheduler = scheduler
-        self._pipeline.progress_bar = ProgressBarWrapper(progress_callback, stop_event, suppress_output)
+        self._pipeline.progress_bar = ProgressBarWrapper(
+            progress_callback, stop_event, suppress_output
+        )
 
         pipeline_args = dict(
             prompt=prompt,
@@ -428,7 +503,7 @@ class PipelineWrapper(object):
             outmask_image=outmask_image,
             strength=strength,
             output_type="tensor",
-            return_dict=False
+            return_dict=False,
         )
 
         pipeline_keys = inspect.signature(self._pipeline).parameters.keys()
@@ -436,12 +511,15 @@ class PipelineWrapper(object):
         for k, v in list(pipeline_args.items()):
             if k not in pipeline_keys:
                 if v != self_params[k].default:
-                    print(f"Warning: Pipeline doesn't understand argument {k} (set to {v}) - ignoring")
+                    print(
+                        f"Warning: Pipeline doesn't understand argument {k} (set to {v}) - ignoring"
+                    )
                 del pipeline_args[k]
 
         images = self._pipeline(**pipeline_args)
 
         return images
+
 
 def clone_model(model, share_parameters=True, share_buffers=True):
     """
@@ -453,7 +531,8 @@ def clone_model(model, share_parameters=True, share_buffers=True):
     clone = deepcopy(model)
 
     # If this isn't actually a model, return the deepcopy as is
-    if not isinstance(model, torch.nn.Module): return clone
+    if not isinstance(model, torch.nn.Module):
+        return clone
 
     for (_, source), (_, dest) in zip(model.named_modules(), clone.named_modules()):
         if share_parameters:
@@ -464,6 +543,7 @@ def clone_model(model, share_parameters=True, share_buffers=True):
                 dest.register_buffer(name, buf)
 
     return clone
+
 
 # TODO: Not here
 default_home = os.path.join(os.path.expanduser("~"), ".cache")
@@ -476,8 +556,16 @@ sd_cache_home = os.path.expanduser(
 
 
 class EngineManager(object):
-
-    def __init__(self, engines, weight_root="./weights", refresh_models=None, mode=EngineMode(), nsfw_behaviour="block", batchMode=BatchMode()):
+    def __init__(
+        self,
+        engines,
+        weight_root="./weights",
+        refresh_models=None,
+        refresh_on_error=False,
+        mode=EngineMode(),
+        nsfw_behaviour="block",
+        batchMode=BatchMode(),
+    ):
         self.engines = engines
         self._default = None
 
@@ -489,6 +577,7 @@ class EngineManager(object):
 
         self._weight_root = weight_root
         self._refresh_models = refresh_models
+        self._refresh_on_error = refresh_on_error
 
         self._mode = mode
         self._batchMode = batchMode
@@ -496,10 +585,12 @@ class EngineManager(object):
         self._token = os.environ.get("HF_API_TOKEN", True)
 
     @property
-    def mode(self): return self._mode
+    def mode(self):
+        return self._mode
 
     @property
-    def batchMode(self): return self._batchMode
+    def batchMode(self):
+        return self._batchMode
 
     def _getWeightPath(self, opts, force_recheck=False, force_redownload=False):
         # TODO: Break this up, it's too long
@@ -509,7 +600,7 @@ class EngineManager(object):
         local_path = opts.get("local_model_fp16" if usefp16 else "local_model", None)
         model_path = opts.get("model", None)
         subfolder = opts.get("subfolder", None)
-        use_auth_token=self._token if opts.get("use_auth_token", False) else False
+        use_auth_token = self._token if opts.get("use_auth_token", False) else False
         urls = opts.get("urls", None)
 
         # Keep a list of the things we tried that failed, so we can report them all in one go later
@@ -517,32 +608,49 @@ class EngineManager(object):
         failures = ["Loading model failed, because:"]
 
         if local_path:
-            test_path = local_path if os.path.isabs(local_path) else os.path.join(self._weight_root, local_path)
+            test_path = (
+                local_path
+                if os.path.isabs(local_path)
+                else os.path.join(self._weight_root, local_path)
+            )
             test_path = os.path.normpath(test_path)
-            if os.path.isdir(test_path): 
+            if os.path.isdir(test_path):
                 return test_path
             else:
                 failures.append(f"    - Local path '{test_path}' doesn't exist")
         else:
-            failures.append("    - No local path for " + ("fp16" if usefp16 else "fp32") + " model was provided")
-            
+            failures.append(
+                "    - No local path for "
+                + ("fp16" if usefp16 else "fp32")
+                + " model was provided"
+            )
 
         if model_path:
             # We always download the file ourselves, rather than passing model path through to from_pretrained
             # This lets us control the behaviour if the model fails to download
-            extra_kwargs={}
-            
-            ignore_patterns = opts.get('ignore_patterns', [])
-            if isinstance(ignore_patterns, str): ignore_patterns = [ignore_patterns]
+            extra_kwargs = {}
+
+            ignore_patterns = opts.get("ignore_patterns", [])
+            if isinstance(ignore_patterns, str):
+                ignore_patterns = [ignore_patterns]
             extra_kwargs["ignore_patterns"] = ignore_patterns + ["*.ckpt"]
 
-            if subfolder: extra_kwargs["allow_patterns"]=[f"{subfolder}*"]
-            if use_auth_token: extra_kwargs["use_auth_token"]=use_auth_token
-            if usefp16: extra_kwargs["revision"] = "fp16"
+            if subfolder:
+                extra_kwargs["allow_patterns"] = [f"{subfolder}*"]
+            if use_auth_token:
+                extra_kwargs["use_auth_token"] = use_auth_token
+            if usefp16:
+                extra_kwargs["revision"] = "fp16"
 
             if force_redownload:
                 try:
-                    repo_info = next((repo for repo in huggingface_hub.scan_cache_dir().repos if repo.repo_id==model_path))
+                    repo_info = next(
+                        (
+                            repo
+                            for repo in huggingface_hub.scan_cache_dir().repos
+                            if repo.repo_id == model_path
+                        )
+                    )
                     hashes = [revision.commit_hash for revision in repo_info.revisions]
                     huggingface_hub.scan_cache_dir().delete_revisions(*hashes).execute()
                 except:
@@ -554,35 +662,43 @@ class EngineManager(object):
             try:
                 # Try getting the cached path without connecting to internet
                 cache_path = huggingface_hub.snapshot_download(
-                    model_path, 
-                    repo_type="model", 
-                    local_files_only=True,
-                    **extra_kwargs
+                    model_path, repo_type="model", local_files_only=True, **extra_kwargs
                 )
             except FileNotFoundError:
                 attempt_download = True
             except:
-                failures.append("    - Couldn't query local HuggingFace cache. Error was:")
+                failures.append(
+                    "    - Couldn't query local HuggingFace cache. Error was:"
+                )
                 failures.append(traceback.format_exc())
 
             if self._refresh_models:
-                attempt_download = attempt_download or any((True for pattern in self._refresh_models if fnmatch(model_path, pattern)))
+                attempt_download = attempt_download or any(
+                    (
+                        True
+                        for pattern in self._refresh_models
+                        if fnmatch(model_path, pattern)
+                    )
+                )
 
             if attempt_download:
                 try:
                     cache_path = huggingface_hub.snapshot_download(
-                        model_path, 
-                        repo_type="model", 
-                        **extra_kwargs
+                        model_path, repo_type="model", **extra_kwargs
                     )
                 except:
-                    if cache_path: 
-                        print(f"Couldn't refresh cache for {model_path}. Using existing cache.")
+                    if cache_path:
+                        print(
+                            f"Couldn't refresh cache for {model_path}. Using existing cache."
+                        )
                     else:
-                        failures.append("    - Downloading from HuggingFace failed. Error was:")
+                        failures.append(
+                            "    - Downloading from HuggingFace failed. Error was:"
+                        )
                         failures.append(traceback.format_exc())
-            
-            if cache_path: return cache_path
+
+            if cache_path:
+                return cache_path
 
         else:
             failures.append("    - No remote model name was provided")
@@ -594,11 +710,15 @@ class EngineManager(object):
 
             try:
                 for name, url in urls.items():
-                    if name == "id": continue
+                    if name == "id":
+                        continue
                     full_name = os.path.join(cache_path, name)
-                    if os.path.exists(full_name): continue
+                    if os.path.exists(full_name):
+                        continue
 
-                    with tempfile.NamedTemporaryFile(mode="wb", dir=cache_path, delete=False) as temp_file:
+                    with tempfile.NamedTemporaryFile(
+                        mode="wb", dir=cache_path, delete=False
+                    ) as temp_file:
                         http_get(url, temp_file)
                         os.replace(temp_file.name, full_name)
             except:
@@ -612,24 +732,35 @@ class EngineManager(object):
     def _fromLoaded(self, klass, opts, extra_kwargs):
         parts = opts["model"][1:].split("/")
         local_model = self.loadModel(parts.pop(0))
-        if parts: local_model = getattr(local_model, parts.pop(0))
+        if parts:
+            local_model = getattr(local_model, parts.pop(0))
 
-        if isinstance(local_model, klass): 
+        if isinstance(local_model, klass):
             return clone_model(local_model)
 
         if isinstance(local_model, SN) and issubclass(klass, DiffusionPipeline):
             available = local_model.__dict__
-            expected_modules = set(inspect.signature(klass.__init__).parameters.keys()) - set(["self"])
-            modules = {k: clone_model(getattr(local_model, k)) for k in expected_modules if hasattr(local_model, k)}
+            expected_modules = set(
+                inspect.signature(klass.__init__).parameters.keys()
+            ) - set(["self"])
+            modules = {
+                k: clone_model(getattr(local_model, k))
+                for k in expected_modules
+                if hasattr(local_model, k)
+            }
             modules = {**modules, **extra_kwargs}
             return klass(**modules)
-        
-        raise ValueError(f"Error loading model - {local_model.__class__} is not an instance of {klass}")
+
+        raise ValueError(
+            f"Error loading model - {local_model.__class__} is not an instance of {klass}"
+        )
 
     def _fromWeights(self, klass, opts, extra_kwargs, force_redownload=False):
-        weight_path=self._getWeightPath(opts, force_redownload=force_redownload)
-        if self.mode.fp16: extra_kwargs["torch_dtype"]=torch.float16
-        if opts.get('subfolder', None): extra_kwargs['subfolder'] = opts.get('subfolder')
+        weight_path = self._getWeightPath(opts, force_redownload=force_redownload)
+        if self.mode.fp16:
+            extra_kwargs["torch_dtype"] = torch.float16
+        if opts.get("subfolder", None):
+            extra_kwargs["subfolder"] = opts.get("subfolder")
 
         constructor_keys = set(inspect.signature(klass.__init__).parameters.keys())
         accepts_safety_checker = "safety_checker" in constructor_keys
@@ -638,15 +769,17 @@ class EngineManager(object):
 
         if accepts_safety_checker:
             if self._nsfw == "flag":
-                extra_kwargs["safety_checker"] = self.fromPretrained(FlagOnlySafetyChecker, {**opts, "subfolder": "safety_checker"})
+                extra_kwargs["safety_checker"] = self.fromPretrained(
+                    FlagOnlySafetyChecker, {**opts, "subfolder": "safety_checker"}
+                )
             if self._nsfw == "ignore":
                 extra_kwargs["safety_checker"] = None
-        if accepts_inpaint_unet and "inpaint_unet" not in extra_kwargs: 
+        if accepts_inpaint_unet and "inpaint_unet" not in extra_kwargs:
             extra_kwargs["inpaint_unet"] = None
-        if accepts_clip_model and "clip_model" not in extra_kwargs: 
+        if accepts_clip_model and "clip_model" not in extra_kwargs:
             extra_kwargs["clip_model"] = None
 
-        # Supress warnings during pipeline load. Unfortunately there isn't a better 
+        # Supress warnings during pipeline load. Unfortunately there isn't a better
         # way to override the behaviour (beyond duplicating a huge function)
         current_log_level = logging.get_verbosity()
         logging.set_verbosity(logging.ERROR)
@@ -658,26 +791,35 @@ class EngineManager(object):
         return result
 
     def _weightRetry(self, callback, *args, **kwargs):
-        try: return callback(*args, **kwargs)
-        except Exception as e: 
-            print(e)
-            pass
+        if self._refresh_on_error:
+            try:
+                return callback(*args, **kwargs)
+            except Exception as e:
+                print(e)
+                pass
 
-        return callback(*args, **kwargs, force_redownload=True)
+            return callback(*args, **kwargs, force_redownload=True)
 
-    def fromPretrained(self, klass, opts, extra_kwargs = None):
-        if extra_kwargs is None: extra_kwargs = {}
+        else:
+            return callback(*args, **kwargs)
+
+    def fromPretrained(self, klass, opts, extra_kwargs=None):
+        if extra_kwargs is None:
+            extra_kwargs = {}
 
         model = opts.get("model", None)
         is_local = model and len(model) > 1 and model[0] == "@"
 
         # Handle copying a local model
-        if is_local: return self._fromLoaded(klass, opts, extra_kwargs)
-        else: return self._weightRetry(self._fromWeights, klass, opts, extra_kwargs)
+        if is_local:
+            return self._fromLoaded(klass, opts, extra_kwargs)
+        else:
+            return self._weightRetry(self._fromWeights, klass, opts, extra_kwargs)
 
     def _nakedFromLoaded(self, opts):
         local_model = self.loadModel(opts["model"][1:])
-        if not isinstance(local_model, SN): raise ValueError(f"Model is not a pipeline, it's a {local_model}")
+        if not isinstance(local_model, SN):
+            raise ValueError(f"Model is not a pipeline, it's a {local_model}")
         return local_model
 
     def _nakedFromWeights(self, opts, force_redownload=False):
@@ -685,26 +827,37 @@ class EngineManager(object):
         config_dict = DiffusionPipeline.load_config(weight_path)
 
         whitelist = opts.get("whitelist", None)
-        if isinstance(whitelist, str): whitelist = [whitelist]
-        if whitelist: whitelist = set(whitelist)
+        if isinstance(whitelist, str):
+            whitelist = [whitelist]
+        if whitelist:
+            whitelist = set(whitelist)
         blacklist = opts.get("blacklist", None)
-        if isinstance(blacklist, str): blacklist = [blacklist]
-        if blacklist: blacklist = set(blacklist)
+        if isinstance(blacklist, str):
+            blacklist = [blacklist]
+        if blacklist:
+            blacklist = set(blacklist)
 
         pipeline = {}
 
-        class_items = [item for item in config_dict.items() if isinstance(item[1], list)]
+        class_items = [
+            item for item in config_dict.items() if isinstance(item[1], list)
+        ]
         for name, (library_name, class_name) in class_items:
-            if whitelist and name not in whitelist: continue
-            if blacklist and name in blacklist: continue
+            if whitelist and name not in whitelist:
+                continue
+            if blacklist and name in blacklist:
+                continue
             if class_name is None:
                 pipeline[name] = None
                 continue
 
+            if library_name == "transformers" and class_name == "CLIPImageProcessor":
+                class_name = "CLIPFeatureExtractor"
+
             if name == "safety_checker":
-                if self._nsfw == 'flag':
-                    library_name = 'sdgrpcserver.pipeline.safety_checkers'
-                    class_name = 'FlagOnlySafetyChecker'
+                if self._nsfw == "flag":
+                    library_name = "sdgrpcserver.pipeline.safety_checkers"
+                    class_name = "FlagOnlySafetyChecker"
                 elif self._nsfw == "ignore":
                     pipeline[name] = None
                     continue
@@ -718,16 +871,30 @@ class EngineManager(object):
             else:
                 # else we just import it from the library.
                 library = importlib.import_module(library_name)
-                class_obj = getattr(library, class_name)
+                class_obj = getattr(library, class_name, None)
 
-            load_method_names = ['from_pretrained', 'from_config']
-            load_candidates = [getattr(class_obj, name, None) for name in load_method_names]
+                if not class_obj:
+                    if (
+                        library_name == "transformers"
+                        and class_name == "CLIPImageProcessor"
+                    ):
+                        class_obj = getattr(library, "CLIPFeatureExtractor", None)
+
+                if not class_obj:
+                    raise EnvironmentError(
+                        f"Pipeline references class {library}.{class_name} that doesn't appear to exist"
+                    )
+
+            load_method_names = ["from_pretrained", "from_config"]
+            load_candidates = [
+                getattr(class_obj, name, None) for name in load_method_names
+            ]
             load_method = [m for m in load_candidates if m is not None][0]
-            
+
             loading_kwargs = {}
 
             if self.mode.fp16 and issubclass(class_obj, torch.nn.Module):
-                loading_kwargs["torch_dtype"]=torch.float16
+                loading_kwargs["torch_dtype"] = torch.float16
 
             is_diffusers_model = issubclass(class_obj, ModelMixin)
             is_transformers_model = issubclass(class_obj, PreTrainedModel)
@@ -737,7 +904,9 @@ class EngineManager(object):
 
             # check if the module is in a subdirectory
             if os.path.isdir(os.path.join(weight_path, name)):
-                loaded_sub_model = load_method(os.path.join(weight_path, name), **loading_kwargs)
+                loaded_sub_model = load_method(
+                    os.path.join(weight_path, name), **loading_kwargs
+                )
             else:
                 # else load from the root directory
                 loaded_sub_model = load_method(weight_path, **loading_kwargs)
@@ -746,8 +915,9 @@ class EngineManager(object):
 
         return SN(**pipeline)
 
-    def buildModel(self, opts, name = None):
-        if name is None: name = opts["type"]
+    def buildModel(self, opts, name=None):
+        if name is None:
+            name = opts["type"]
 
         if name == "vae":
             return self.fromPretrained(AutoencoderKL, opts)
@@ -761,10 +931,12 @@ class EngineManager(object):
             return self.fromPretrained(NoiseLevelAndTextConditionedUpscaler, opts)
         elif name == "tokenizer" or name == "clip_tokenizer":
             return self.fromPretrained(CLIPTokenizer, opts)
+        elif name == "text_encoder" or name == "inpaint_text_encoder":
+            return self.fromPretrained(CLIPTextModel, opts)
         else:
-            raise ValueError(f"Unknown model {name}")   
+            raise ValueError(f"Unknown model {name}")
 
-    def buildNakedPipeline(self, opts, extras = None):
+    def buildNakedPipeline(self, opts, extras=None):
         model = opts.get("model", None)
         is_local = model and len(model) > 1 and model[0] == "@"
 
@@ -772,35 +944,43 @@ class EngineManager(object):
             pipeline = self._nakedFromLoaded(opts)
         else:
             pipeline = self._weightRetry(self._nakedFromWeights, opts)
-        
+
         if extras:
             args = {**pipeline.__dict__, **extras}
             return SN(**args)
         else:
             return pipeline
 
-    def buildPipeline(self, engine, naked = False):
-        extra_kwargs={}
+    def buildPipeline(self, engine, naked=False):
+        extra_kwargs = {}
 
         for name, opts in engine.get("overrides", {}).items():
-            if isinstance(opts, str): opts = { "model": opts }
+            if isinstance(opts, str):
+                opts = {"model": opts}
 
             if name == "clip":
-                extra_kwargs["clip_model"] = self.buildModel({**opts, "model": opts["model"] + "/clip_model"}, "clip_model")
-                extra_kwargs["feature_extractor"] = self.buildModel({**opts, "model": opts["model"] + "/feature_extractor"}, "feature_extractor")
+                extra_kwargs["clip_model"] = self.buildModel(
+                    {**opts, "model": opts["model"] + "/clip_model"}, "clip_model"
+                )
+                extra_kwargs["feature_extractor"] = self.buildModel(
+                    {**opts, "model": opts["model"] + "/feature_extractor"},
+                    "feature_extractor",
+                )
             else:
                 extra_kwargs[name] = self.buildModel(opts, name)
 
         if naked:
             return self.buildNakedPipeline(engine, extra_kwargs)
-        
+
         else:
             pipeline = None
 
             klass = engine.get("class", "UnifiedPipeline")
 
             if klass == "StableDiffusionPipeline":
-                pipeline = self.fromPretrained(StableDiffusionPipeline, engine, extra_kwargs)
+                pipeline = self.fromPretrained(
+                    StableDiffusionPipeline, engine, extra_kwargs
+                )
 
             elif klass == "UnifiedPipeline":
                 pipeline = self.fromPretrained(UnifiedPipeline, engine, extra_kwargs)
@@ -815,8 +995,10 @@ class EngineManager(object):
                 try:
                     pipeline.set_options(engine.get("options"))
                 except:
-                    raise ValueError(f"Engine {engine['id']} has options, but created pipeline rejected them")
-            
+                    raise ValueError(
+                        f"Engine {engine['id']} has options, but created pipeline rejected them"
+                    )
+
             return pipeline
 
     def loadModel(self, modelid):
@@ -824,19 +1006,20 @@ class EngineManager(object):
             return self._models[modelid]
 
         for engine in self.engines:
-            if not engine.get("enabled", True): continue
+            if not engine.get("enabled", True):
+                continue
 
             otherid = engine.get("model_id", None)
             if otherid is not None and otherid == modelid:
                 print(f"    - Model {modelid}...")
 
                 type = engine.get("type", "pipeline")
-                if type == "pipeline": 
+                if type == "pipeline":
                     self._models[modelid] = self.buildPipeline(engine, naked=True)
                 elif type == "clip":
                     self._models[modelid] = SN(
-                        clip_model = self.buildModel(engine, "clip_model"),
-                        feature_extractor = self.buildModel(engine, "feature_extractor"),
+                        clip_model=self.buildModel(engine, "clip_model"),
+                        feature_extractor=self.buildModel(engine, "feature_extractor"),
                     )
                 else:
                     self._models[modelid] = self.buildModel(engine)
@@ -850,22 +1033,23 @@ class EngineManager(object):
         print("Loading engines...")
 
         for engine in self.engines:
-            if not engine.get("enabled", True): continue
+            if not engine.get("enabled", True):
+                continue
 
             # Models are loaded on demand (so we don't load models that aren't referenced)
             modelid = engine.get("model_id", None)
-            if modelid is not None: continue
+            if modelid is not None:
+                continue
 
             engineid = engine["id"]
-            if engine.get("default", False): self._default = engineid
+            if engine.get("default", False):
+                self._default = engineid
 
             print(f"  - Engine {engineid}...")
             pipeline = self.buildPipeline(engine)
 
             self._pipelines[engineid] = PipelineWrapper(
-                id=engineid,
-                mode=self._mode,
-                pipeline=pipeline
+                id=engineid, mode=self._mode, pipeline=pipeline
             )
 
         if self.batchMode.autodetect:
@@ -873,8 +1057,8 @@ class EngineManager(object):
 
     def getStatus(self):
         return {
-            engine["id"]: engine["id"] in self._pipelines 
-            for engine in self.engines 
+            engine["id"]: engine["id"] in self._pipelines
+            for engine in self.engines
             if engine.get("id", False) and engine.get("enabled", False)
         }
 
@@ -884,21 +1068,20 @@ class EngineManager(object):
         TODO: Better activate / deactivate logic. Right now we just keep a max of one pipeline active.
         """
 
-        if id is None: id = self._default
+        if id is None:
+            id = self._default
 
         # If we're already active, just return it
-        if self._active and id == self._active.id: return self._active
+        if self._active and id == self._active.id:
+            return self._active
 
         # Otherwise deactivate it
-        if self._active: 
+        if self._active:
             self._active.deactivate()
             # Explicitly mark as not active, in case there's an error later
-            self._active = None 
+            self._active = None
 
         self._active = self._pipelines[id]
         self._active.activate()
 
         return self._active
-            
-
-

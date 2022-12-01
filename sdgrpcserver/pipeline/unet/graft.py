@@ -1,8 +1,8 @@
 from typing import cast
 
-import easing_functions
 import torch
 
+from sdgrpcserver.pipeline.easing import Easing
 from sdgrpcserver.pipeline.randtools import batched_rand
 from sdgrpcserver.pipeline.unet.types import (
     DiffusersSchedulerUNet,
@@ -24,17 +24,14 @@ class GraftUnets(GenericSchedulerUNet):
         self.generators = generators
         self.graft_factor = graft_factor
 
-        self.floor = 0.1
-        self.start = 0.0
-        self.end = 0.2
-        self.easing = easing_functions.QuarticEaseInOut(
-            end=1 - self.floor, duration=1 - (self.start + self.end)  # type: ignore - easing_functions takes floats just fine
-        )
+        self.easing = Easing(floor=0, start=0.1, end=0.3, easing="sine")
 
     def __call__(self, latents: XtTensor, __step, u: float) -> PX0Tensor | XtTensor:
-        if self.floor == 0 and u < self.start:
+        p = self.easing.interp(u)
+
+        if p <= 0:
             return self.unets[0](latents, __step, u=u)
-        elif u > 1 - self.end:
+        elif p >= 1:
             return self.unets[1](latents, __step, u=u)
 
         outputs = [unet(latents, __step, u=u) for unet in self.unets]
@@ -45,7 +42,6 @@ class GraftUnets(GenericSchedulerUNet):
         )
 
         # Linear blend between base and graft
-        p = self.floor + self.easing(u - self.start)
         res = cast(type(outputs[0]), torch.where(randmap >= p, outputs[0], outputs[1]))
 
         return res

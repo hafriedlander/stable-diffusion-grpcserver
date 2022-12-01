@@ -16,11 +16,11 @@ class CFGChildUnets:
     u: NoisePredictionUNet
     f: NoisePredictionUNet
 
-    def wrap_all(self, wrapper):
+    def wrap_all(self, wrapper, *args, **kwargs):
         return CFGChildUnets(
-            g=wrapper(self.g),
-            u=wrapper(self.u),
-            f=wrapper(self.f),
+            g=wrapper(self.g, *args, **kwargs),
+            u=wrapper(self.u, *args, **kwargs),
+            f=wrapper(self.f, *args, **kwargs),
         )
 
 
@@ -45,7 +45,10 @@ class CFGUnet:
         self.batch_total = batch_total
 
     def __call__(self, latents: XtTensor, t: ScheduleTimestep) -> EpsTensor:
-        latents = torch.cat([latents] * 2)
+        latents = torch.cat([latents, latents])
+
+        if isinstance(t, torch.Tensor) and t.shape:
+            t = torch.cat([t, t])
 
         noise_pred = self.cfg_unets.f(latents, t)
         noise_pred_u, noise_pred_g = noise_pred.chunk(2)

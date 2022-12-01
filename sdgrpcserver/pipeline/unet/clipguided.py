@@ -6,6 +6,7 @@ import torch
 import torchvision.transforms as T
 
 from sdgrpcserver import resize_right
+from sdgrpcserver.k_diffusion import utils as k_utils
 from sdgrpcserver.pipeline.common_scheduler import (
     DiffusersKScheduler,
     DiffusersSchedulerBase,
@@ -273,6 +274,10 @@ class ClipGuidedMode:
                         child_wrapped_unet, latents, sigma, u=u
                     )
 
+                # grads * sigma will fail if batchsize > 1 unless we match shape
+                if isinstance(sigma, torch.Tensor):
+                    sigma = k_utils.append_dims(sigma, len(res.shape))
+
                 return res + grads * (sigma**2)
 
         return wrapped_unet
@@ -397,6 +402,6 @@ class ClipGuidedMode:
             dists = dists.view([num_cutouts, latents.shape[0], -1])
             loss = dists.sum(2).mean(0).sum()
 
-        self.lossavg.append(float(loss))
+        self.lossavg.append(float(loss) / latents.shape[0])
 
         return -torch.autograd.grad(loss * (clip_guidance_scale * 500), latents)[0]

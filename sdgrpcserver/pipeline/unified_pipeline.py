@@ -54,6 +54,7 @@ from sdgrpcserver.pipeline.unet.clipguided import (
 from sdgrpcserver.pipeline.unet.core import UNetWithEmbeddings
 from sdgrpcserver.pipeline.unet.graft import GraftUnets
 from sdgrpcserver.pipeline.unet.hires_fix import HiresUnetWrapper
+from sdgrpcserver.pipeline.unet.hires_fix import match_shape as hires_match_shape
 from sdgrpcserver.pipeline.unet.types import (
     DiffusersSchedulerUNet,
     EpsTensor,
@@ -259,9 +260,11 @@ class Img2imgMode(UnifiedMode):
             latents.shape, self.generators, self.device, self.latents_dtype
         )
 
-        return self.scheduler.add_noise(
+        result = self.scheduler.add_noise(
             latents, self.image_noise, self.scheduler.start_timestep
         )
+
+        return result.to(latents.dtype)
 
     def generateLatents(self):
         init_latents = self._buildInitialLatents()
@@ -541,9 +544,16 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
 
     def _blend(self, u, orig, next):
         steppos = u
-        steppos = steppos.clamp(0, 0.9999)
 
-        iteration_mask = self.latent_blend_mask.gt(steppos).to(next.dtype)
+        if orig.shape != next.shape:
+            orig = hires_match_shape(orig, next.shape[-2:])
+
+        blend_mask = self.latent_blend_mask
+
+        if blend_mask.shape != next.shape:
+            blend_mask = hires_match_shape(blend_mask, next.shape[-2:])
+
+        iteration_mask = blend_mask.gt(steppos).to(next.dtype)
 
         return (orig * iteration_mask) + (next * (1 - iteration_mask))
 
@@ -599,21 +609,10 @@ class EnhancedRunwayInpaintMode(EnhancedInpaintMode):
 
             # TODO: This is for the hi-res adjustment, it shouldn't be here
             if masked_latents.shape != latents.shape:
-                offset2 = (masked_latents.shape[2] - latents.shape[2]) // 2
-                offset3 = (masked_latents.shape[3] - latents.shape[3]) // 2
+                inpaint_mask = hires_match_shape(inpaint_mask, latents.shape[2:])
+                masked_latents = hires_match_shape(masked_latents, latents.shape[2:])
 
-                inpaint_mask = inpaint_mask[
-                    :,
-                    :,
-                    offset2 : offset2 + latents.shape[2],
-                    offset3 : offset3 + latents.shape[3],
-                ]
-                masked_latents = masked_latents[
-                    :,
-                    :,
-                    offset2 : offset2 + latents.shape[2],
-                    offset3 : offset3 + latents.shape[3],
-                ]
+            print(latents.shape, inpaint_mask.shape, masked_latents.shape)
 
             expanded_latents = torch.cat(
                 [
@@ -800,9 +799,10 @@ class UnifiedPipeline(DiffusionPipeline):
     scheduler: SchedulerMixin
     safety_checker: StableDiffusionSafetyChecker
     feature_extractor: CLIPFeatureExtractor
-    clip_model: Optional[CLIPModel]
+    clip_model: CLIPModel
     clip_tokenizer: CLIPTokenizer
-    inpaint_unet: Optional[UNet2DConditionModel]
+    inpaint_unet: UNet2DConditionModel | None
+    inpaint_text_encoder: CLIPTokenizer | None
 
     def __init__(
         self,
@@ -813,9 +813,10 @@ class UnifiedPipeline(DiffusionPipeline):
         scheduler: SchedulerMixin,
         safety_checker: StableDiffusionSafetyChecker,
         feature_extractor: CLIPFeatureExtractor,
-        clip_model: Optional[CLIPModel] = None,
-        clip_tokenizer: Optional[CLIPTokenizer] = None,
-        inpaint_unet: Optional[UNet2DConditionModel] = None,
+        clip_model: CLIPModel | None = None,
+        clip_tokenizer: CLIPTokenizer | None = None,
+        inpaint_unet: UNet2DConditionModel | None = None,
+        inpaint_text_encoder: CLIPTokenizer | None = None,
     ):
         super().__init__()
 
@@ -839,19 +840,18 @@ class UnifiedPipeline(DiffusionPipeline):
             text_encoder=text_encoder,
             tokenizer=tokenizer,
             unet=unet,
-            inpaint_unet=inpaint_unet,
             scheduler=scheduler,
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
             clip_model=clip_model,
             clip_tokenizer=clip_tokenizer,
+            inpaint_unet=inpaint_unet,
+            inpaint_text_encoder=inpaint_text_encoder,
         )
 
         # Pull out VAE scale factor
         vae_config = cast(diffusers_types.VaeConfig, self.vae.config)
         self.vae_scale_factor: int = 2 ** (len(vae_config.block_out_channels) - 1)
-
-        self.latent_debugger = LatentDebugger(self.vae)
 
         self.clip_default_config = ClipGuidanceConfig()
 
@@ -860,6 +860,12 @@ class UnifiedPipeline(DiffusionPipeline):
             set_requires_grad(self.clip_model, False)
             set_requires_grad(self.unet, False)
             set_requires_grad(self.vae, False)
+            if self.inpaint_text_encoder:
+                set_requires_grad(self.inpaint_text_encoder, False)
+
+    @property
+    def latent_debugger(self):
+        return LatentDebugger(self.vae)
 
     def vae_decode(self, latents: torch.Tensor) -> torch.Tensor:
         """Type-fixing vae decode"""
@@ -1037,7 +1043,7 @@ class UnifiedPipeline(DiffusionPipeline):
         approx_cutouts: Optional[int] = None,
         no_cutouts: CLIP_NO_CUTOUTS_TYPE = False,
         scheduler: DiffusersSchedulerProtocol | Callable | None = None,
-        hires_fix=True,
+        hires_fix=False,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -1195,16 +1201,6 @@ class UnifiedPipeline(DiffusionPipeline):
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance: bool = guidance_scale > 1.0
 
-        # Get the latents dtype based on the text_embeddings dtype
-        text_embedding_calculator = BasicTextEmbedding(
-            self, layer=self._text_embedding_layer
-        )
-        text_embeddings, uncond_embeddings = text_embedding_calculator.get_embeddings(
-            prompt=prompt,
-            uncond_prompt=negative_prompt if do_classifier_free_guidance else None,
-        )
-        latents_dtype = text_embeddings.dtype
-
         mode_classes = []
 
         # Calculate operating mode based on arguments
@@ -1220,16 +1216,78 @@ class UnifiedPipeline(DiffusionPipeline):
         else:
             mode_classes.append(Txt2imgMode)
 
-        # Get the underlying unet.
-        # TODO: inpaint_unet is dependant on the right mode being used
+        unet_gs = []
+        unet_cfgs = []
 
-        if mask_image is not None and self.inpaint_unet is not None:
-            unet = self.inpaint_unet
-        else:
+        latents_dtype = None
+        unet_pixel_size = None
+        unet_sample_size = None
+
+        for mode_class in mode_classes:
             unet = self.unet
+            text_encoder = self.text_encoder
 
-        unet_sample_size = self.get_unet_sample_size(unet)
-        unet_pixel_size = self.get_unet_pixel_size(unet)
+            if mode_class is EnhancedRunwayInpaintMode:
+                if self.inpaint_unet is not None:
+                    unet = self.inpaint_unet
+                if self.inpaint_text_encoder is not None:
+                    text_encoder = self.inpaint_text_encoder
+
+            text_embedding_calculator = BasicTextEmbedding(
+                self, text_encoder=text_encoder, layer=self._text_embedding_layer
+            )
+
+            (
+                text_embeddings,
+                uncond_embeddings,
+            ) = text_embedding_calculator.get_embeddings(
+                prompt=prompt,
+                uncond_prompt=negative_prompt if do_classifier_free_guidance else None,
+            )
+
+            latents_dtype = text_embeddings.dtype
+            unet_sample_size = self.get_unet_sample_size(unet)
+            unet_pixel_size = self.get_unet_pixel_size(unet)
+
+            text_embeddings = text_embedding_calculator.repeat(
+                text_embeddings, num_images_per_prompt
+            )
+
+            # unet_g is the guided unet, for when we aren't doing CFG, or we want to run seperately to unet_u
+            unet_g = UNetWithEmbeddings(unet, text_embeddings)
+            unet_gs.append(unet_g)
+
+            if uncond_embeddings is not None:
+                uncond_embeddings = text_embedding_calculator.repeat(
+                    uncond_embeddings, num_images_per_prompt
+                )
+
+                unet_cfg = CFGChildUnets(
+                    g=unet_g,
+                    # unet_u is the unguided unet, for when we want to run seperately to unet_g
+                    u=UNetWithEmbeddings(unet, uncond_embeddings),
+                    # unet_f is the fused unet, for running CFG in a single execution
+                    f=UNetWithEmbeddings(
+                        unet, torch.cat([uncond_embeddings, text_embeddings])
+                    ),
+                )
+                unet_cfgs.append(unet_cfg)
+
+        assert latents_dtype is not None
+        assert unet_pixel_size is not None
+        assert unet_sample_size is not None
+
+        if width <= unet_pixel_size and height <= unet_pixel_size:
+            hires_fix = False
+
+        hires_wrapper = None
+        if hires_fix:
+            print(f"HiRes Fix, target {unet_sample_size}")
+            hires_wrapper = HiresUnetWrapper(
+                generators,
+                torch.Size([unet_sample_size, unet_sample_size]),
+                latent_debugger=self.latent_debugger,
+            )
 
         # if self._structured_diffusion:
         #     text_embedding_calculator = StructuredTextEmbedding(self, "align_seq")
@@ -1243,15 +1301,6 @@ class UnifiedPipeline(DiffusionPipeline):
         #     prompt=prompt,
         #     uncond_prompt=negative_prompt if do_classifier_free_guidance else None,
         # )
-
-        text_embeddings = text_embedding_calculator.repeat(
-            text_embeddings, num_images_per_prompt
-        )
-
-        if uncond_embeddings is not None:
-            uncond_embeddings = text_embedding_calculator.repeat(
-                uncond_embeddings, num_images_per_prompt
-            )
 
         if isinstance(scheduler, SchedulerMixin):
             scheduler_wrapper = DiffusersScheduler
@@ -1320,23 +1369,17 @@ class UnifiedPipeline(DiffusionPipeline):
                 for mode in modes
             ]
 
-        # unet_g is the guided unet, for when we aren't doing CFG, or we want to run seperately to unet_u
-        unet_g = UNetWithEmbeddings(unet, text_embeddings)
+        if unet_cfgs:
+            # if hires_wrapper:
+            #     unet_cfgs = [
+            #         unet_cfg.wrap_all(hires_wrapper.get_eps_wrapper)
+            #         for unet_cfg in unet_cfgs
+            #     ]
 
-        if do_classifier_free_guidance:
-            assert uncond_embeddings is not None
-
-            unet_cfg = CFGChildUnets(
-                g=unet_g,
-                # unet_u is the unguided unet, for when we want to run seperately to unet_g
-                u=UNetWithEmbeddings(unet, uncond_embeddings),
-                # unet_f is the fused unet, for running CFG in a single execution
-                f=UNetWithEmbeddings(
-                    unet, torch.cat([uncond_embeddings, text_embeddings])
-                ),
-            )
-
-            unet_cfgs = [unet_cfg.wrap_all(mode.wrap_unet) for mode in modes]
+            unet_cfgs = [
+                unet_cfg.wrap_all(mode.wrap_unet)
+                for unet_cfg, mode in zip(unet_cfgs, modes)
+            ]
 
             wrap_scaled_unet = getattr(cscheduler, "wrap_scaled_unet", None)
             if wrap_scaled_unet:
@@ -1349,7 +1392,10 @@ class UnifiedPipeline(DiffusionPipeline):
                 for mode, unet_cfg in zip(modes, unet_cfgs)
             ]
         else:
-            unet_gs = [mode.wrap_unet(unet_g) for mode in modes]
+            # if hires_fix:
+            #     unet_gs = [hires_wrapper.get_eps_wrapper(unet_g) for unet_g in unet_gs]
+
+            unet_gs = [mode.wrap_unet(unet_g) for unet_g, mode in zip(unet_gs, modes)]
 
             wrap_scaled_unet = getattr(cscheduler, "wrap_scaled_unet", None)
             if wrap_scaled_unet:
@@ -1408,16 +1454,9 @@ class UnifiedPipeline(DiffusionPipeline):
 
         self.latent_debugger.log("initial", 0, latents)
 
-        if width <= unet_pixel_size and height <= unet_pixel_size:
-            hires_fix = False
-
-        if hires_fix:
+        if hires_wrapper:
             print(f"HiRes Fix, target {unet_sample_size}")
-            cscheduler.unet = HiresUnetWrapper(
-                cscheduler.unet,
-                generators,
-                [*latents.shape[:2], unet_sample_size, unet_sample_size],
-            )
+            cscheduler.unet = hires_wrapper.get_generic_wrapper(cscheduler.unet)
             latents = torch.concat([latents, latents])
 
         # MAIN LOOP

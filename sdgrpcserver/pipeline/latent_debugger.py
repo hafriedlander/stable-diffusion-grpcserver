@@ -12,6 +12,8 @@ DEFAULT_ENABLED = set(
         # "blendin",
         # "blendout",
         # "small",
+        # "hires_lo",
+        # "hires_hi",
     ]
 )
 

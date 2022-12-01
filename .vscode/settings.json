@@ -1,5 +1,16 @@
 {
     "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.diagnosticMode": "workspace",
+    "python.analysis.include": [
+        "sdgrpcserver/pipeline"
+    ],
+    "python.analysis.exclude": [
+        "sdgrpcserver/pipeline/kschedulers",
+        "sdgrpcserver/pipeline/schedulers"
+    ],
+    "python.analysis.extraPaths": [
+        "sdgrpcserver/generated"
+    ],
     "python.formatting.provider": "black",
     "python.linting.enabled": true,
     "python.linting.lintOnSave": true,

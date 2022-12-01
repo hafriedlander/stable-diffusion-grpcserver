@@ -88,7 +88,7 @@ class HiresUnetGenericWrapper(GenericSchedulerUNet):
         self.generators = generators
         self.target = target
 
-        self.easing = Easing(floor=0, start=0, end=0.3, easing="sine")
+        self.easing = Easing(floor=0, start=0, end=0.3, easing="quartic")
         self.latent_debugger = latent_debugger
 
     def __call__(self, latents: XtTensor, __step, u: float) -> PX0Tensor | XtTensor:
@@ -102,6 +102,7 @@ class HiresUnetGenericWrapper(GenericSchedulerUNet):
         else:
             lo_t = hi_t = __step
 
+        self.parent.mode = "hi"
         hi = self.unet(hi_in, hi_t, u=u)
 
         # Early out if we're passed the graft stage
@@ -114,8 +115,10 @@ class HiresUnetGenericWrapper(GenericSchedulerUNet):
         offseth = (h - th) // 2
         offsetw = (w - tw) // 2
 
-        lo_in = lo_in[:, :, offseth : offseth + th, offsetw : offsetw + tw]
-        lo = self.unet(lo_in, lo_t, u=u)
+        self.parent.mode = "lo"
+        lo = self.unet(lo_in, lo_t, u=u)[
+            :, :, offseth : offseth + th, offsetw : offsetw + tw
+        ]
 
         # Crop hi and merge it back into lo
         hi_crop = hi[:, :, offseth : offseth + th, offsetw : offsetw + tw]
