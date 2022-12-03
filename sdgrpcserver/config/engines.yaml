@@ -89,7 +89,7 @@
   model: "laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
   has_fp16: False
 
-# And finally, the Waifu Diffusion V1.3 pipeline. By now everything should make sense.
+# The Waifu Diffusion V1.3 mode. By now everything should make sense.
 - model_id: "waifu-diffusion-v1-3-base"
   blacklist: "vae"
   model: "hakurei/waifu-diffusion"
@@ -98,6 +98,42 @@
   use_auth_token: False
   overrides:
     vae: "@stability-vae-ema"
+
+# Now we start specifying the Stable Diffusion 2 models. These follow 
+# the same structure as the 1.5 models above
+- model_id: "stable-diffusion-v2-inpainting"
+  model: "stabilityai/stable-diffusion-2-inpainting"
+  whitelist: ["text_encoder", "unet"]
+  local_model: "./stable-diffusion-v2-inpainting"
+  local_model_fp16: "./stable-diffusion-v2-inpainting-fp16"
+
+- model_id: "stable-diffusion-v2-base"
+  model: "stabilityai/stable-diffusion-2-base"
+  local_model: "./stable-diffusion-v2-base"
+  local_model_fp16: "./stable-diffusion-v2-base"
+  overrides:
+    inpaint_unet: "@stable-diffusion-v2-inpainting/unet"
+
+# At the moment, the higher resolution 768x768 Stable Diffusion 2 model
+# is set up as a seperate engine, as the V2 inpaint model is still 512x512
+# and sdgrpcserver can't handle mixed resolutions like that.
+- model_id: "stable-diffusion-v2-vpred"
+  model: "stabilityai/stable-diffusion-2"
+  local_model: "./stable-diffusion-v2"
+  local_model_fp16: "./stable-diffusion-v2-fp16"
+
+# This is the Inkpunk community finetune of Stable Diffusion 2. This shows
+# how to set up a grafted inpaint pipeline on a V2 base
+- model_id: 'inkpunk-diffusion'
+  model: "Envvi/Inkpunk-Diffusion"
+  has_fp16: False
+  overrides:
+    inpaint_unet:
+      model: "@stable-diffusion-v2-inpainting/unet"
+    # The Inkpunk main text_encoder is incompatible with the SD2 inpaint text encoder
+    # so we need to override that too
+    inpaint_text_encoder:
+      model: "@stable-diffusion-v2-inpainting/text_encoder"
 
 # ---- Engine definitions ----
 
@@ -122,10 +158,7 @@
   class: "UnifiedPipeline"
   # You can set various options on each engine.
   options:
-    # For now, the xformers implementation in Diffusers is not able to be run backwards
-    # so we explicitly use a reversable implementation instead
-    xformers: "reversible"
-    # And we use less cutouts than quality CLIP guidance, avoiding using the VAE entirely
+    # We use less cutouts than quality CLIP guidance, avoiding using the VAE entirely
     clip:
       approx_cutouts: 2
       vae_cutouts: 0
@@ -170,25 +203,79 @@
   description: "Stable Diffusion using the RunwayML model and our Unified pipeline"
   # This class is used to actually handle the generation.
   class: "UnifiedPipeline"
-  # You can set various options on each engine. In this case we're enabling xformers (if available)
-  options:
-    xformers: True
   # And finally we set the model to use - in this case we're just referencing an already-loaded model
   model: "@stable-diffusion-v1-5-base"
 
-# This is the main Stable Diffusion V1.5 model, but without xformers for comparison
-# Xformers is not quite seed-stable, so if seed stability is important to you, you might prefer to use this
-- id: "stable-diffusion-v1-5-noclip-noxformers"
-  # This engine is disabled by default. You can enable it by changed this to True
+# This is the Stable Diffusion V2 model with CLIP guidance enabled.
+- id: "stable-diffusion-v2-standard"
+  enabled: True
+  visible: True
+  name: "Stable Diffusion V2 w/ standard CLIP guidance"
+  description: "Stable Diffusion using the Stability V2 512x512 model, CLIP guidance (standard config) and our Unified pipeline"
+  class: "UnifiedPipeline"
+  options:
+    clip:
+      approx_cutouts: 2
+      vae_cutouts: 0
+  model: "@stable-diffusion-v2-base"
+  overrides:
+    clip: "@laion-clip-b"
+
+# This is the Stable Diffusion V2 model with CLIP guidance enabled. This configuration needs quite
+# a lot of VRAM, but is faster and produces better results if you have enough.
+- id: "stable-diffusion-v2-quality"
+  # If you'd like to test this engine is compatible with your hardware, set this to True. 
   enabled: False
   visible: True
-  name: "Stable Diffusion V1.5 without CLIP guidance or XFormers"
-  description: "Stable Diffusion using the RunwayML model and our Unified pipeline"
+  name: "Stable Diffusion V2 w/ quality CLIP guidance"
+  description: "Stable Diffusion using the Stability V2 512x512 model, CLIP guidance (quality config) and our Unified pipeline"
   class: "UnifiedPipeline"
-  model: "@stable-diffusion-v1-5-base"
+  options:
+    clip:
+      approx_cutouts: 2
+      vae_cutouts: 2
+  model: "@stable-diffusion-v2-base"
+  overrides:
+    clip: "@laion-clip-l"
+
+# This is the Stable Diffusion V2 768x768 model with CLIP guidance. This configuration needs quite
+# a lot of VRAM, but is faster and produces better results if you have enough.
+- id: "stable-diffusion-v2-vpred"
+  # If you'd like to test this engine is compatible with your hardware, set this to True. 
+  enabled: False
+  visible: True
+  name: "Stable Diffusion V2 VPred w/ quality CLIP guidance"
+  description: "Stable Diffusion using the Stability V2 768x768 model, CLIP guidance (quality config) and our Unified pipeline"
+  class: "UnifiedPipeline"
+  options:
+    clip:
+      approx_cutouts: 2
+      vae_cutouts: 2
+  model: "@stable-diffusion-v2-vpred"
+  overrides:
+    clip: "@laion-clip-l"
+
+- id: "inkpunk-diffusion"
+  # To save on initial download time, the Inkpunk Diffusion model is disabled
+  # by default. This one should work on any hardware that can run the main model though, 
+  # so anyone can enable it if they want to.
+  enabled: False
+  visible: True
+  name: "Inkpunk Diffusion"
+  description: "Stable Diffusion using the Inkpunk Diffusion model and our Unified pipeline"
+  class: "UnifiedPipeline"
+  model: "@inkpunk-diffusion"
+  options:
+    grafted_inpaint: True
+    clip:
+      approx_cutouts: 2
+      vae_cutouts: 0
+  model: "@inkpunk-diffusion"
+  overrides:
+    clip: "@laion-clip-b"
 
 # This is the standard Waifu Diffusion V1.3 model
-- id: "waifu-diffusion-v1-3"
+- id: "waifu-diffusion-v1-3-standard"
   # To save on initial download time, all the Waifu Diffusion models are disabled
   # by default. This one should work on any hardware that can run the main model though, 
   # so anyone can enable it if they want to.
@@ -197,66 +284,34 @@
   name: "Waifu Diffusion V1.3"
   description: "Stable Diffusion using the Hakurei Waifu Diffusion model and our Unified pipeline"
   class: "UnifiedPipeline"
-  options:
-    xformers: True
   model: "@waifu-diffusion-v1-3-base"
-
-# This is the Waifu Diffusion model, but with Stable Diffusion's inpainting grafted in. This generally
-# gives better results than the model-independant inpainting method, but has it's own oddities
-- id: "waifu-diffusion-v1-3-grafted"
-  enabled: False
-  visible: True
-  name: "Waifu Diffusion V1.3 Grafted"
-  description: "Waifu Diffusion with grafted inpainting"
-  class: "UnifiedPipeline"
   options:
     grafted_inpaint: True
-    # Graft factor sets the transition from base inpainting model to real model.
-    # A low graft factor means the underlying model runs longer, which can reduce discontinuity, but
-    # means less of the style of the main model comes through.
-    graft_factor: 0.8
-    xformers: True
-  model: "@waifu-diffusion-v1-3-base"
-  overrides:
-    inpaint_unet: "@stable-diffusion-inpainting/unet"
-
-# This is the Waifu Diffusion model with CLIP guidance (high vram version)
-# (Grafted inpainting doesn't work very well with CLIP, so I recommend low CLIP guidance when inpainting)
-- id: "waifu-diffusion-v1-3-grafted-clip"
-  enabled: False
-  visible: True
-  name: "Waifu Diffusion V1.3 Grafted"
-  description: "Waifu Diffusion with grafted inpainting and CLIP guidance"
-  class: "UnifiedPipeline"
-  options:
-    grafted_inpaint: True
-    graft_factor: 0.8
-    clip:
-      approx_cutouts: 2
-      vae_cutouts: 2
-  model: "@waifu-diffusion-v1-3-base"
-  overrides:
-    inpaint_unet: "@stable-diffusion-inpainting/unet"
-    clip: "@laion-clip-b"
-
-# This is the Waifu Diffusion model with SD grafted inpaint and CLIP guidance (low vram version)
-- id: "waifu-diffusion-v1-3-grafted-clip-small"
-  enabled: False
-  visible: True
-  name: "Waifu Diffusion V1.3 Grafted"
-  description: "Waifu Diffusion with grafted inpainting and CLIP guidance"
-  class: "UnifiedPipeline"
-  options:
-    grafted_inpaint: True
-    graft_factor: 0.8
-    xformers: "reversible"
     clip:
       approx_cutouts: 2
       vae_cutouts: 0
-  model: "@waifu-diffusion-v1-3-base"
   overrides:
     inpaint_unet: "@stable-diffusion-inpainting/unet"
     clip: "@laion-clip-b"
+
+# This is the quality (high VRAM) Waifu Diffusion V1.3 model
+- id: "waifu-diffusion-v1-3-quality"
+  # To save on initial download time, all the Waifu Diffusion models are disabled
+  # by default.
+  enabled: False
+  visible: True
+  name: "Waifu Diffusion V1.3"
+  description: "Stable Diffusion using the Hakurei Waifu Diffusion model and our Unified pipeline"
+  class: "UnifiedPipeline"
+  model: "@waifu-diffusion-v1-3-base"
+  options:
+    grafted_inpaint: True
+    clip:
+      approx_cutouts: 2
+      vae_cutouts: 2
+  overrides:
+    inpaint_unet: "@stable-diffusion-inpainting/unet"
+    clip: "@laion-clip-h"
 
 # And finally, here is the unmodified Stable Diffusion V1.4 model, showing how to list
 # the model inline. This is disabled by default, set enabled: True to enable it.
