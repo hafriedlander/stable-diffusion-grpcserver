@@ -708,6 +708,10 @@ if __name__ == "__main__":
         "mask_from_image_alpha": args.mask_from_image_alpha,
     }
 
+    stability_api = StabilityInference(
+        STABILITY_HOST, STABILITY_KEY, engine=args.engine, verbose=True
+    )
+
     answers = stability_api.generate(args.prompt, **request)
     artifacts = process_artifacts_from_answers(
         args.prefix, answers, write=not args.no_store, verbose=True
