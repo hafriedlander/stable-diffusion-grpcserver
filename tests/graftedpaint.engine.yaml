@@ -1,0 +1,43 @@
+- model_id: 'inkpunk-diffusion'
+  model: "Envvi/Inkpunk-Diffusion"
+  has_fp16: False
+
+- model_id: 'sd2-inpainting'
+  model: 'stabilityai/stable-diffusion-2-inpainting'
+  whitelist: ["unet", "text_encoder"]
+
+- model_id: "laion-clip-b"
+  type: "clip"
+  model: "laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
+  has_fp16: False
+- model_id: "laion-clip-l"
+  type: "clip"
+  model: "laion/CLIP-ViT-L-14-laion2B-s32B-b82K"
+  has_fp16: False
+
+- id: "justinkpunk"
+  default: True
+  enabled: True
+  name: "Just Inkpunk"
+  description: "Just Inkpunk"
+  class: "UnifiedPipeline"
+  model: "@inkpunk-diffusion"
+  overrides:
+    clip: 
+      model: "@laion-clip-b"
+
+- id: "withsd2inpaint"
+  default: True
+  enabled: True
+  name: "Test Engine"
+  description: "Test Engine"
+  class: "UnifiedPipeline"
+  model: "@inkpunk-diffusion"
+  overrides:
+    inpaint_unet:
+      model: "@sd2-inpainting/unet"
+    inpaint_text_encoder:
+      model: "@sd2-inpainting/text_encoder"
+    clip:
+      model: "@laion-clip-b"
+

@@ -1,0 +1,22 @@
+- model_id: 'sd2'
+  model: 'stabilityai/stable-diffusion-2-base'
+
+- model_id: "laion-clip-b"
+  type: "clip"
+  model: "laion/CLIP-ViT-B-32-laion2B-s34B-b79K"
+  has_fp16: False
+- model_id: "laion-clip-h"
+  type: "clip"
+  model: "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
+  has_fp16: False
+
+- id: "testengine"
+  default: True
+  enabled: True
+  name: "Test Engine"
+  description: "Test Engine"
+  class: "UnifiedPipeline"
+  model: "@sd2"
+  overrides:
+    clip: 
+      model: "@laion-clip-h"
