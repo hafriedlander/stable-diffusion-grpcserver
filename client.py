@@ -7,20 +7,20 @@
 #   - Supports negative prompt by setting a prompt with negative weight
 #   - Supports sending key to machines on local network over HTTP (not HTTPS)
 
-import pathlib
-import sys
-import os
-import uuid
-import random
 import io
 import logging
-import time
 import mimetypes
+import os
+import pathlib
+import random
 import signal
+import sys
+import time
+import uuid
+from argparse import ArgumentParser, Namespace
+from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple, Union
 
 import grpc
-from argparse import ArgumentParser, Namespace
-from typing import Dict, Generator, List, Optional, Union, Any, Sequence, Tuple
 from google.protobuf.json_format import MessageToJson
 from PIL import Image, ImageOps
 
@@ -36,6 +36,8 @@ thisPath = pathlib.Path(__file__).parent.resolve()
 genPath = thisPath / "sdgrpcserver/generated"
 sys.path.append(str(genPath))
 
+import engines_pb2 as engines
+import engines_pb2_grpc as engines_grpc
 import generation_pb2 as generation
 import generation_pb2_grpc as generation_grpc
 
@@ -66,6 +68,7 @@ NOISE_TYPES: Dict[str, int] = {
     "brownian": generation.SAMPLER_NOISE_BROWNIAN,
 }
 
+
 def get_sampler_from_str(s: str) -> generation.DiffusionSampler:
     """
     Convert a string to a DiffusionSampler enum.
@@ -77,9 +80,10 @@ def get_sampler_from_str(s: str) -> generation.DiffusionSampler:
     algorithm = SAMPLERS.get(algorithm_key, None)
     if algorithm is None:
         raise ValueError(f"unknown sampler {s}")
-    
+
     return algorithm
-   
+
+
 def get_noise_type_from_str(s: str) -> generation.SamplerNoiseType:
     noise_key = s.lower().strip()
     noise_type = NOISE_TYPES.get(noise_key, None)
@@ -114,7 +118,10 @@ def open_images(
             img.show()
         yield [path, artifact]
 
-def image_to_prompt(im, init: bool = False, mask: bool = False, use_alpha = False) -> generation.Prompt:
+
+def image_to_prompt(
+    im, init: bool = False, mask: bool = False, use_alpha=False
+) -> generation.Prompt:
     if init and mask:
         raise ValueError("init and mask cannot both be True")
 
@@ -122,7 +129,7 @@ def image_to_prompt(im, init: bool = False, mask: bool = False, use_alpha = Fals
         # Split into 3 channels
         r, g, b, a = im.split()
         # Recombine back to RGB image
-        im = Image.merge('RGB', (a, a, a))
+        im = Image.merge("RGB", (a, a, a))
         im = ImageOps.invert(im)
 
     buf = io.BytesIO()
@@ -140,6 +147,7 @@ def image_to_prompt(im, init: bool = False, mask: bool = False, use_alpha = Fals
         ),
         parameters=generation.PromptParameters(init=init),
     )
+
 
 def process_artifacts_from_answers(
     prefix: str,
@@ -182,12 +190,11 @@ def process_artifacts_from_answers(
                     if verbose:
                         artifact_t = generation.ArtifactType.Name(artifact.type)
                         logger.info(f"wrote {artifact_t} to {out_p}")
-                        if artifact.finish_reason == generation.FILTER: logger.info(f"{artifact_t} flagged as NSFW")
+                        if artifact.finish_reason == generation.FILTER:
+                            logger.info(f"{artifact_t} flagged as NSFW")
 
             yield [out_p, artifact]
             idx += 1
-
-
 
 
 class StabilityInference:
@@ -217,39 +224,45 @@ class StabilityInference:
         if verbose:
             logger.info(f"Opening channel to {host}")
 
-        maxMsgLength = 20 * 1024 * 1024 # 20 MB
+        maxMsgLength = 20 * 1024 * 1024  # 20 MB
 
-        channel_options=[
-            ('grpc.max_message_length', maxMsgLength),
-            ('grpc.max_send_message_length', maxMsgLength),
-            ('grpc.max_receive_message_length', maxMsgLength),
+        channel_options = [
+            ("grpc.max_message_length", maxMsgLength),
+            ("grpc.max_send_message_length", maxMsgLength),
+            ("grpc.max_receive_message_length", maxMsgLength),
         ]
 
         call_credentials = []
 
         if key:
             call_credentials.append(grpc.access_token_call_credentials(f"{key}"))
-            
+
             if host.endswith("443"):
                 channel_credentials = grpc.ssl_channel_credentials()
             else:
-                print("Key provided but channel is not HTTPS - assuming a local network")
+                print(
+                    "Key provided but channel is not HTTPS - assuming a local network"
+                )
                 channel_credentials = grpc.local_channel_credentials()
-            
+
             channel = grpc.secure_channel(
-                host, 
-                grpc.composite_channel_credentials(channel_credentials, *call_credentials),
-                options=channel_options
+                host,
+                grpc.composite_channel_credentials(
+                    channel_credentials, *call_credentials
+                ),
+                options=channel_options,
             )
-        else: 
-            channel = grpc.insecure_channel(
-                host, 
-                options=channel_options
-            )
+        else:
+            channel = grpc.insecure_channel(host, options=channel_options)
 
         if verbose:
             logger.info(f"Channel opened to {host}")
         self.stub = generation_grpc.GenerationServiceStub(channel)
+        self.engine_stub = engines_grpc.EnginesServiceStub(channel)
+
+    def list_engines(self):
+        request = engines.ListEnginesRequest()
+        print(self.engine_stub.ListEngines(request))
 
     def generate(
         self,
@@ -311,7 +324,9 @@ class StabilityInference:
             raise ValueError("prompt and/or init_image must be provided")
 
         if (mask_image is not None) and (init_image is None):
-            raise ValueError("If mask_image is provided, init_image must also be provided")
+            raise ValueError(
+                "If mask_image is provided, init_image must also be provided"
+            )
 
         if not seed:
             seed = [random.randrange(0, 4294967295)]
@@ -331,44 +346,48 @@ class StabilityInference:
             prompts.append(p)
 
         if negative_prompt:
-            prompts += [generation.Prompt(
-                text=negative_prompt, 
-                parameters=generation.PromptParameters(weight=-1)
-            )]
+            prompts += [
+                generation.Prompt(
+                    text=negative_prompt,
+                    parameters=generation.PromptParameters(weight=-1),
+                )
+            ]
 
-        sampler_parameters = dict(
-            cfg_scale=cfg_scale
-        )
+        sampler_parameters = dict(cfg_scale=cfg_scale)
 
-        if eta: sampler_parameters['eta'] = eta
-        if noise_type: sampler_parameters['noise_type'] = noise_type
+        if eta:
+            sampler_parameters["eta"] = eta
+        if noise_type:
+            sampler_parameters["noise_type"] = noise_type
 
         if churn:
-            churn_parameters = dict(
-                churn=churn
-            )
+            churn_parameters = dict(churn=churn)
 
-            if churn_tmin: churn_parameters["churn_tmin"] = churn_tmin
-            if churn_tmax: churn_parameters["churn_tmax"] = churn_tmax
+            if churn_tmin:
+                churn_parameters["churn_tmin"] = churn_tmin
+            if churn_tmax:
+                churn_parameters["churn_tmax"] = churn_tmax
 
             sampler_parameters["churn"] = generation.ChurnSettings(**churn_parameters)
 
         sigma_parameters = {}
 
-        if sigma_min: sigma_parameters['sigma_min'] = sigma_min
-        if sigma_max: sigma_parameters['sigma_max'] = sigma_max
-        if karras_rho: sigma_parameters['karras_rho'] = karras_rho
+        if sigma_min:
+            sigma_parameters["sigma_min"] = sigma_min
+        if sigma_max:
+            sigma_parameters["sigma_max"] = sigma_max
+        if karras_rho:
+            sigma_parameters["karras_rho"] = karras_rho
 
         sampler_parameters["sigma"] = generation.SigmaParameters(**sigma_parameters)
 
         step_parameters = dict(
-            scaled_step=0,
-            sampler=generation.SamplerParameters(**sampler_parameters)
+            scaled_step=0, sampler=generation.SamplerParameters(**sampler_parameters)
         )
 
         # NB: Specifying schedule when there's no init image causes washed out results
         if init_image is not None:
-            step_parameters['schedule'] = generation.ScheduleParameters(
+            step_parameters["schedule"] = generation.ScheduleParameters(
                 start=start_schedule,
                 end=end_schedule,
             )
@@ -376,7 +395,7 @@ class StabilityInference:
 
             if mask_image is not None:
                 prompts += [image_to_prompt(mask_image, mask=True)]
-        
+
             elif mask_from_image_alpha:
                 prompts += [image_to_prompt(init_image, mask=True, use_alpha=True)]
 
@@ -385,11 +404,14 @@ class StabilityInference:
                 guidance_prompt = generation.Prompt(text=guidance_prompt)
             elif not isinstance(guidance_prompt, generation.Prompt):
                 raise ValueError("guidance_prompt must be a string or Prompt object")
-        #if guidance_strength == 0.0:
+        # if guidance_strength == 0.0:
         #    guidance_strength = None
 
         # Build our CLIP parameters
-        if guidance_preset is not generation.GUIDANCE_PRESET_NONE or guidance_strength is not None:
+        if (
+            guidance_preset is not generation.GUIDANCE_PRESET_NONE
+            or guidance_strength is not None
+        ):
             # to do: make it so user can override this
             # step_parameters['sampler']=None
 
@@ -415,7 +437,7 @@ class StabilityInference:
                 ],
             )
 
-        image_parameters=generation.ImageParameters(
+        image_parameters = generation.ImageParameters(
             transform=generation.TransformType(diffusion=sampler),
             height=height,
             width=width,
@@ -439,14 +461,14 @@ class StabilityInference:
             request_id = str(uuid.uuid4())
         if not engine_id:
             engine_id = self.engine
-        
+
         rq = generation.Request(
             engine_id=engine_id,
             request_id=request_id,
             prompt=prompt,
-            image=image_parameters
+            image=image_parameters,
         )
-        
+
         if self.verbose:
             logger.info("Sending request.")
 
@@ -474,8 +496,7 @@ class StabilityInference:
                     )
                 else:
                     logger.info(
-                        f"Got keepalive {answer.answer_id} in "
-                        f"{duration:0.2f}s"
+                        f"Got keepalive {answer.answer_id} in " f"{duration:0.2f}s"
                     )
 
             yield answer
@@ -516,25 +537,25 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--start_schedule",
-        type=float, 
-        default=0.5, 
-        help="[0.5] start schedule for init image (must be greater than 0, 1 is full strength text prompt, no trace of image)"
+        type=float,
+        default=0.5,
+        help="[0.5] start schedule for init image (must be greater than 0, 1 is full strength text prompt, no trace of image)",
     )
     parser.add_argument(
         "--end_schedule",
-        type=float, 
-        default=0.01, 
-        help="[0.01] end schedule for init image"
+        type=float,
+        default=0.01,
+        help="[0.01] end schedule for init image",
     )
     parser.add_argument(
         "--cfg_scale", "-C", type=float, default=7.0, help="[7.0] CFG scale factor"
     )
     parser.add_argument(
-        "--guidance_strength", 
-        "-G", 
-        type=float, 
+        "--guidance_strength",
+        "-G",
+        type=float,
         default=None,
-        help="[0.0] CLIP Guidance scale factor. We recommend values in range [0.0,1.0]. A good default is 0.25"
+        help="[0.0] CLIP Guidance scale factor. We recommend values in range [0.0,1.0]. A good default is 0.25",
     )
     parser.add_argument(
         "--sampler",
@@ -544,16 +565,29 @@ if __name__ == "__main__":
         help="[k_lms] (" + ", ".join(SAMPLERS.keys()) + ")",
     )
     parser.add_argument(
-        "--eta", "-E", type=float, default=None, help="[None] ETA factor (for DDIM scheduler)"
+        "--eta",
+        "-E",
+        type=float,
+        default=None,
+        help="[None] ETA factor (for DDIM scheduler)",
     )
     parser.add_argument(
-        "--churn", type=float, default=None, help="[None] churn factor (for Euler, Heun, DPM2 scheduler)"
+        "--churn",
+        type=float,
+        default=None,
+        help="[None] churn factor (for Euler, Heun, DPM2 scheduler)",
     )
     parser.add_argument(
-        "--churn_tmin", type=float, default=None, help="[None] churn sigma minimum (for Euler, Heun, DPM2 scheduler)"
+        "--churn_tmin",
+        type=float,
+        default=None,
+        help="[None] churn sigma minimum (for Euler, Heun, DPM2 scheduler)",
     )
     parser.add_argument(
-        "--churn_tmax", type=float, default=None, help="[None] churn sigma maximum (for Euler, Heun, DPM2 scheduler)"
+        "--churn_tmax",
+        type=float,
+        default=None,
+        help="[None] churn sigma maximum (for Euler, Heun, DPM2 scheduler)",
     )
     parser.add_argument(
         "--sigma_min", type=float, default=None, help="[None] use this sigma min"
@@ -562,10 +596,16 @@ if __name__ == "__main__":
         "--sigma_max", type=float, default=None, help="[None] use this sigma max"
     )
     parser.add_argument(
-        "--karras_rho", type=float, default=None, help="[None] use Karras sigma schedule with this Rho"
+        "--karras_rho",
+        type=float,
+        default=None,
+        help="[None] use Karras sigma schedule with this Rho",
     )
     parser.add_argument(
-        "--noise_type", type=str, default="normal", help="[normal] (" + ", ".join(NOISE_TYPES.keys()) + ")"
+        "--noise_type",
+        type=str,
+        default="normal",
+        help="[normal] (" + ", ".join(NOISE_TYPES.keys()) + ")",
     )
     parser.add_argument(
         "--steps", "-s", type=int, default=50, help="[50] number of steps"
@@ -605,33 +645,45 @@ if __name__ == "__main__":
         help="Mask image",
     )
     parser.add_argument(
-        '--mask_from_image_alpha',
-        '-a',
+        "--mask_from_image_alpha",
+        "-a",
         action="store_true",
-        help="Get the mask from the image alpha channel, rather than a seperate image"
+        help="Get the mask from the image alpha channel, rather than a seperate image",
     )
     parser.add_argument(
-        "--negative_prompt", "-N",
+        "--negative_prompt",
+        "-N",
         type=str,
         help="Negative Prompt",
     )
+    parser.add_argument(
+        "--list_engines",
+        "-L",
+        action="store_true",
+        help="Print a list of the engines available on the server",
+    )
     parser.add_argument("prompt", nargs="*")
-
     args = parser.parse_args()
+
+    if args.list_engines:
+        stability_api = StabilityInference(STABILITY_HOST, STABILITY_KEY, verbose=True)
+        stability_api.list_engines()
+        sys.exit(0)
+
     if not args.prompt and not args.init_image:
         logger.warning("prompt or init image must be provided")
         parser.print_help()
         sys.exit(1)
     else:
         args.prompt = " ".join(args.prompt)
-        
+
     if args.init_image:
         args.init_image = Image.open(args.init_image)
-        
+
     if args.mask_image:
         args.mask_image = Image.open(args.mask_image)
 
-    request =  {
+    request = {
         "negative_prompt": args.negative_prompt,
         "height": args.height,
         "width": args.width,
@@ -655,10 +707,6 @@ if __name__ == "__main__":
         "mask_image": args.mask_image,
         "mask_from_image_alpha": args.mask_from_image_alpha,
     }
-
-    stability_api = StabilityInference(
-        STABILITY_HOST, STABILITY_KEY, engine=args.engine, verbose=True
-    )
 
     answers = stability_api.generate(args.prompt, **request)
     artifacts = process_artifacts_from_answers(
