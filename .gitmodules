@@ -11,6 +11,3 @@
 	path = sdgrpcserver/src/ResizeRight
 	url = https://github.com/assafshocher/ResizeRight.git
 	ignore = dirty
-[submodule "sdgrpcserver/src/diffusers"]
-	path = sdgrpcserver/src/diffusers
-	url = https://github.com/huggingface/diffusers.git
