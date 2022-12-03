@@ -86,7 +86,7 @@ class SchedulerConfig:
     sigma_min: float | None = None
     sigma_max: float | None = None
     karras_rho: float | None = None
-    eta: float = 0
+    eta: float | None = None
     churn: float = 0
     churn_tmin: float = 0
     churn_tmax: float = float("inf")
@@ -212,7 +212,7 @@ class DiffusersSchedulerBase(CommonScheduler):
             print("Warning: This scheduler doesn't accept karras_rho. Ignoring.")
         if config.churn:
             print("Warning: This scheduler doesn't accept churn. Ignoring.")
-        if config.eta and not self.accepts_eta:
+        if config.eta is not None and not self.accepts_eta:
             print("Warning: This scheduler doesn't accept eta. Ignoring.")
         if config.noise_type != "normal":
             print("Warning: This scheduler only accepts normal noise. Ignoring.")
@@ -437,7 +437,7 @@ class KDiffusionScheduler(CommonScheduler):
             print("Warning: This scheduler doen't accept karras_rho. Ignoring.")
         if config.churn and not self.accepts_s_churn:
             print("Warning: This scheduler doen't accept churn. Ignoring.")
-        if config.eta and not self.accepts_eta:
+        if config.eta is not None and not self.accepts_eta:
             print("Warning: This scheduler doen't accept eta. Ignoring.")
 
         betas = self.get_betas()

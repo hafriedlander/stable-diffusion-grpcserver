@@ -26,9 +26,13 @@ class LatentDebugger:
         self.output_path = output_path
         self.enabled = enabled
 
+        self.counters = {}
+
     def log(self, label, i, latents):
         if label not in self.enabled:
             return
+
+        self.counters[label] = i = self.counters.get(label, 0) + 1
 
         stage_latents = 1 / 0.18215 * latents
         stage_image = self.vae.decode(stage_latents).sample

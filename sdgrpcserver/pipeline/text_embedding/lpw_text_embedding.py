@@ -1,12 +1,12 @@
-
 # Copied mostly completely from https://github.com/huggingface/diffusers/blob/main/examples/community/lpw_stable_diffusion.py
 # Minimal modifications to allow copy/pasting in the case of updates
 
-import inspect, re
+import re
 from typing import List, Optional, Union
-import torch
 
-from diffusers.pipeline_utils import DiffusionPipeline
+import torch
+from transformers.models.clip import CLIPTextModel, CLIPTokenizer
+
 from .text_embedding import TextEmbedding
 
 re_attention = re.compile(
@@ -115,9 +115,9 @@ def parse_prompt_attention(text):
     return res
 
 
-
-
-def get_prompts_with_weights(pipe: DiffusionPipeline, prompt: List[str], max_length: int):
+def get_prompts_with_weights(
+    tokenizer: CLIPTokenizer, prompt: List[str], max_length: int
+):
     r"""
     Tokenize a list of prompts and return its tokens with weights of each token.
     No padding, starting or ending token is included.
@@ -126,12 +126,14 @@ def get_prompts_with_weights(pipe: DiffusionPipeline, prompt: List[str], max_len
     weights = []
     truncated = False
     for text in prompt:
-        texts_and_weights = parse_prompt_attention(text) if isinstance(text, str) else text
+        texts_and_weights = (
+            parse_prompt_attention(text) if isinstance(text, str) else text
+        )
         text_token = []
         text_weight = []
         for word, weight in texts_and_weights:
             # tokenize and discard the starting and the ending token
-            token = pipe.tokenizer(word).input_ids[1:-1]
+            token = tokenizer(word).input_ids[1:-1]
             text_token += token
             # copy the weight by length of token
             text_weight += [weight] * len(token)
@@ -147,16 +149,22 @@ def get_prompts_with_weights(pipe: DiffusionPipeline, prompt: List[str], max_len
         tokens.append(text_token)
         weights.append(text_weight)
     if truncated:
-        logger.warning("Prompt was truncated. Try to shorten the prompt or increase max_embeddings_multiples")
+        logger.warning(
+            "Prompt was truncated. Try to shorten the prompt or increase max_embeddings_multiples"
+        )
     return tokens, weights
 
 
-def pad_tokens_and_weights(tokens, weights, max_length, bos, eos, no_boseos_middle=True, chunk_length=77):
+def pad_tokens_and_weights(
+    tokens, weights, max_length, bos, eos, no_boseos_middle=True, chunk_length=77
+):
     r"""
     Pad the tokens (with starting and ending tokens) and weights (with 1.0) to max_length.
     """
     max_embeddings_multiples = (max_length - 2) // (chunk_length - 2)
-    weights_length = max_length if no_boseos_middle else max_embeddings_multiples * chunk_length
+    weights_length = (
+        max_length if no_boseos_middle else max_embeddings_multiples * chunk_length
+    )
     for i in range(len(tokens)):
         tokens[i] = [bos] + tokens[i] + [eos] * (max_length - 1 - len(tokens[i]))
         if no_boseos_middle:
@@ -168,7 +176,12 @@ def pad_tokens_and_weights(tokens, weights, max_length, bos, eos, no_boseos_midd
             else:
                 for j in range(max_embeddings_multiples):
                     w.append(1.0)  # weight for starting token in this chunk
-                    w += weights[i][j * (chunk_length - 2) : min(len(weights[i]), (j + 1) * (chunk_length - 2))]
+                    w += weights[i][
+                        j
+                        * (chunk_length - 2) : min(
+                            len(weights[i]), (j + 1) * (chunk_length - 2)
+                        )
+                    ]
                     w.append(1.0)  # weight for ending token in this chunk
                 w += [1.0] * (weights_length - len(w))
             weights[i] = w[:]
@@ -177,7 +190,7 @@ def pad_tokens_and_weights(tokens, weights, max_length, bos, eos, no_boseos_midd
 
 
 def get_unweighted_text_embeddings(
-    pipe: DiffusionPipeline,
+    text_encoder: CLIPTextModel,
     text_input: torch.Tensor,
     chunk_length: int,
     no_boseos_middle: Optional[bool] = True,
@@ -191,12 +204,14 @@ def get_unweighted_text_embeddings(
         text_embeddings = []
         for i in range(max_embeddings_multiples):
             # extract the i-th chunk
-            text_input_chunk = text_input[:, i * (chunk_length - 2) : (i + 1) * (chunk_length - 2) + 2].clone()
+            text_input_chunk = text_input[
+                :, i * (chunk_length - 2) : (i + 1) * (chunk_length - 2) + 2
+            ].clone()
 
             # cover the head and the tail by the starting and the ending tokens
             text_input_chunk[:, 0] = text_input[0, 0]
             text_input_chunk[:, -1] = text_input[0, -1]
-            text_embedding = pipe.text_encoder(text_input_chunk)[0]
+            text_embedding = text_encoder(text_input_chunk)[0]
 
             if no_boseos_middle:
                 if i == 0:
@@ -210,14 +225,17 @@ def get_unweighted_text_embeddings(
                     text_embedding = text_embedding[:, 1:-1]
 
             text_embeddings.append(text_embedding)
+
         text_embeddings = torch.concat(text_embeddings, axis=1)
     else:
-        text_embeddings = pipe.text_encoder(text_input)[0]
+        text_embeddings = text_encoder(text_input)[0]
     return text_embeddings
 
 
 def get_weighted_text_embeddings(
-    pipe: DiffusionPipeline,
+    tokenizer: CLIPTokenizer,
+    text_encoder: CLIPTextModel,
+    device: torch.device,
     prompt: Union[str, List[str]],
     uncond_prompt: Optional[Union[str, List[str]]] = None,
     max_embeddings_multiples: Optional[int] = 1,
@@ -249,19 +267,26 @@ def get_weighted_text_embeddings(
         skip_weighting (`bool`, *optional*, defaults to `False`):
             Skip the weighting. When the parsing is skipped, it is forced True.
     """
-    max_length = (pipe.tokenizer.model_max_length - 2) * max_embeddings_multiples + 2
+    max_length = (tokenizer.model_max_length - 2) * max_embeddings_multiples + 2
     if isinstance(prompt, str):
         prompt = [prompt]
 
     if not skip_parsing:
-        prompt_tokens, prompt_weights = get_prompts_with_weights(pipe, prompt, max_length - 2)
+        prompt_tokens, prompt_weights = get_prompts_with_weights(
+            tokenizer, prompt, max_length - 2
+        )
         if uncond_prompt is not None:
             if isinstance(uncond_prompt, str):
                 uncond_prompt = [uncond_prompt]
-            uncond_tokens, uncond_weights = get_prompts_with_weights(pipe, uncond_prompt, max_length - 2)
+            uncond_tokens, uncond_weights = get_prompts_with_weights(
+                tokenizer, uncond_prompt, max_length - 2
+            )
     else:
         prompt_tokens = [
-            token[1:-1] for token in pipe.tokenizer(prompt, max_length=max_length, truncation=True).input_ids
+            token[1:-1]
+            for token in tokenizer(
+                prompt, max_length=max_length, truncation=True
+            ).input_ids
         ]
         prompt_weights = [[1.0] * len(token) for token in prompt_tokens]
         if uncond_prompt is not None:
@@ -269,7 +294,9 @@ def get_weighted_text_embeddings(
                 uncond_prompt = [uncond_prompt]
             uncond_tokens = [
                 token[1:-1]
-                for token in pipe.tokenizer(uncond_prompt, max_length=max_length, truncation=True).input_ids
+                for token in tokenizer(
+                    uncond_prompt, max_length=max_length, truncation=True
+                ).input_ids
             ]
             uncond_weights = [[1.0] * len(token) for token in uncond_tokens]
 
@@ -280,14 +307,14 @@ def get_weighted_text_embeddings(
 
     max_embeddings_multiples = min(
         max_embeddings_multiples,
-        (max_length - 1) // (pipe.tokenizer.model_max_length - 2) + 1,
+        (max_length - 1) // (tokenizer.model_max_length - 2) + 1,
     )
     max_embeddings_multiples = max(1, max_embeddings_multiples)
-    max_length = (pipe.tokenizer.model_max_length - 2) * max_embeddings_multiples + 2
+    max_length = (tokenizer.model_max_length - 2) * max_embeddings_multiples + 2
 
     # pad the length of tokens and weights
-    bos = pipe.tokenizer.bos_token_id
-    eos = pipe.tokenizer.eos_token_id
+    bos = tokenizer.bos_token_id
+    eos = tokenizer.eos_token_id
     prompt_tokens, prompt_weights = pad_tokens_and_weights(
         prompt_tokens,
         prompt_weights,
@@ -295,9 +322,9 @@ def get_weighted_text_embeddings(
         bos,
         eos,
         no_boseos_middle=no_boseos_middle,
-        chunk_length=pipe.tokenizer.model_max_length,
+        chunk_length=tokenizer.model_max_length,
     )
-    prompt_tokens = torch.tensor(prompt_tokens, dtype=torch.long, device=pipe.device)
+    prompt_tokens = torch.tensor(prompt_tokens, dtype=torch.long, device=device)
     if uncond_prompt is not None:
         uncond_tokens, uncond_weights = pad_tokens_and_weights(
             uncond_tokens,
@@ -306,53 +333,68 @@ def get_weighted_text_embeddings(
             bos,
             eos,
             no_boseos_middle=no_boseos_middle,
-            chunk_length=pipe.tokenizer.model_max_length,
+            chunk_length=tokenizer.model_max_length,
         )
-        uncond_tokens = torch.tensor(uncond_tokens, dtype=torch.long, device=pipe.device)
+        uncond_tokens = torch.tensor(uncond_tokens, dtype=torch.long, device=device)
 
     # get the embeddings
     text_embeddings = get_unweighted_text_embeddings(
-        pipe,
+        text_encoder,
         prompt_tokens,
-        pipe.tokenizer.model_max_length,
+        tokenizer.model_max_length,
         no_boseos_middle=no_boseos_middle,
     )
-    prompt_weights = torch.tensor(prompt_weights, dtype=text_embeddings.dtype, device=pipe.device)
+    prompt_weights = torch.tensor(
+        prompt_weights, dtype=text_embeddings.dtype, device=device
+    )
     if uncond_prompt is not None:
         uncond_embeddings = get_unweighted_text_embeddings(
-            pipe,
+            text_encoder,
             uncond_tokens,
-            pipe.tokenizer.model_max_length,
+            tokenizer.model_max_length,
             no_boseos_middle=no_boseos_middle,
         )
-        uncond_weights = torch.tensor(uncond_weights, dtype=uncond_embeddings.dtype, device=pipe.device)
+        uncond_weights = torch.tensor(
+            uncond_weights, dtype=uncond_embeddings.dtype, device=device
+        )
 
     # assign weights to the prompts and normalize in the sense of mean
     # TODO: should we normalize by chunk or in a whole (current implementation)?
     if (not skip_parsing) and (not skip_weighting):
         previous_mean = text_embeddings.mean(axis=[-2, -1])
         text_embeddings *= prompt_weights.unsqueeze(-1)
-        text_embeddings *= (previous_mean / text_embeddings.mean(axis=[-2, -1])).unsqueeze(-1).unsqueeze(-1)
+        text_embeddings *= (
+            (previous_mean / text_embeddings.mean(axis=[-2, -1]))
+            .unsqueeze(-1)
+            .unsqueeze(-1)
+        )
         if uncond_prompt is not None:
             previous_mean = uncond_embeddings.mean(axis=[-2, -1])
             uncond_embeddings *= uncond_weights.unsqueeze(-1)
-            uncond_embeddings *= (previous_mean / uncond_embeddings.mean(axis=[-2, -1])).unsqueeze(-1).unsqueeze(-1)
+            uncond_embeddings *= (
+                (previous_mean / uncond_embeddings.mean(axis=[-2, -1]))
+                .unsqueeze(-1)
+                .unsqueeze(-1)
+            )
 
     if uncond_prompt is not None:
         return text_embeddings, uncond_embeddings
     return text_embeddings, None
 
-class LPWTextEmbedding(TextEmbedding):
 
-    def __init__(self, pipe, max_embeddings_multiples, **kwargs):
-        super().__init__(pipe, **kwargs)
+class LPWTextEmbedding(TextEmbedding):
+    def __init__(self, pipe, text_encoder, max_embeddings_multiples, **kwargs):
+        super().__init__(pipe, text_encoder, **kwargs)
         self.max_embeddings_multiples = max_embeddings_multiples
 
-    def get_embeddings(self, prompt, uncond_prompt = None):
+    def get_embeddings(self, prompt, uncond_prompt=None):
         return get_weighted_text_embeddings(
-            pipe=self.pipe,
+            tokenizer=self.pipe.tokenizer,
+            text_encoder=self.text_encoder,
+            device=self.device,
             prompt=prompt.as_tokens(),
-            uncond_prompt=uncond_prompt.as_tokens() if uncond_prompt is not None else None,
+            uncond_prompt=uncond_prompt.as_tokens()
+            if uncond_prompt is not None
+            else None,
             max_embeddings_multiples=self.max_embeddings_multiples,
         )
-

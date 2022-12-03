@@ -1,7 +1,9 @@
 class TextEmbedding:
     def __init__(self, pipe, text_encoder, **kwargs):
         self.pipe = pipe
+        self.tokenizer = pipe.tokenizer
         self.text_encoder = text_encoder
+        self.device = pipe.execution_device
 
     def get_text_embeddings(self, prompt):
         raise NotImplementedError("Not implemented")

@@ -23,7 +23,7 @@ from transformers.models.clip import (
     CLIPTokenizer,
 )
 
-from sdgrpcserver import images
+from sdgrpcserver import images, resize_right
 from sdgrpcserver.pipeline import diffusers_types
 from sdgrpcserver.pipeline.attention_replacer import replace_cross_attention
 from sdgrpcserver.pipeline.common_scheduler import (
@@ -44,6 +44,10 @@ from sdgrpcserver.pipeline.models.structured_cross_attention import (
 )
 from sdgrpcserver.pipeline.randtools import TorchRandOverride, batched_randn
 from sdgrpcserver.pipeline.text_embedding import BasicTextEmbedding
+from sdgrpcserver.pipeline.text_embedding.lpw_text_embedding import LPWTextEmbedding
+from sdgrpcserver.pipeline.text_embedding.text_encoder_alt_layer import (
+    TextEncoderAltLayer,
+)
 from sdgrpcserver.pipeline.unet.cfg import CFGChildUnets, CFGUnet
 from sdgrpcserver.pipeline.unet.clipguided import (
     CLIP_GUIDANCE_BASE,
@@ -150,20 +154,38 @@ class Txt2imgMode(UnifiedMode):
             dtype=self.latents_dtype,
         )
 
-        latents = batched_randn(
-            self.latents_shape,
-            self.generators,
-            device=self.device,
-            dtype=self.latents_dtype,
-        )
+        # Handle where we're requesting width or height below unet_sample_size
+        off2 = (self.unet_sample_size - self.latents_shape[2]) // 2
+        off3 = (self.unet_sample_size - self.latents_shape[3]) // 2
 
-        off2 = (latents.shape[2] - mid_latents.shape[2]) // 2
-        off3 = (latents.shape[3] - mid_latents.shape[3]) // 2
+        if off2 > 0:
+            mid_latents = mid_latents[:, :, off2 : off2 + self.latents_shape[2], :]
 
-        # Insert mid_latents over latents
-        latents[
-            :, :, off2 : off2 + mid_latents.shape[2], off3 : off3 + mid_latents.shape[3]
-        ] = mid_latents
+        if off3 > 0:
+            mid_latents = mid_latents[:, :, :, off3 : off3 + self.latents_shape[3]]
+
+        if off2 >= 0 and off3 >= 0:
+            latents = mid_latents
+
+        else:
+            # Now generate the real size
+            latents = batched_randn(
+                self.latents_shape,
+                self.generators,
+                device=self.device,
+                dtype=self.latents_dtype,
+            )
+
+            off2 = (latents.shape[2] - mid_latents.shape[2]) // 2
+            off3 = (latents.shape[3] - mid_latents.shape[3]) // 2
+
+            # Insert mid_latents over latents
+            latents[
+                :,
+                :,
+                off2 : off2 + mid_latents.shape[2],
+                off3 : off3 + mid_latents.shape[3],
+            ] = mid_latents
 
         # scale the initial noise by the standard deviation required by the scheduler
         return self.scheduler.prepare_initial_latents(latents)
@@ -175,7 +197,7 @@ class Img2imgMode(UnifiedMode):
         pipeline: "UnifiedPipeline",
         scheduler: CommonScheduler,
         generators: list[torch.Generator],
-        init_image: torch.Tensor | PILImage,
+        init_image: torch.Tensor,
         latents_dtype: torch.dtype,
         batch_total: int,
         num_inference_steps: int,
@@ -196,9 +218,6 @@ class Img2imgMode(UnifiedMode):
 
         self.latents_dtype = latents_dtype
         self.batch_total = batch_total
-
-        if isinstance(init_image, PILImage):
-            init_image = images.fromPIL(init_image)
 
         self.init_image = self.preprocess_tensor(init_image)
 
@@ -345,9 +364,6 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         self.num_inference_steps = num_inference_steps
 
         # Load mask in 1K0D, 1CHW L shape
-        if isinstance(mask_image, PILImage):
-            mask_image = images.fromPIL(mask_image.convert("L"))
-
         self.mask = self.preprocess_mask_tensor(mask_image)
         self.mask = self.mask.to(device=self.device, dtype=self.latents_dtype)
 
@@ -544,15 +560,7 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
 
     def _blend(self, u, orig, next):
         steppos = u
-
-        if orig.shape != next.shape:
-            orig = hires_match_shape(orig, next.shape[-2:])
-
         blend_mask = self.latent_blend_mask
-
-        if blend_mask.shape != next.shape:
-            blend_mask = hires_match_shape(blend_mask, next.shape[-2:])
-
         iteration_mask = blend_mask.gt(steppos).to(next.dtype)
 
         return (orig * iteration_mask) + (next * (1 - iteration_mask))
@@ -607,13 +615,6 @@ class EnhancedRunwayInpaintMode(EnhancedInpaintMode):
                 inpaint_mask = self.inpaint_mask_cfg
                 masked_latents = self.masked_image_latents_cfg
 
-            # TODO: This is for the hi-res adjustment, it shouldn't be here
-            if masked_latents.shape != latents.shape:
-                inpaint_mask = hires_match_shape(inpaint_mask, latents.shape[2:])
-                masked_latents = hires_match_shape(masked_latents, latents.shape[2:])
-
-            print(latents.shape, inpaint_mask.shape, masked_latents.shape)
-
             expanded_latents = torch.cat(
                 [
                     latents,
@@ -647,7 +648,7 @@ class UnifiedPipelinePrompt:
                 not isinstance(item, tuple)
                 or len(item) != 2
                 or not isinstance(item[0], str)
-                or not isinstance(item[1], float)
+                or not isinstance(item[1], float | int)
             ):
                 raise ValueError(
                     f"Expected a list of (text, weight) tuples, but got {item} of type {type(item)}"
@@ -707,6 +708,179 @@ UnifiedPipelinePromptType = Union[
 ]
 
 UnifiedPipelineImageType = torch.Tensor | PILImage
+
+
+class ModeSkipException(Exception):
+    pass
+
+
+class ModeTreeRoot:
+    """
+    ModeTreeRoot is the root of a tree that blends different modes. The two examples
+    of that at the moment are the Hires Fix and the Graft.
+    """
+
+    def __init__(self):
+        self.root: ModeTreeNode | ModeTreeLeaf | None = None
+
+    def leaf(self, opts):
+        if self.root is not None:
+            raise ValueError("Can't create leaf node once tree has started to grow")
+
+        self.root = ModeTreeLeaf(opts)
+
+    def wrap(self, left_callback, right_callback, merger, *args, **kwargs):
+        if self.root is None:
+            raise ValueError("Can't wrap tree until you've set a leaf")
+
+        # Clone leaves
+        left = self.root.clone()
+        right = self.root.clone()
+
+        try:
+            for side, callback in zip((left, right), (left_callback, right_callback)):
+                if callback:
+                    for leaf in side.leaves:
+                        leaf.opts = callback(leaf.opts)
+
+        except ModeSkipException:
+            return
+
+        self.root = ModeTreeNode(left, right, merger, args, kwargs)
+
+    @property
+    def leaves(self):
+        if self.root is None:
+            raise ValueError("No leaves in tree")
+
+        return self.root.leaves
+
+    def build_mode(self, **default_args):
+        for leaf in self.leaves:
+            mode_class = leaf.opts.get("mode_class", None)
+            if not mode_class:
+                raise ValueError("Leaf did not have mode class")
+
+            args = {**default_args, **leaf.opts}
+            leaf.mode = mode_class(**args)
+
+    def collapse(self):
+        if self.root is None:
+            raise ValueError("No leaves in tree")
+
+        return self.root.collapse()
+
+    def initial_latents(self) -> torch.Tensor:
+        if self.root is None:
+            raise ValueError("No leaves in tree")
+
+        return self.root.initial_latents()
+
+    def split_result(self, result) -> torch.Tensor:
+        if self.root is None:
+            raise ValueError("No leaves in tree")
+
+        return self.root.split_result(result)
+
+    def pretty_print(self):
+        if self.root is None:
+            print("Empty Tree")
+        else:
+            self.root.pretty_print(0)
+
+
+class ModeTreeNode:
+    def __init__(self, left, right, merger, args, kwargs):
+        self.left = left
+        self.right = right
+        self.merger = merger
+        self.args = args
+        self.kwargs = kwargs
+
+    def clone(self):
+        return ModeTreeNode(
+            left=self.left.clone(),
+            right=self.right.clone(),
+            merger=self.merger,
+            args=self.args,
+            kwargs=self.kwargs,
+        )
+
+    @property
+    def leaves(self):
+        return self.left.leaves + self.right.leaves
+
+    def collapse(self):
+        return self.merger(
+            self.left.collapse(), self.right.collapse(), *self.args, **self.kwargs
+        )
+
+    def initial_latents(self):
+        return self.merger.merge_initial_latents(
+            self.left.initial_latents(), self.right.initial_latents()
+        )
+
+    def split_result(self, result):
+        return self.merger.split_result(
+            self.left.split_result(result), self.right.split_result(result)
+        )
+
+    def pretty_print(self, indent=0):
+        ws = " " * indent
+        print(f"{ws}{self.merger.__name__}")
+        self.left.pretty_print(indent + 2)
+        self.right.pretty_print(indent + 2)
+
+
+class ModeTreeLeaf:
+    def __init__(self, opts):
+        self.opts = opts
+
+        self.mode: UnifiedMode | None = None
+
+        self.unet_g: NoisePredictionUNet | None = None
+        self.unet_cfg: CFGChildUnets | None = None
+        self.eps_unet: NoisePredictionUNet | None = None
+
+        self.k_unet: KDiffusionSchedulerUNet | None = None
+        self.d_unet: DiffusersSchedulerUNet | None = None
+
+    def clone(self):
+        if self.mode or self.unet_g or self.unet_cfg:
+            raise Exception("Can't clone leaf, too late in lifecycle")
+
+        return ModeTreeLeaf({**self.opts})
+
+    @property
+    def leaves(self):
+        return [self]
+
+    def collapse(self):
+        return self.k_unet if self.k_unet is not None else self.d_unet
+
+    def initial_latents(self):
+        if self.mode is None:
+            raise ValueError("Set mode first")
+
+        return self.mode.generateLatents()
+
+    def split_result(self, result):
+        return result
+
+    def pretty_print(self, indent=0):
+        ws = " " * indent + "- "
+
+        for k, v in self.opts.items():
+            if k == "unet":
+                print(f"{ws}{k}: {v.config.in_channels} channels")
+            elif np.isscalar(v):
+                print(f"{ws}{k}: {v}")
+            elif hasattr(v, "__name__"):
+                print(f"{ws}{k}: {v.__name__}")
+            else:
+                print(f"{ws}{k}: {v.__class__}")
+
+            ws = " " * indent + "  "
 
 
 class UnifiedPipeline(DiffusionPipeline):
@@ -826,7 +1000,7 @@ class UnifiedPipeline(DiffusionPipeline):
         # Grafted inpaint uses an inpaint_unet from a different model than the primary model
         # as guidance to produce a nicer inpaint that EnhancedInpaintMode otherwise can
         self._grafted_inpaint = False
-        self._graft_factor = 0.8
+        self._hires_fix = True
         self._structured_diffusion = False
 
         # Some models use a different text embedding layer
@@ -877,8 +1051,13 @@ class UnifiedPipeline(DiffusionPipeline):
         for key, value in options.items():
             if key == "grafted_inpaint":
                 self._grafted_inpaint = bool(value)
+            elif key == "hires_fix":
+                self._hires_fix = bool(value)
             elif key == "graft_factor":
-                self._graft_factor = float(value)
+                print(
+                    "Graft Factor is no longer used. "
+                    "Please remove it from your engines.yaml."
+                )
             elif key == "xformers" and value:
                 print(
                     "XFormers is always enabled if it is available now, "
@@ -985,13 +1164,20 @@ class UnifiedPipeline(DiffusionPipeline):
         self.enable_attention_slicing(None)
 
     @property
+    def device(self):
+        # You probably always want execution_device
+        # import traceback
+        # traceback.print_stack()
+        return super().device
+
+    @property
     def execution_device(self):
         r"""
         Returns the device on which the pipeline's models will be executed. After calling
         `pipeline.enable_sequential_cpu_offload()` the execution device can only be inferred from Accelerate's module
         hooks.
         """
-        if self.device != torch.device("meta") or not hasattr(self.unet, "_hf_hook"):
+        if super().device != torch.device("meta") or not hasattr(self.unet, "_hf_hook"):
             return self.device
 
         for module in self.unet.modules():
@@ -1043,7 +1229,7 @@ class UnifiedPipeline(DiffusionPipeline):
         approx_cutouts: Optional[int] = None,
         no_cutouts: CLIP_NO_CUTOUTS_TYPE = False,
         scheduler: DiffusersSchedulerProtocol | Callable | None = None,
-        hires_fix=False,
+        do_hires_fix=None,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -1107,8 +1293,13 @@ class UnifiedPipeline(DiffusionPipeline):
         if scheduler is None:
             scheduler = self.scheduler  # type: ignore
 
+        # If do_hires_fix not passed, use engine default
+        if do_hires_fix is None:
+            do_hires_fix = self._hires_fix
+
         # Check CLIP before overwritting
         if clip_guidance_scale is not None and self.clip_model is None:
+            clip_guidance_scale = None
             print(
                 "Warning: CLIP guidance passed to a pipeline without a CLIP model. It will be ignored."
             )
@@ -1132,6 +1323,14 @@ class UnifiedPipeline(DiffusionPipeline):
             clip_config.guidance_scale = approx_cutouts
         if no_cutouts is not None:
             clip_config.no_cutouts = no_cutouts
+
+        if isinstance(scheduler, SchedulerMixin | KSchedulerMixin):
+            prediction_type = getattr(scheduler, "prediction_type", "epsilon")
+            if prediction_type == "v_prediction" and clip_guidance_scale:
+                raise ValueError(
+                    "Can't use Diffusers scheduler with a v-prediction unet and CLIP guidance. "
+                    "Either use a K-Diffusion scheduler or don't use CLIP guidance."
+                )
 
         # Parse prompt and calculate batch size
         prompt = UnifiedPipelinePrompt(prompt)
@@ -1196,45 +1395,117 @@ class UnifiedPipeline(DiffusionPipeline):
         if outmask_image is not None and init_image is None:
             raise ValueError("Can't pass a outmask without an image")
 
+        if init_image is not None and isinstance(init_image, PILImage):
+            init_image = images.fromPIL(init_image)
+
+        if mask_image is not None and isinstance(mask_image, PILImage):
+            mask_image = images.fromPIL(mask_image)
+
+        if outmask_image is not None and isinstance(outmask_image, PILImage):
+            outmask_image = images.fromPIL(outmask_image)
+
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance: bool = guidance_scale > 1.0
 
-        mode_classes = []
+        do_grafted_inpaint = (
+            mask_image is not None
+            and self.inpaint_unet is not None
+            and self._grafted_inpaint
+        )
 
-        # Calculate operating mode based on arguments
+        mode_tree = ModeTreeRoot()
+
         if mask_image is not None:
             if self.inpaint_unet is not None:
-                mode_classes.append(EnhancedRunwayInpaintMode)
-                if self._grafted_inpaint:
-                    mode_classes.append(EnhancedInpaintMode)
+                mode_tree.leaf(
+                    {"mode_class": EnhancedRunwayInpaintMode, "unet": self.inpaint_unet}
+                )
             else:
-                mode_classes.append(EnhancedInpaintMode)
+                mode_tree.leaf({"mode_class": EnhancedInpaintMode, "unet": self.unet})
         elif init_image is not None:
-            mode_classes.append(Img2imgMode)
+            mode_tree.leaf({"mode_class": Img2imgMode, "unet": self.unet})
         else:
-            mode_classes.append(Txt2imgMode)
+            mode_tree.leaf({"mode_class": Txt2imgMode, "unet": self.unet})
 
-        unet_gs = []
-        unet_cfgs = []
+        if do_grafted_inpaint:
+            mode_tree.wrap(
+                None,
+                lambda child_opts: {
+                    **child_opts,
+                    "mode_class": EnhancedInpaintMode,
+                    "unet": self.unet,
+                },
+                GraftUnets,
+                generators=generators,
+            )
+
+        if do_hires_fix:
+
+            def get_natural_opts(child_opts):
+                unet = child_opts["unet"]
+                unet_pixel_size = self.get_unet_pixel_size(unet)
+
+                if width <= unet_pixel_size and height <= unet_pixel_size:
+                    raise ModeSkipException()
+
+                if isinstance(scheduler, SchedulerMixin | KSchedulerMixin):
+                    raise ValueError(
+                        "Can't use Diffuser schedulers with Hires fix. "
+                        "Either use a K-Diffusion scheduler or disable Hires fix."
+                    )
+
+                natural_init_image = None
+                natural_mask_image = None
+
+                if init_image is not None:
+                    natural_init_image = HiresUnetWrapper.image_to_natural(
+                        unet_pixel_size, cast(torch.Tensor, init_image)
+                    )
+
+                if mask_image is not None:
+                    natural_mask_image = HiresUnetWrapper.image_to_natural(
+                        unet_pixel_size, cast(torch.Tensor, mask_image), torch.ones
+                    )
+
+                return {
+                    **child_opts,
+                    "width": unet_pixel_size,
+                    "height": unet_pixel_size,
+                    "init_image": natural_init_image,
+                    "mask_image": natural_mask_image,
+                }
+
+            mode_tree.wrap(
+                get_natural_opts,
+                None,
+                HiresUnetWrapper,
+                generators=generators,
+                target=[64, 64],
+                latent_debugger=self.latent_debugger,
+            )
 
         latents_dtype = None
-        unet_pixel_size = None
-        unet_sample_size = None
 
-        for mode_class in mode_classes:
-            unet = self.unet
+        for leaf in mode_tree.leaves:
+            unet = leaf.opts["unet"]
+
             text_encoder = self.text_encoder
+            if unet is self.inpaint_unet and self.inpaint_text_encoder is not None:
+                text_encoder = self.inpaint_text_encoder
 
-            if mode_class is EnhancedRunwayInpaintMode:
-                if self.inpaint_unet is not None:
-                    unet = self.inpaint_unet
-                if self.inpaint_text_encoder is not None:
-                    text_encoder = self.inpaint_text_encoder
+            text_encoder = TextEncoderAltLayer(text_encoder, self._text_embedding_layer)
 
-            text_embedding_calculator = BasicTextEmbedding(
-                self, text_encoder=text_encoder, layer=self._text_embedding_layer
+            # text_embedding_calculator = BasicTextEmbedding(
+            #     self,
+            #     text_encoder=text_encoder,
+            # )
+
+            text_embedding_calculator = LPWTextEmbedding(
+                self,
+                text_encoder=text_encoder,
+                max_embeddings_multiples=max_embeddings_multiples,
             )
 
             (
@@ -1246,24 +1517,21 @@ class UnifiedPipeline(DiffusionPipeline):
             )
 
             latents_dtype = text_embeddings.dtype
-            unet_sample_size = self.get_unet_sample_size(unet)
-            unet_pixel_size = self.get_unet_pixel_size(unet)
 
             text_embeddings = text_embedding_calculator.repeat(
                 text_embeddings, num_images_per_prompt
             )
 
             # unet_g is the guided unet, for when we aren't doing CFG, or we want to run seperately to unet_u
-            unet_g = UNetWithEmbeddings(unet, text_embeddings)
-            unet_gs.append(unet_g)
+            leaf.unet_g = UNetWithEmbeddings(unet, text_embeddings)
 
             if uncond_embeddings is not None:
                 uncond_embeddings = text_embedding_calculator.repeat(
                     uncond_embeddings, num_images_per_prompt
                 )
 
-                unet_cfg = CFGChildUnets(
-                    g=unet_g,
+                leaf.unet_cfg = CFGChildUnets(
+                    g=leaf.unet_g,
                     # unet_u is the unguided unet, for when we want to run seperately to unet_g
                     u=UNetWithEmbeddings(unet, uncond_embeddings),
                     # unet_f is the fused unet, for running CFG in a single execution
@@ -1271,36 +1539,8 @@ class UnifiedPipeline(DiffusionPipeline):
                         unet, torch.cat([uncond_embeddings, text_embeddings])
                     ),
                 )
-                unet_cfgs.append(unet_cfg)
 
         assert latents_dtype is not None
-        assert unet_pixel_size is not None
-        assert unet_sample_size is not None
-
-        if width <= unet_pixel_size and height <= unet_pixel_size:
-            hires_fix = False
-
-        hires_wrapper = None
-        if hires_fix:
-            print(f"HiRes Fix, target {unet_sample_size}")
-            hires_wrapper = HiresUnetWrapper(
-                generators,
-                torch.Size([unet_sample_size, unet_sample_size]),
-                latent_debugger=self.latent_debugger,
-            )
-
-        # if self._structured_diffusion:
-        #     text_embedding_calculator = StructuredTextEmbedding(self, "align_seq")
-        # else:
-        #     # AFAIK there's no scenario where just BasicTextEmbedding is better than LPWTextEmbedding
-        #     # text_embedding_calculator = BasicTextEmbedding(self)
-        #     text_embedding_calculator = LPWTextEmbedding(self, max_embeddings_multiples=max_embeddings_multiples)
-
-        # # get unconditional embeddings for classifier free guidance
-        # text_embeddings, uncond_embeddings = text_embedding_calculator.get_embeddings(
-        #     prompt=prompt,
-        #     uncond_prompt=negative_prompt if do_classifier_free_guidance else None,
-        # )
 
         if isinstance(scheduler, SchedulerMixin):
             scheduler_wrapper = DiffusersScheduler
@@ -1313,25 +1553,23 @@ class UnifiedPipeline(DiffusionPipeline):
             scheduler, generators, self.execution_device, latents_dtype
         )
 
-        print(f"Modes: {mode_classes} with strength {strength}")
+        print("Mode tree:")
+        mode_tree.pretty_print()
 
-        modes: list[UnifiedMode] = [
-            mode_class(
-                pipeline=self,
-                scheduler=cscheduler,
-                generators=generators,
-                width=width,
-                height=height,
-                init_image=init_image,
-                mask_image=mask_image,
-                latents_dtype=latents_dtype,
-                batch_total=batch_total,
-                num_inference_steps=num_inference_steps,
-                strength=strength,
-                do_classifier_free_guidance=do_classifier_free_guidance,
-            )
-            for mode_class in mode_classes
-        ]
+        mode_tree.build_mode(
+            pipeline=self,
+            scheduler=cscheduler,
+            generators=generators,
+            width=width,
+            height=height,
+            init_image=init_image,
+            mask_image=mask_image,
+            latents_dtype=latents_dtype,
+            batch_total=batch_total,
+            num_inference_steps=num_inference_steps,
+            strength=strength,
+            do_classifier_free_guidance=do_classifier_free_guidance,
+        )
 
         if self.clip_model is not None and clip_guidance_scale:
             max_length = min(
@@ -1356,9 +1594,9 @@ class UnifiedPipeline(DiffusionPipeline):
                 num_images_per_prompt, dim=0
             )
 
-            modes = [
-                ClipGuidedMode(
-                    wrapped_mode=mode,
+            for leaf in mode_tree.leaves:
+                leaf.mode = ClipGuidedMode(
+                    wrapped_mode=leaf.mode,
                     scheduler=cscheduler,
                     pipeline=self,
                     dtype=latents_dtype,
@@ -1366,47 +1604,37 @@ class UnifiedPipeline(DiffusionPipeline):
                     config=clip_config,
                     generators=generators,
                 )
-                for mode in modes
-            ]
 
-        if unet_cfgs:
-            # if hires_wrapper:
-            #     unet_cfgs = [
-            #         unet_cfg.wrap_all(hires_wrapper.get_eps_wrapper)
-            #         for unet_cfg in unet_cfgs
-            #     ]
+        for leaf in mode_tree.leaves:
+            mode = cast(UnifiedMode, leaf.mode)
 
-            unet_cfgs = [
-                unet_cfg.wrap_all(mode.wrap_unet)
-                for unet_cfg, mode in zip(unet_cfgs, modes)
-            ]
+            if leaf.unet_cfg is not None:
+                leaf.unet_cfg = leaf.unet_cfg.wrap_all(mode.wrap_unet)
 
-            wrap_scaled_unet = getattr(cscheduler, "wrap_scaled_unet", None)
-            if wrap_scaled_unet:
-                unet_cfgs = [
-                    unet_cfg.wrap_all(wrap_scaled_unet) for unet_cfg in unet_cfgs
-                ]
+                wrap_scaled_unet = getattr(cscheduler, "wrap_scaled_unet", None)
+                if wrap_scaled_unet:
+                    leaf.unet_cfg = leaf.unet_cfg.wrap_all(wrap_scaled_unet)
 
-            unets = [
-                mode.wrap_guidance_unet(unet_cfg, guidance_scale, batch_total)
-                for mode, unet_cfg in zip(modes, unet_cfgs)
-            ]
-        else:
-            # if hires_fix:
-            #     unet_gs = [hires_wrapper.get_eps_wrapper(unet_g) for unet_g in unet_gs]
+                leaf.eps_unet = mode.wrap_guidance_unet(
+                    leaf.unet_cfg, guidance_scale, batch_total
+                )
+            else:
+                assert leaf.unet_g is not None
 
-            unet_gs = [mode.wrap_unet(unet_g) for unet_g, mode in zip(unet_gs, modes)]
+                leaf.unet_g = mode.wrap_unet(leaf.unet_g)
 
-            wrap_scaled_unet = getattr(cscheduler, "wrap_scaled_unet", None)
-            if wrap_scaled_unet:
-                unet_gs = [wrap_scaled_unet(unet_g) for unet_g in unet_gs]
+                wrap_scaled_unet = getattr(cscheduler, "wrap_scaled_unet", None)
+                if wrap_scaled_unet:
+                    leaf.unet_g = wrap_scaled_unet(leaf.unet_g)
 
-            unets = unet_gs
+                leaf.eps_unet = leaf.unet_g
 
-        cscheduler.set_eps_unets(unets)
+        cscheduler.set_eps_unets(
+            [leaf.eps_unet for leaf in mode_tree.leaves if leaf.eps_unet]
+        )
 
         scheduler_config = SchedulerConfig(
-            eta=eta if eta else 0,
+            eta=eta,
             churn=churn if churn else 0,
             churn_tmin=churn_tmin if churn_tmin else 0,
             churn_tmax=churn_tmax if churn_tmax else float("inf"),
@@ -1431,47 +1659,38 @@ class UnifiedPipeline(DiffusionPipeline):
         if callback:
             cscheduler.set_callback(callback, callback_steps)
 
-        if isinstance(cscheduler, KDiffusionScheduler):
-            cscheduler.unets = [
-                mode.wrap_k_unet(unet) for mode, unet in zip(modes, cscheduler.unets)
-            ]
-        else:
-            cscheduler.unets = [
-                mode.wrap_d_unet(unet) for mode, unet in zip(modes, cscheduler.unets)
-            ]
+        for i, leaf in enumerate(mode_tree.leaves):
+            assert leaf.mode is not None
 
-        if len(cscheduler.unets) == 1:
-            cscheduler.unet = cscheduler.unets[0]  # type: ignore
-        else:
-            cscheduler.unet = GraftUnets(
-                cscheduler.unets, generators, self._graft_factor
-            )
+            if isinstance(cscheduler, KDiffusionScheduler):
+                k_unet = cast(KDiffusionSchedulerUNet, cscheduler.unets[i])
+                leaf.k_unet = leaf.mode.wrap_k_unet(k_unet)
+            else:
+                d_unet = cast(DiffusersSchedulerUNet, cscheduler.unets[i])
+                leaf.d_unet = leaf.mode.wrap_d_unet(d_unet)
+
+        # Collapse up unets in tree
+        cscheduler.unet = mode_tree.collapse()
 
         # Get the initial starting point - either pure random noise, or the source image with some noise depending on mode
         # We only actually use the latents for the first mode, but UnifiedMode instances expect it to be called
-        latents = [mode.generateLatents() for mode in modes][0]
-        assert latents is not None
+
+        latents = mode_tree.initial_latents()
 
         self.latent_debugger.log("initial", 0, latents)
-
-        if hires_wrapper:
-            print(f"HiRes Fix, target {unet_sample_size}")
-            cscheduler.unet = hires_wrapper.get_generic_wrapper(cscheduler.unet)
-            latents = torch.concat([latents, latents])
 
         # MAIN LOOP
         latents = cscheduler.loop(latents, self.progress_bar)
 
         # If we are doing the hires fix, discard the standard-res chunks
-        if hires_fix:
-            latents = latents.chunk(2)[1]
+        latents = mode_tree.split_result(latents)
 
         latents = 1 / 0.18215 * latents
         image = self.vae_decode(latents)
 
         image = (image / 2 + 0.5).clamp(0, 1)
 
-        if outmask_image is not None:
+        if init_image is not None and outmask_image is not None:
             outmask = torch.cat([outmask_image] * batch_total)
             outmask = outmask[:, [0, 1, 2]]
             outmask = outmask.to(image.device)

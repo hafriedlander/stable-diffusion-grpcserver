@@ -16,13 +16,13 @@ from sdgrpcserver.pipeline.unet.types import (
 class GraftUnets(GenericSchedulerUNet):
     def __init__(
         self,
-        unets: list[DiffusersSchedulerUNet] | list[KDiffusionSchedulerUNet],
+        unet_root: DiffusersSchedulerUNet | KDiffusionSchedulerUNet,
+        unet_top: DiffusersSchedulerUNet | KDiffusionSchedulerUNet,
         generators: list[torch.Generator],
-        graft_factor: float,
     ):
-        self.unets = unets
+        self.unet_root = unet_root
+        self.unet_top = unet_top
         self.generators = generators
-        self.graft_factor = graft_factor
 
         self.easing = Easing(floor=0, start=0.1, end=0.3, easing="sine")
 
@@ -30,18 +30,25 @@ class GraftUnets(GenericSchedulerUNet):
         p = self.easing.interp(u)
 
         if p <= 0:
-            return self.unets[0](latents, __step, u=u)
+            return self.unet_root(latents, __step, u=u)
         elif p >= 1:
-            return self.unets[1](latents, __step, u=u)
+            return self.unet_top(latents, __step, u=u)
 
-        outputs = [unet(latents, __step, u=u) for unet in self.unets]
+        root = self.unet_root(latents, __step, u=u)
+        top = self.unet_top(latents, __step, u=u)
 
         # Build a map of 0..1 like latents
-        randmap = batched_rand(
-            outputs[-1].shape, self.generators, outputs[-1].device, outputs[-1].dtype
-        )
+        randmap = batched_rand(top.shape, self.generators, top.device, top.dtype)
 
         # Linear blend between base and graft
-        res = cast(type(outputs[0]), torch.where(randmap >= p, outputs[0], outputs[1]))
+        res = cast(type(top), torch.where(randmap >= p, root, top))
 
         return res
+
+    @classmethod
+    def merge_initial_latents(cls, left, right):
+        return left
+
+    @classmethod
+    def split_result(cls, left, right):
+        return right

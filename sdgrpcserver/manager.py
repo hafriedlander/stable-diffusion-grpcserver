@@ -18,6 +18,7 @@ import huggingface_hub
 import torch
 from diffusers import (
     ConfigMixin,
+    DPMSolverMultistepScheduler,
     LMSDiscreteScheduler,
     ModelMixin,
     PNDMScheduler,
@@ -42,9 +43,6 @@ from sdgrpcserver.k_diffusion import sampling as k_sampling
 from sdgrpcserver.pipeline.kschedulers import *
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
-from sdgrpcserver.pipeline.schedulers.scheduling_dpmsolver_multistep import (
-    DPMSolverMultistepScheduler,
-)
 from sdgrpcserver.pipeline.unified_pipeline import (
     SCHEDULER_NOISE_TYPE,
     UnifiedPipeline,
@@ -302,6 +300,7 @@ class PipelineWrapper(object):
                 beta_schedule="scaled_linear",
                 num_train_timesteps=1000,
                 solver_order=1,
+                prediction_type=self.prediction_type,
             )
         )
         self._dpmspp2 = self._prepScheduler(
@@ -311,6 +310,7 @@ class PipelineWrapper(object):
                 beta_schedule="scaled_linear",
                 num_train_timesteps=1000,
                 solver_order=2,
+                prediction_type=self.prediction_type,
             )
         )
         self._dpmspp3 = self._prepScheduler(
@@ -320,12 +320,16 @@ class PipelineWrapper(object):
                 beta_schedule="scaled_linear",
                 num_train_timesteps=1000,
                 solver_order=3,
+                prediction_type=self.prediction_type,
             )
         )
 
         # Common set of samplers that can handle epsilon or v_prediction unets
         self._samplers = {
             generation_pb2.SAMPLER_DDIM: self._ddim,
+            generation_pb2.SAMPLER_DPMSOLVERPP_1ORDER: self._dpmspp1,
+            generation_pb2.SAMPLER_DPMSOLVERPP_2ORDER: self._dpmspp2,
+            generation_pb2.SAMPLER_DPMSOLVERPP_3ORDER: self._dpmspp3,
             generation_pb2.SAMPLER_K_LMS: k_sampling.sample_lms,  # self._klms
             generation_pb2.SAMPLER_K_EULER: k_sampling.sample_euler,  # self._euler
             generation_pb2.SAMPLER_K_EULER_ANCESTRAL: k_sampling.sample_euler_ancestral,  # self._eulera
@@ -344,9 +348,6 @@ class PipelineWrapper(object):
             self._samplers = {
                 **self._samplers,
                 generation_pb2.SAMPLER_DDPM: self._plms,
-                generation_pb2.SAMPLER_DPMSOLVERPP_1ORDER: self._dpmspp1,
-                generation_pb2.SAMPLER_DPMSOLVERPP_2ORDER: self._dpmspp2,
-                generation_pb2.SAMPLER_DPMSOLVERPP_3ORDER: self._dpmspp3,
             }
 
     def _prepScheduler(self, scheduler):
