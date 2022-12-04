@@ -14,25 +14,91 @@ from sdgrpcserver.pipeline.unet.types import (
     XtTensor,
 )
 
+# Indexes into a shape for the height and width dimensions
+# Negative indexed to work for any number of dimensions
+Hi, Wi = -2, -1
 
-def match_shape(latents: torch.Tensor, target: torch.Size):
-    # If it's already the right size, just return it
-    if latents.shape[-len(target) :] == target:
-        return latents
 
-    # Maybe scale it?
-    scale = max(target[0] / latents.shape[2], target[1] / latents.shape[3])
-    if scale != 1:
-        latents = resize_right.resize(latents, scale_factors=scale, pad_mode="reflect")
+def pad_like(latents, like, mode="replicate"):
+    wd = like.shape[Wi] - latents.shape[Wi]
+    hd = like.shape[Hi] - latents.shape[Hi]
+    l = wd // 2
+    r = wd - l
+    t = hd // 2
+    b = hd - t
 
-    # If we don't need to crop, skip that bit
-    if latents.shape[-len(target) :] == target:
-        return latents
+    pad = torch.nn.functional.pad
 
-    offset2 = (latents.shape[2] - target[0]) // 2
-    offset3 = (latents.shape[3] - target[1]) // 2
+    if isinstance(mode, int | float):
+        return pad(latents, pad=(l, r, t, b), mode="constant", value=mode)
+    else:
+        return pad(latents, pad=(l, r, t, b), mode=mode)
 
-    return latents[:, :, offset2 : offset2 + target[0], offset3 : offset3 + target[1]]
+
+def resize_nearest(latents, scale_factor=1):
+    hs = int(latents.shape[Hi] * scale_factor)
+    ws = int(latents.shape[Wi] * scale_factor)
+
+    return T.functional.resize(latents, [hs, ws], T.InterpolationMode.NEAREST)
+
+
+def scale_into(latents, target, scale):
+    if scale >= 1:
+        # latents = resize_right.resize(latents, scale_factors=scale, pad_mode="reflect")
+        latents = resize_nearest(latents, scale)
+    else:
+        latents = resize_nearest(latents, scale)
+
+    # Now crop off anything that's outside target shape, and offset if it's inside target shape
+
+    # Positive is offset into the shape, negative is crop amount
+    offh = (target.shape[Hi] - latents.shape[Hi]) // 2
+    offw = (target.shape[Wi] - latents.shape[Wi]) // 2
+
+    if offh < 0:
+        latents = latents[:, :, -offh : -offh + target.shape[Hi], :]
+        offh = 0
+
+    if offw < 0:
+        latents = latents[:, :, :, -offw : -offw + target.shape[Wi]]
+        offw = 0
+
+    target[
+        :, :, offh : offh + latents.shape[Hi], offw : offw + latents.shape[Wi]
+    ] = latents
+    return target
+
+
+def downscale_into(latents, target, oos_fraction):
+    scale_min = min(
+        target.shape[Hi] / latents.shape[Hi], target.shape[Wi] / latents.shape[Wi]
+    )
+    scale_max = max(
+        target.shape[Hi] / latents.shape[Hi], target.shape[Wi] / latents.shape[Wi]
+    )
+
+    # At oos_fraction == 1, we want to downscale to completely contain the latent within
+    # the square target - i.e. scale_min. At oos_fraction == 0 we want to downscale to
+    # completely cover the square target - i.e. scale_max
+
+    scale = scale_min * oos_fraction + scale_max * (1 - oos_fraction)
+    return scale_into(latents, target, scale)
+
+
+def upscale_into(latents, target, oos_fraction):
+    scale_min = min(
+        target.shape[Hi] / latents.shape[Hi], target.shape[Wi] / latents.shape[Wi]
+    )
+    scale_max = max(
+        target.shape[Hi] / latents.shape[Hi], target.shape[Wi] / latents.shape[Wi]
+    )
+
+    # At oos_fraction == 1, we want to upscale to completely cover the
+    # target - i.e. scale_max. At oos_fraction = 0 we want to completely
+    # fit square latent into OOS targe, i.e. scale_min
+
+    scale = scale_max * oos_fraction + scale_min * (1 - oos_fraction)
+    return scale_into(latents, target, scale)
 
 
 class HiresUnetWrapper(GenericSchedulerUNet):
@@ -41,13 +107,15 @@ class HiresUnetWrapper(GenericSchedulerUNet):
         unet_natural: DiffusersSchedulerUNet | KDiffusionSchedulerUNet,
         unet_hires: DiffusersSchedulerUNet | KDiffusionSchedulerUNet,
         generators: list[torch.Generator],
-        target: torch.Size,
+        natural_size: torch.Size,
+        oos_fraction: float,
         latent_debugger,
     ):
         self.unet_natural = unet_natural
         self.unet_hires = unet_hires
         self.generators = generators
-        self.target = target
+        self.natural_size = natural_size
+        self.oos_fraction = oos_fraction
 
         self.easing = Easing(floor=0, start=0, end=0.4, easing="sine")
         self.latent_debugger = latent_debugger
@@ -70,7 +138,7 @@ class HiresUnetWrapper(GenericSchedulerUNet):
             return cast(type(hi), torch.concat([lo_in, hi]))
 
         *_, h, w = latents.shape
-        th, tw = self.target
+        th, tw = self.natural_size
 
         offseth = (h - th) // 2
         offsetw = (w - tw) // 2
@@ -78,38 +146,19 @@ class HiresUnetWrapper(GenericSchedulerUNet):
         lo_in = lo_in[:, :, offseth : offseth + th, offsetw : offsetw + tw]
         lo = self.unet_natural(lo_in, lo_t, u=u)
 
-        # Crop hi and merge it back into lo
-        scale = min(tw / w, th / h)
-
-        h_s = int(h * scale)
-        w_s = int(w * scale)
-
-        offseth2 = (th - h_s) // 2
-        offsetw2 = (tw - w_s) // 2
-
-        image_slice = (
-            slice(0, None),
-            slice(0, None),
-            slice(offseth2, offseth2 + h_s),
-            slice(offsetw2, offsetw2 + w_s),
-        )
-
-        hi_crop = torch.zeros_like(lo)
-        # T.functional.resize(hi, [th, tw], T.InterpolationMode.NEAREST)
-        hi_crop[image_slice] = T.functional.resize(
-            hi, [h_s, w_s], T.InterpolationMode.NEAREST
-        )
-
-        # hi_crop = hi[:, :, offseth : offseth + th, offsetw : offsetw + tw]
+        # Downscale hi and merge into lo
+        hi_downscaled = torch.zeros_like(lo)  # Un-overlapped space is zero
+        hi_downscaled = downscale_into(hi, hi_downscaled, self.oos_fraction)
 
         randmap = batched_rand(lo.shape, self.generators, lo.device, lo.dtype)
-        lo_merged = torch.where(randmap >= p, lo, hi_crop)
+        lo_merged = torch.where(randmap >= p, lo, hi_downscaled)
 
-        # Scale lo and merge it back into hi
-        lo_scaled = match_shape(lo, hi.shape[-2:])
+        # Upscale lo and merge it back into hi
+        lo_upscaled = hi.clone()  # Un-overlapped space copied from hi
+        lo_upscaled = upscale_into(lo, lo_upscaled, self.oos_fraction)
 
         randmap = batched_rand(hi.shape, self.generators, hi.device, hi.dtype)
-        hi_merged = torch.where(randmap >= p, lo_scaled, hi)
+        hi_merged = torch.where(randmap >= p, lo_upscaled, hi)
 
         # Expand lo back to full tensor size by wrapping with 0
         lo_expanded = torch.zeros_like(hi_merged)
@@ -122,31 +171,17 @@ class HiresUnetWrapper(GenericSchedulerUNet):
         return cast(type(hi), res)
 
     @classmethod
-    def image_to_natural(cls, natural_size: int, image: torch.Tensor, fill=torch.zeros):
-        *_, height, width = image.shape
-        scale = min(natural_size / width, natural_size / height)
-
-        height_scaled = int(height * scale)
-        width_scaled = int(width * scale)
-
-        offseth = (natural_size - height_scaled) // 2
-        offsetw = (natural_size - width_scaled) // 2
-
-        image_slice = (
-            slice(0, None),
-            slice(0, None),
-            slice(offseth, offseth + height_scaled),
-            slice(offsetw, offsetw + width_scaled),
-        )
-
+    def image_to_natural(
+        cls,
+        natural_size: int,
+        image: torch.Tensor,
+        oos_fraction: float,
+        fill=torch.zeros,
+    ):
         natural_image_size = (*image.shape[:-2], natural_size, natural_size)
-
         natural_image = fill(natural_image_size, device=image.device, dtype=image.dtype)
 
-        natural_image[image_slice] = resize_right.resize(
-            image, scale_factors=scale, pad_mode="reflect"
-        )
-
+        downscale_into(image, natural_image, oos_fraction)
         return natural_image
 
     @classmethod
@@ -160,6 +195,7 @@ class HiresUnetWrapper(GenericSchedulerUNet):
         offsetw = (w - tw) // 2
 
         left_resized[:, :, offseth : offseth + th, offsetw : offsetw + tw] = left
+        right[:, :, offseth : offseth + th, offsetw : offsetw + tw] = left
         return torch.concat([left_resized, right])
 
     @classmethod

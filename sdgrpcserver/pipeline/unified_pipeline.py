@@ -58,7 +58,6 @@ from sdgrpcserver.pipeline.unet.clipguided import (
 from sdgrpcserver.pipeline.unet.core import UNetWithEmbeddings
 from sdgrpcserver.pipeline.unet.graft import GraftUnets
 from sdgrpcserver.pipeline.unet.hires_fix import HiresUnetWrapper
-from sdgrpcserver.pipeline.unet.hires_fix import match_shape as hires_match_shape
 from sdgrpcserver.pipeline.unet.types import (
     DiffusersSchedulerUNet,
     EpsTensor,
@@ -341,7 +340,9 @@ class MaskProcessorMixin(object):
 
 
 class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
-    def __init__(self, mask_image, num_inference_steps, strength, **kwargs):
+    def __init__(
+        self, mask_image, num_inference_steps, strength, latent_debugger, **kwargs
+    ):
         # Check strength
         if strength < 0 or strength > 2:
             raise ValueError(
@@ -379,6 +380,8 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         self.latent_high_mask = self.round_mask_high(self.latent_mask)
         self.latent_low_mask = self.round_mask_low(self.latent_mask)
         self.latent_blend_mask = self.latent_mask * self.mask_scale
+
+        self.latent_debugger = latent_debugger
 
     def _matchToSD(self, tensor, targetSD):
         # Normalise tensor to -1..1
@@ -548,12 +551,12 @@ class EnhancedInpaintMode(Img2imgMode, MaskProcessorMixin):
         if self.fill_with_shaped_noise:
             init_latents = self._fillWithShapedNoise(init_latents)
 
-        self.pipeline.latent_debugger.log("shapednoise", 0, init_latents)
+        self.latent_debugger.log("shapednoise", 0, init_latents)
 
         # Add the initial noise
         init_latents = self._addInitialNoise(init_latents)
 
-        self.pipeline.latent_debugger.log("initnoise", 0, init_latents)
+        self.latent_debugger.log("initnoise", 0, init_latents)
 
         # And return
         return init_latents
@@ -1000,7 +1003,13 @@ class UnifiedPipeline(DiffusionPipeline):
         # Grafted inpaint uses an inpaint_unet from a different model than the primary model
         # as guidance to produce a nicer inpaint that EnhancedInpaintMode otherwise can
         self._grafted_inpaint = False
+
         self._hires_fix = True
+        self._hires_oos_fraction = 0.6
+        # Generally if an image is provided we want 1.0 since anything else might
+        # clip some of the input image / mask
+        self._hires_image_oos_fraction = 1.0
+
         self._structured_diffusion = False
 
         # Some models use a different text embedding layer
@@ -1053,6 +1062,18 @@ class UnifiedPipeline(DiffusionPipeline):
                 self._grafted_inpaint = bool(value)
             elif key == "hires_fix":
                 self._hires_fix = bool(value)
+            elif key == "hires":
+                for subkey, subval in value.items():
+                    if subkey == "enable":
+                        self._hires_fix = bool(subval)
+                    elif subkey == "oos_fraction":
+                        self._hires_oos_fraction = float(subval)
+                    elif subkey == "image_oos_fraction":
+                        self._hires_image_oos_fraction = float(subval)
+                    else:
+                        raise ValueError(
+                            f"Unknown option {subkey}: {subval} passed as part of hires settings"
+                        )
             elif key == "graft_factor":
                 print(
                     "Graft Factor is no longer used. "
@@ -1229,7 +1250,10 @@ class UnifiedPipeline(DiffusionPipeline):
         approx_cutouts: Optional[int] = None,
         no_cutouts: CLIP_NO_CUTOUTS_TYPE = False,
         scheduler: DiffusersSchedulerProtocol | Callable | None = None,
-        do_hires_fix=None,
+        hires_fix=None,
+        hires_oos_fraction=None,
+        debug_latent_tags=None,
+        debug_latent_prefix="",
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -1294,8 +1318,19 @@ class UnifiedPipeline(DiffusionPipeline):
             scheduler = self.scheduler  # type: ignore
 
         # If do_hires_fix not passed, use engine default
-        if do_hires_fix is None:
-            do_hires_fix = self._hires_fix
+        if hires_fix is None:
+            hires_fix = self._hires_fix
+
+        if hires_oos_fraction is None:
+            hires_oos_fraction = self._hires_oos_fraction
+            if init_image is not None:
+                hires_oos_fraction = self._hires_image_oos_fraction
+
+        latent_debugger = LatentDebugger(
+            vae=self.vae,
+            enabled=debug_latent_tags,
+            prefix=debug_latent_prefix,
+        )
 
         # Check CLIP before overwritting
         if clip_guidance_scale is not None and self.clip_model is None:
@@ -1441,7 +1476,7 @@ class UnifiedPipeline(DiffusionPipeline):
                 generators=generators,
             )
 
-        if do_hires_fix:
+        if hires_fix:
 
             def get_natural_opts(child_opts):
                 unet = child_opts["unet"]
@@ -1461,12 +1496,17 @@ class UnifiedPipeline(DiffusionPipeline):
 
                 if init_image is not None:
                     natural_init_image = HiresUnetWrapper.image_to_natural(
-                        unet_pixel_size, cast(torch.Tensor, init_image)
+                        unet_pixel_size,
+                        cast(torch.Tensor, init_image),
+                        oos_fraction=hires_oos_fraction,
                     )
 
                 if mask_image is not None:
                     natural_mask_image = HiresUnetWrapper.image_to_natural(
-                        unet_pixel_size, cast(torch.Tensor, mask_image), torch.ones
+                        unet_pixel_size,
+                        cast(torch.Tensor, mask_image),
+                        oos_fraction=hires_oos_fraction,
+                        fill=torch.ones,
                     )
 
                 return {
@@ -1477,13 +1517,17 @@ class UnifiedPipeline(DiffusionPipeline):
                     "mask_image": natural_mask_image,
                 }
 
+            # TODO: This only works as long as all unets have same natural size
+            unet_sample_size = self.get_unet_sample_size(self.unet)
+
             mode_tree.wrap(
                 get_natural_opts,
                 None,
                 HiresUnetWrapper,
                 generators=generators,
-                target=[64, 64],
-                latent_debugger=self.latent_debugger,
+                natural_size=[unet_sample_size, unet_sample_size],
+                oos_fraction=hires_oos_fraction,
+                latent_debugger=latent_debugger,
             )
 
         latents_dtype = None
@@ -1569,6 +1613,7 @@ class UnifiedPipeline(DiffusionPipeline):
             num_inference_steps=num_inference_steps,
             strength=strength,
             do_classifier_free_guidance=do_classifier_free_guidance,
+            latent_debugger=latent_debugger,
         )
 
         if self.clip_model is not None and clip_guidance_scale:
@@ -1677,7 +1722,7 @@ class UnifiedPipeline(DiffusionPipeline):
 
         latents = mode_tree.initial_latents()
 
-        self.latent_debugger.log("initial", 0, latents)
+        latent_debugger.log("initial", 0, latents)
 
         # MAIN LOOP
         latents = cscheduler.loop(latents, self.progress_bar)

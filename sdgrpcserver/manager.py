@@ -450,7 +450,13 @@ class PipelineWrapper(object):
         outmask_image: Optional[UnifiedPipelineImageType] = None,
         # The strength of the img2img or inpaint process, if init_image is provided
         strength: float = None,
-        # Process controll
+        # Hires control
+        hires_fix=None,
+        hires_oos_fraction=None,
+        # Debug control
+        debug_latent_tags=None,
+        debug_latent_prefix="",
+        # Process control
         progress_callback=None,
         stop_event=None,
         suppress_output=False,
@@ -503,6 +509,10 @@ class PipelineWrapper(object):
             mask_image=mask_image,
             outmask_image=outmask_image,
             strength=strength,
+            hires_fix=hires_fix,
+            hires_oos_fraction=hires_oos_fraction,
+            debug_latent_tags=debug_latent_tags,
+            debug_latent_prefix=debug_latent_prefix,
             output_type="tensor",
             return_dict=False,
         )

@@ -17,7 +17,7 @@ import signal
 import sys
 import time
 import uuid
-from argparse import ArgumentParser, Namespace
+from argparse import ArgumentParser, BooleanOptionalAction, Namespace
 from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple, Union
 
 import grpc
@@ -295,6 +295,8 @@ class StabilityInference:
         guidance_strength: Optional[float] = None,
         guidance_prompt: Union[str, generation.Prompt] = None,
         guidance_models: List[str] = None,
+        hires_fix: bool | None = None,
+        hires_oos_fraction: float | None = None,
     ) -> Generator[generation.Answer, None, None]:
         """
         Generate images from a prompt.
@@ -437,6 +439,18 @@ class StabilityInference:
                 ],
             )
 
+        if hires_fix is None and hires_oos_fraction is not None:
+            hires_fix = True
+
+        hires = None
+
+        if hires_fix is not None:
+            hires_params: dict[str, bool | float] = dict(enable=hires_fix)
+            if hires_oos_fraction is not None:
+                hires_params["oos_fraction"] = hires_oos_fraction
+
+            hires = generation.HiresFixParameters(**hires_params)
+
         image_parameters = generation.ImageParameters(
             transform=generation.TransformType(diffusion=sampler),
             height=height,
@@ -445,6 +459,7 @@ class StabilityInference:
             steps=steps,
             samples=samples,
             parameters=[generation.StepParameter(**step_parameters)],
+            hires=hires,
         )
 
         return self.emit_request(prompt=prompts, image_parameters=image_parameters)
@@ -657,6 +672,16 @@ if __name__ == "__main__":
         help="Negative Prompt",
     )
     parser.add_argument(
+        "--hires_fix",
+        action=BooleanOptionalAction,
+        help="Enable or disable the hires fix for images above the 'natural' size of the model",
+    )
+    parser.add_argument(
+        "--hires_oos_fraction",
+        type=float,
+        help="0..1, how out-of-square the area that's considered when doing a non-square hires fix should be. Low values risk more issues, high values zoom in more.",
+    )
+    parser.add_argument(
         "--list_engines",
         "-L",
         action="store_true",
@@ -706,6 +731,8 @@ if __name__ == "__main__":
         "init_image": args.init_image,
         "mask_image": args.mask_image,
         "mask_from_image_alpha": args.mask_from_image_alpha,
+        "hires_fix": args.hires_fix,
+        "hires_oos_fraction": args.hires_oos_fraction,
     }
 
     stability_api = StabilityInference(
