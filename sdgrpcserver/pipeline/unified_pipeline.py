@@ -1212,6 +1212,23 @@ class UnifiedPipeline(DiffusionPipeline):
 
         return self.device
 
+    def set_tiling_mode(self, tiling=True):
+        module_names, _, _ = self.extract_init_dict(dict(self.config))
+        modules = [getattr(self, name) for name in module_names.keys()]
+        modules = filter(lambda module: isinstance(module, torch.nn.Module), modules)
+
+        for module in modules:
+            for submodule in module.modules():
+                if isinstance(submodule, torch.nn.Conv2d | torch.nn.ConvTranspose2d):
+                    # Remember original padding mode
+                    if not hasattr(submodule, "orig_padding_mode"):
+                        submodule.orig_padding_mode = submodule.padding_mode
+                    # Then set padding mode to either "circular" or original mode
+                    if tiling:
+                        submodule.padding_mode = "circular"
+                    else:
+                        submodule.padding_mode = submodule.orig_padding_mode
+
     @torch.no_grad()
     def __call__(
         self,
@@ -1255,6 +1272,7 @@ class UnifiedPipeline(DiffusionPipeline):
         scheduler: DiffusersSchedulerProtocol | Callable | None = None,
         hires_fix=None,
         hires_oos_fraction=None,
+        tiling=False,
         debug_latent_tags=None,
         debug_latent_prefix="",
     ):
@@ -1328,6 +1346,8 @@ class UnifiedPipeline(DiffusionPipeline):
             hires_oos_fraction = self._hires_oos_fraction
             if init_image is not None:
                 hires_oos_fraction = self._hires_image_oos_fraction
+
+        self.set_tiling_mode(tiling)
 
         latent_debugger = LatentDebugger(
             vae=self.vae,

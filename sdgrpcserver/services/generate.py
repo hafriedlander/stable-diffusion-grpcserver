@@ -296,6 +296,9 @@ class ParameterExtractor:
             return hires.oos_fraction
         return None
 
+    def tiling(self):
+        return self._image_parameter("tiling")
+
     def get(self, field):
         if field not in self._result:
             self._result[field] = getattr(self, field)()

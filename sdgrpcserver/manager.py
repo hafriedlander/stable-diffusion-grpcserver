@@ -453,6 +453,8 @@ class PipelineWrapper(object):
         # Hires control
         hires_fix=None,
         hires_oos_fraction=None,
+        # Tiling control
+        tiling=False,
         # Debug control
         debug_latent_tags=None,
         debug_latent_prefix="",
@@ -511,6 +513,7 @@ class PipelineWrapper(object):
             strength=strength,
             hires_fix=hires_fix,
             hires_oos_fraction=hires_oos_fraction,
+            tiling=tiling,
             debug_latent_tags=debug_latent_tags,
             debug_latent_prefix=debug_latent_prefix,
             output_type="tensor",

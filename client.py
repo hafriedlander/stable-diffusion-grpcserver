@@ -297,6 +297,7 @@ class StabilityInference:
         guidance_models: List[str] = None,
         hires_fix: bool | None = None,
         hires_oos_fraction: float | None = None,
+        tiling: bool = False,
     ) -> Generator[generation.Answer, None, None]:
         """
         Generate images from a prompt.
@@ -460,6 +461,7 @@ class StabilityInference:
             samples=samples,
             parameters=[generation.StepParameter(**step_parameters)],
             hires=hires,
+            tiling=tiling,
         )
 
         return self.emit_request(prompt=prompts, image_parameters=image_parameters)
@@ -682,6 +684,11 @@ if __name__ == "__main__":
         help="0..1, how out-of-square the area that's considered when doing a non-square hires fix should be. Low values risk more issues, high values zoom in more.",
     )
     parser.add_argument(
+        "--tiling",
+        action=BooleanOptionalAction,
+        help="Enable or disable producing a tilable result",
+    )
+    parser.add_argument(
         "--list_engines",
         "-L",
         action="store_true",
@@ -733,6 +740,7 @@ if __name__ == "__main__":
         "mask_from_image_alpha": args.mask_from_image_alpha,
         "hires_fix": args.hires_fix,
         "hires_oos_fraction": args.hires_oos_fraction,
+        "tiling": args.tiling,
     }
 
     stability_api = StabilityInference(
