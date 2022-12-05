@@ -1005,6 +1005,7 @@ class UnifiedPipeline(DiffusionPipeline):
         self._grafted_inpaint = False
 
         self._hires_fix = True
+        self._hires_threshold_fraction = 0.0333
         self._hires_oos_fraction = 0.6
         # Generally if an image is provided we want 1.0 since anything else might
         # clip some of the input image / mask
@@ -1066,6 +1067,8 @@ class UnifiedPipeline(DiffusionPipeline):
                 for subkey, subval in value.items():
                     if subkey == "enable":
                         self._hires_fix = bool(subval)
+                    elif subkey == "threshold_fraction":
+                        self._hires_threshold_fraction = float(subval)
                     elif subkey == "oos_fraction":
                         self._hires_oos_fraction = float(subval)
                     elif subkey == "image_oos_fraction":
@@ -1481,8 +1484,9 @@ class UnifiedPipeline(DiffusionPipeline):
             def get_natural_opts(child_opts):
                 unet = child_opts["unet"]
                 unet_pixel_size = self.get_unet_pixel_size(unet)
+                hires_threshold = unet_pixel_size * (1 + self._hires_threshold_fraction)
 
-                if width <= unet_pixel_size and height <= unet_pixel_size:
+                if width <= hires_threshold and height <= hires_threshold:
                     raise ModeSkipException()
 
                 if isinstance(scheduler, SchedulerMixin | KSchedulerMixin):
