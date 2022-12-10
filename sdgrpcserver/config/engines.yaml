@@ -107,20 +107,20 @@
   local_model: "./stable-diffusion-v2-inpainting"
   local_model_fp16: "./stable-diffusion-v2-inpainting-fp16"
 
-- model_id: "stable-diffusion-v2-base"
-  model: "stabilityai/stable-diffusion-2-base"
-  local_model: "./stable-diffusion-v2-base"
-  local_model_fp16: "./stable-diffusion-v2-base"
+- model_id: "stable-diffusion-v2-1-base"
+  model: "stabilityai/stable-diffusion-2-1-base"
+  local_model: "./stable-diffusion-v2-1-base"
+  local_model_fp16: "./stable-diffusion-v2-1-base"
   overrides:
     inpaint_unet: "@stable-diffusion-v2-inpainting/unet"
 
 # At the moment, the higher resolution 768x768 Stable Diffusion 2 model
 # is set up as a seperate engine, as the V2 inpaint model is still 512x512
 # and sdgrpcserver can't handle mixed resolutions like that.
-- model_id: "stable-diffusion-v2-vpred"
-  model: "stabilityai/stable-diffusion-2"
-  local_model: "./stable-diffusion-v2"
-  local_model_fp16: "./stable-diffusion-v2-fp16"
+- model_id: "stable-diffusion-v2-1-vpred"
+  model: "stabilityai/stable-diffusion-2-1"
+  local_model: "./stable-diffusion-v2-1"
+  local_model_fp16: "./stable-diffusion-v2-1-fp16"
 
 # This is the Inkpunk community finetune of Stable Diffusion 2. This shows
 # how to set up a grafted inpaint pipeline on a V2 base

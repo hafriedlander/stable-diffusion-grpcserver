@@ -16,15 +16,6 @@ import accelerate
 import generation_pb2
 import huggingface_hub
 import torch
-from diffusers import (
-    ConfigMixin,
-    DPMSolverMultistepScheduler,
-    LMSDiscreteScheduler,
-    ModelMixin,
-    PNDMScheduler,
-    StableDiffusionPipeline,
-    pipelines,
-)
 from diffusers.configuration_utils import FrozenDict
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from diffusers.pipeline_utils import DiffusionPipeline
@@ -39,6 +30,15 @@ from transformers import (
     PreTrainedModel,
 )
 
+from diffusers import (
+    ConfigMixin,
+    DPMSolverMultistepScheduler,
+    LMSDiscreteScheduler,
+    ModelMixin,
+    PNDMScheduler,
+    StableDiffusionPipeline,
+    pipelines,
+)
 from sdgrpcserver.k_diffusion import sampling as k_sampling
 from sdgrpcserver.pipeline.kschedulers import *
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
@@ -210,9 +210,12 @@ class PipelineWrapper(object):
         self._pipeline = pipeline
         self._previous = None
 
-        self._pipeline.enable_attention_slicing(
-            1 if self.mode.attention_slice else None
-        )
+        if self.mode.attention_slice:
+            self._pipeline.enable_attention_slicing("auto")
+            self._pipeline.enable_vae_slicing()
+        else:
+            self._pipeline.disable_attention_slicing()
+            self._pipeline.disable_vae_slicing()
 
         if self.mode.cpu_offload:
             for key, value in self._pipeline.__dict__.items():

@@ -14,6 +14,7 @@ from diffusers.pipelines.stable_diffusion.safety_checker import (
 )
 from diffusers.schedulers.scheduling_utils import SchedulerMixin
 from diffusers.utils import deprecate, logging
+from diffusers.utils.import_utils import is_xformers_available
 from packaging import version
 from PIL.Image import Image as PILImage
 from transformers.models.clip import (
@@ -1047,6 +1048,9 @@ class UnifiedPipeline(DiffusionPipeline):
             if self.inpaint_text_encoder:
                 set_requires_grad(self.inpaint_text_encoder, False)
 
+        if is_xformers_available():
+            self.enable_xformers_memory_efficient_attention()
+
     @property
     def latent_debugger(self):
         return LatentDebugger(self.vae)
@@ -1082,11 +1086,11 @@ class UnifiedPipeline(DiffusionPipeline):
                     "Graft Factor is no longer used. "
                     "Please remove it from your engines.yaml."
                 )
-            elif key == "xformers" and value:
-                print(
-                    "XFormers is always enabled if it is available now, "
-                    "you don't need to specify it in your engines.yaml"
-                )
+            elif key == "xformers":
+                if bool(value):
+                    self.enable_xformers_memory_efficient_attention()
+                else:
+                    self.disable_xformers_memory_efficient_attention()
             elif key == "tome" and bool(value):
                 print("Warning: ToMe isn't finished, and shouldn't be used")
                 if tome_patcher:
@@ -1152,40 +1156,20 @@ class UnifiedPipeline(DiffusionPipeline):
                     f"Unknown option {key}: {value} passed to UnifiedPipeline"
                 )
 
-    def enable_attention_slicing(
-        self, slice_size: int | Literal["auto"] | None = "auto"
-    ):
+    def enable_vae_slicing(self):
         r"""
-        Enable sliced attention computation.
-
-        When this option is enabled, the attention module will split the input tensor in slices, to compute attention
-        in several steps. This is useful to save some memory in exchange for a small speed decrease.
-
-        Args:
-            slice_size (`str` or `int`, *optional*, defaults to `"auto"`):
-                When `"auto"`, halves the input to the attention heads, so attention will be computed in two steps. If
-                a number is provided, uses as many slices as `attention_head_dim // slice_size`. In this case,
-                `attention_head_dim` must be a multiple of `slice_size`.
+        Enable sliced VAE decoding.
+        When this option is enabled, the VAE will split the input tensor in slices to compute decoding in several
+        steps. This is useful to save some memory and allow larger batch sizes.
         """
-        if slice_size == "auto":
-            unet_config = cast(diffusers_types.UnetConfig, self.unet.config)
-            if isinstance(unet_config.attention_head_dim, int):
-                # half the attention head size is usually a good trade-off between
-                # speed and memory
-                slice_size = unet_config.attention_head_dim // 2
-            else:
-                # if `attention_head_dim` is a list, take the smallest head size
-                slice_size = min(unet_config.attention_head_dim)
+        self.vae.enable_slicing()
 
-        self.unet.set_attention_slice(slice_size)
-
-    def disable_attention_slicing(self):
+    def disable_vae_slicing(self):
         r"""
-        Disable sliced attention computation. If `enable_attention_slicing` was previously invoked, this method will go
-        back to computing attention in one step.
+        Disable sliced VAE decoding. If `enable_vae_slicing` was previously invoked, this method will go back to
+        computing decoding in one step.
         """
-        # set slice_size = `None` to disable `attention slicing`
-        self.enable_attention_slicing(None)
+        self.vae.disable_slicing()
 
     @property
     def device(self):

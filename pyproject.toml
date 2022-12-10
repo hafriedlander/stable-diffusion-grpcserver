@@ -4,12 +4,10 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "stable-diffusion-grpcserver"
-authors = [{name = "Hamish Friedlander", email = "hafriedlander@gmail.com"}]
+authors = [{ name = "Hamish Friedlander", email = "hafriedlander@gmail.com" }]
 readme = "README.md"
-license = {file = "LICENSE"}
-classifiers = [
-  "License :: OSI Approved :: Apache Software License"
-]
+license = { file = "LICENSE" }
+classifiers = ["License :: OSI Approved :: Apache Software License"]
 dynamic = ["version", "description"]
 dependencies = [
   # Core pipeline
@@ -20,8 +18,8 @@ dependencies = [
   "opencv-python-headless ~= 4.6.0.66",
   "scipy ~= 1.9.1",
   "ftfy ~= 6.1.1",
-  "transformers ~= 4.24.0",
-  "diffusers ~= 0.9.0",
+  "transformers ~= 4.25.1",
+  "diffusers ~= 0.10.2",
   "accelerate ~= 0.13.2",
   "easing-functions ~= 1.0.4",
   # For ToMe
@@ -46,11 +44,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = [
-    "black ~= 22.10.0",
-    "flake8 ~= 6.0.0",
-    "flake8-pyproject ~= 1.2.1"
-]
+dev = ["black ~= 22.10.0", "flake8 ~= 6.0.0", "flake8-pyproject ~= 1.2.1"]
 
 [project.urls]
 Home = "https://github.com/hafriedlander/stable-diffusion-grpcserver"

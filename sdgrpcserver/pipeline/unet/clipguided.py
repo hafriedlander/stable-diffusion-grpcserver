@@ -126,12 +126,16 @@ class ClipGuidedMode:
 
         self.vae_scale_factor = pipeline.vae_scale_factor
 
+        feature_extractor_size = self.pipeline.feature_extractor.size
+        if isinstance(feature_extractor_size, dict):
+            feature_extractor_size = feature_extractor_size["shortest_edge"]
+
         self.make_cutouts = MakeCutouts(
-            self.pipeline.feature_extractor.size // self.vae_scale_factor,
+            feature_extractor_size // self.vae_scale_factor,
             generators=generators,
         )
         self.make_cutouts_rgb = MakeCutouts(
-            self.pipeline.feature_extractor.size, generators=generators
+            feature_extractor_size, generators=generators
         )
 
         self.approx_decoder = VaeApproximator(
