@@ -1,3 +1,4 @@
+import functools
 import importlib
 import inspect
 import json
@@ -5,7 +6,6 @@ import math
 import os
 import tempfile
 import traceback
-import warnings
 from copy import deepcopy
 from fnmatch import fnmatch
 from functools import cache
@@ -42,6 +42,7 @@ from diffusers import (
 from sdgrpcserver.k_diffusion import sampling as k_sampling
 from sdgrpcserver.pipeline.kschedulers import *
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
+from sdgrpcserver.pipeline.schedulers.sample_dpmpp_2m import sample_dpmpp_2m
 from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
 from sdgrpcserver.pipeline.unified_pipeline import (
     SCHEDULER_NOISE_TYPE,
@@ -343,7 +344,9 @@ class PipelineWrapper(object):
             generation_pb2.SAMPLER_DPM_ADAPTIVE: k_sampling.sample_dpm_adaptive,
             generation_pb2.SAMPLER_DPMSOLVERPP_2S_ANCESTRAL: k_sampling.sample_dpmpp_2s_ancestral,
             generation_pb2.SAMPLER_DPMSOLVERPP_SDE: k_sampling.sample_dpmpp_sde,
-            generation_pb2.SAMPLER_DPMSOLVERPP_2M: k_sampling.sample_dpmpp_2m,
+            generation_pb2.SAMPLER_DPMSOLVERPP_2M: functools.partial(
+                sample_dpmpp_2m, warmup_lms=True, ddim_cutoff=0.1
+            ),
         }
 
         # If we're not using a v_prediction unet, add in the samplers that can only handle epsilon too
