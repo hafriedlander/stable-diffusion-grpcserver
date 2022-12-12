@@ -28,7 +28,7 @@ WORKDIR /magma-2.6.2
 COPY docker_support/CMakeFile.txt.diff /
 RUN patch < /CMakeFile.txt.diff
 
- # Build it
+# Build it
 WORKDIR /magma-2.6.2/build
 RUN /bin/micromamba -r /env -n sd-grpc-server run cmake .. -DMAGMA_WITH_MKL=1 -DUSE_FORTRAN=off -DGPU_TARGET="All" -DCUDA_ARCH_LIST="-gencode arch=compute_60,code=sm_60 -gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75 -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89"
 #RUN /bin/micromamba -r /env -n sd-grpc-server run cmake .. -DMAGMA_WITH_MKL=1 -DUSE_FORTRAN=off -DGPU_TARGET="sm_89" -DCUDA_ARCH_LIST="-gencode arch=compute_89,code=sm_89"
@@ -124,10 +124,11 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.1/install.sh | b
 FROM devbase AS tritonbase
 
 WORKDIR /
-RUN git clone https://github.com/openai/triton.git;
+ARG TRITON_REF=tags/v1.0
+RUN git clone https://github.com/openai/triton.git
 
 WORKDIR /triton
-RUN git checkout -b v1.0 tags/v1.0
+RUN git checkout $TRITON_REF
 
 WORKDIR /triton/python
 RUN /bin/micromamba -r /env -n sd-grpc-server run pip install cmake
@@ -165,14 +166,16 @@ RUN tar cvjf /xformers.tbz /env/envs/sd-grpc-server/lib/python3.*/site-packages/
 FROM tritonbase AS deepspeedbase
 
 WORKDIR /
+ARG DEEPSPEED_REF=tags/v0.7.4
 RUN git clone https://github.com/microsoft/DeepSpeed.git
 
 WORKDIR /DeepSpeed
-RUN git checkout -b v0.7.4 tags/v0.7.4
+RUN git checkout $DEEPSPEED_REF
 RUN apt install -y libaio-dev
 
 ENV DS_BUILD_OPS=1
 ENV TORCH_CUDA_ARCH_LIST="6.0;7.0;7.5;8.0;8.6;8.9"
+ENV DS_BUILD_SPARSE_ATTN=0
 RUN /bin/micromamba -r /env -n sd-grpc-server run pip install .
 
 RUN tar cvjf /deepspeed.tbz /env/envs/sd-grpc-server/lib/python3.*/site-packages/deepspeed*
