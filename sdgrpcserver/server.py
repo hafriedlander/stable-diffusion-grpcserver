@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import os
 import re
 import secrets
@@ -298,6 +299,15 @@ class RoutingController(resource.Resource, CheckAuthHeaderMixin):
         return self.files.render(request) if self.files else self.wsgi.render(request)
 
 
+def git_object_hash(bs: bytes):
+    hasher = hashlib.sha1()
+    hasher.update(b"blob ")
+    hasher.update(bytes(str(len(bs)), "utf-8"))
+    hasher.update(b"\0")
+    hasher.update(bs)
+    return hasher.hexdigest()
+
+
 def main():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
@@ -495,19 +505,37 @@ def main():
 
     prevHandler = signal.signal(signal.SIGINT, shutdown_reactor_handler)
 
-    torch.cuda.set_per_process_memory_fraction(args.vram_fraction)
+    if torch.cuda.is_available():
+        torch.cuda.set_per_process_memory_fraction(args.vram_fraction)
 
     enginecfg_path = os.path.normpath(args.enginecfg)
+    distcfg_path = os.path.join(os.path.dirname(__file__), "config")
+    disthashes_path = os.path.join(distcfg_path, "dist_hashes")
+    distenginecfg_path = os.path.join(distcfg_path, "engines.yaml")
+
+    install_enginecfg = False
+
     if not os.path.exists(enginecfg_path):
-        enginecfgdist_path = os.path.join(
-            os.path.dirname(__file__), "config", "engines.yaml"
-        )
-        if not os.path.exists(enginecfgdist_path):
-            raise EnvironmentError(
-                f"Configuration file {enginecfg_path} does not exist, and can't find the default version to initialise with."
-            )
-        shutil.copyfile(enginecfgdist_path, enginecfg_path)
-        print(f"Initialised engines.yaml configuration with default version.")
+        print("No existing engines.yaml - initialising with default version.")
+        install_enginecfg = True
+    else:
+        # Read in existing config as byte-string, and calculate git hash
+        current_cfg = open(enginecfg_path, "rb").read()
+        current_hash = git_object_hash(current_cfg)
+        # Read in a list of historic hashes, one per line
+        *dist_hashes, newest_hash = open(disthashes_path, "r").read().splitlines()
+
+        # If current_hash matches a distro hash, but not the _newest_ hash, update
+        if current_hash in set(dist_hashes):
+            print("Out of date default engines.yaml found - updating.")
+            install_enginecfg = True
+        elif current_hash == newest_hash:
+            print("Current default engines.yaml found.")
+        else:
+            print("Your engines.yaml has been modified, so we won't change it.")
+
+    if install_enginecfg:
+        shutil.copyfile(distenginecfg_path, enginecfg_path)
         print(
             f"Edit {enginecfg_path} to enable, disable or add additional models and engines."
         )
