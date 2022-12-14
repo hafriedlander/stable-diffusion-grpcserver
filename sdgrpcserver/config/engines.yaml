@@ -107,6 +107,14 @@
   local_model: "./stable-diffusion-v2-inpainting"
   local_model_fp16: "./stable-diffusion-v2-inpainting-fp16"
 
+- model_id: "stable-diffusion-v2-base"
+  model: "stabilityai/stable-diffusion-2-base"
+  local_model: "./stable-diffusion-v2-base"
+  local_model_fp16: "./stable-diffusion-v2-base"
+  overrides:
+    inpaint_unet: "@stable-diffusion-v2-inpainting/unet"
+
+# And the 2.1 base (using the 2.0 inpaint until 2.1 inpaint model comes out)
 - model_id: "stable-diffusion-v2-1-base"
   model: "stabilityai/stable-diffusion-2-1-base"
   local_model: "./stable-diffusion-v2-1-base"
@@ -117,6 +125,12 @@
 # At the moment, the higher resolution 768x768 Stable Diffusion 2 model
 # is set up as a seperate engine, as the V2 inpaint model is still 512x512
 # and sdgrpcserver can't handle mixed resolutions like that.
+- model_id: "stable-diffusion-v2-vpred"
+  model: "stabilityai/stable-diffusion-2"
+  local_model: "./stable-diffusion-v2"
+  local_model_fp16: "./stable-diffusion-v2-fp16"
+
+# And 2.1 768x768
 - model_id: "stable-diffusion-v2-1-vpred"
   model: "stabilityai/stable-diffusion-2-1"
   local_model: "./stable-diffusion-v2-1"
@@ -206,52 +220,52 @@
   # And finally we set the model to use - in this case we're just referencing an already-loaded model
   model: "@stable-diffusion-v1-5-base"
 
-# This is the Stable Diffusion V2 model with CLIP guidance enabled.
-- id: "stable-diffusion-v2-standard"
+# This is the Stable Diffusion V2.1 model with CLIP guidance enabled.
+- id: "stable-diffusion-v2-1-standard"
   enabled: True
   visible: True
-  name: "Stable Diffusion V2 w/ standard CLIP guidance"
-  description: "Stable Diffusion using the Stability V2 512x512 model, CLIP guidance (standard config) and our Unified pipeline"
+  name: "Stable Diffusion V2.1 w/ standard CLIP guidance"
+  description: "Stable Diffusion using the Stability V2.1 512x512 model, CLIP guidance (standard config) and our Unified pipeline"
   class: "UnifiedPipeline"
   options:
     clip:
       approx_cutouts: 2
       vae_cutouts: 0
-  model: "@stable-diffusion-v2-base"
+  model: "@stable-diffusion-v2-1-base"
   overrides:
     clip: "@laion-clip-b"
 
-# This is the Stable Diffusion V2 model with CLIP guidance enabled. This configuration needs quite
+# This is the Stable Diffusion V2.1 model with CLIP guidance enabled. This configuration needs quite
 # a lot of VRAM, but is faster and produces better results if you have enough.
-- id: "stable-diffusion-v2-quality"
+- id: "stable-diffusion-v2-1-quality"
   # If you'd like to test this engine is compatible with your hardware, set this to True. 
   enabled: False
   visible: True
-  name: "Stable Diffusion V2 w/ quality CLIP guidance"
-  description: "Stable Diffusion using the Stability V2 512x512 model, CLIP guidance (quality config) and our Unified pipeline"
+  name: "Stable Diffusion V2.1 w/ quality CLIP guidance"
+  description: "Stable Diffusion using the Stability V2. 512x512 model, CLIP guidance (quality config) and our Unified pipeline"
   class: "UnifiedPipeline"
   options:
     clip:
       approx_cutouts: 2
       vae_cutouts: 2
-  model: "@stable-diffusion-v2-base"
+  model: "@stable-diffusion-v2-1-base"
   overrides:
     clip: "@laion-clip-l"
 
-# This is the Stable Diffusion V2 768x768 model with CLIP guidance. This configuration needs quite
+# This is the Stable Diffusion V2.1 768x768 model with CLIP guidance. This configuration needs quite
 # a lot of VRAM, but is faster and produces better results if you have enough.
-- id: "stable-diffusion-v2-vpred"
+- id: "stable-diffusion-v2-1-vpred"
   # If you'd like to test this engine is compatible with your hardware, set this to True. 
   enabled: False
   visible: True
-  name: "Stable Diffusion V2 VPred w/ quality CLIP guidance"
-  description: "Stable Diffusion using the Stability V2 768x768 model, CLIP guidance (quality config) and our Unified pipeline"
+  name: "Stable Diffusion V2.1 VPred w/ quality CLIP guidance"
+  description: "Stable Diffusion using the Stability V2.1 768x768 model, CLIP guidance (quality config) and our Unified pipeline"
   class: "UnifiedPipeline"
   options:
     clip:
       approx_cutouts: 2
       vae_cutouts: 2
-  model: "@stable-diffusion-v2-vpred"
+  model: "@stable-diffusion-v2-1-vpred"
   overrides:
     clip: "@laion-clip-l"
 
