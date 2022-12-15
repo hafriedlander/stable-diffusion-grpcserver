@@ -1,4 +1,5 @@
 import functools
+import gc
 import importlib
 import inspect
 import json
@@ -19,6 +20,7 @@ from diffusers import (
     LMSDiscreteScheduler,
     ModelMixin,
     PNDMScheduler,
+    UNet2DConditionModel,
     pipelines,
 )
 from diffusers.configuration_utils import FrozenDict
@@ -30,7 +32,7 @@ from transformers import PreTrainedModel
 
 from sdgrpcserver.k_diffusion import sampling as k_sampling
 from sdgrpcserver.pipeline.kschedulers import *
-from sdgrpcserver.pipeline.model_utils import clone_model
+from sdgrpcserver.pipeline.model_utils import clone_model, clone_model_hook_reset
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 from sdgrpcserver.pipeline.schedulers.sample_dpmpp_2m import sample_dpmpp_2m
 from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
@@ -390,6 +392,14 @@ class PipelineWrapper(object):
     def mode(self):
         return self._mode
 
+    def pipeline_modules(self):
+        module_names, *_ = self._pipeline.extract_init_dict(dict(self._pipeline.config))
+        for name in module_names.keys():
+            module = getattr(self._pipeline, name)
+            if isinstance(module, torch.nn.Module):
+                yield name, module
+
+
     def activate(self):
         if self.mode.cpu_offload:
             return
@@ -399,13 +409,14 @@ class PipelineWrapper(object):
 
         self._previous = {}
 
-        module_names, *_ = self._pipeline.extract_init_dict(dict(self._pipeline.config))
-        for name in module_names.keys():
-            module = getattr(self._pipeline, name)
-            if isinstance(module, torch.nn.Module):
-                self._previous[name] = module
-                cloned = clone_model(module, self.mode.device)
-                setattr(self._pipeline, name, cloned)
+        for name, module in self.pipeline_modules():
+            self._previous[name] = module
+            # Should we delay moving this to CUDA until forward is called?
+            delayed = isinstance(module, UNet2DConditionModel)
+            # Clone from CPU to either CUDA or Meta with a hook to move to CUDA
+            cloned = clone_model(module, self.mode.device, delayed=delayed)
+            # And set it on the pipeline
+            setattr(self._pipeline, name, cloned)
 
     def deactivate(self):
         if self.mode.cpu_offload:
@@ -414,15 +425,13 @@ class PipelineWrapper(object):
         if self._previous is None:
             raise Exception("Deactivate called without previous activate")
 
-        module_names, *_ = self._pipeline.extract_init_dict(dict(self._pipeline.config))
-        for name in module_names.keys():
-            module = self._previous.get(name, None)
-            if module and isinstance(module, torch.nn.Module):
-                setattr(self._pipeline, name, module)
+        for name, module in self.pipeline_modules():
+            setattr(self._pipeline, name, self._previous.get(name))
 
         self._previous = None
 
-        if self.mode.device == "cuda":
+        gc.collect()
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     def get_samplers(self):
@@ -543,6 +552,9 @@ class PipelineWrapper(object):
 
         images = self._pipeline(**pipeline_args)
 
+        for name, module in self.pipeline_modules():
+            clone_model_hook_reset(module)
+
         return images
 
 
@@ -586,6 +598,7 @@ class EngineManager(object):
         mode=EngineMode(),
         nsfw_behaviour="block",
         batchMode=BatchMode(),
+        ram_monitor=None,
     ):
         self.engines = engines
         self._default = None
@@ -604,6 +617,8 @@ class EngineManager(object):
         self._batchMode = batchMode
         self._nsfw = nsfw_behaviour
         self._token = os.environ.get("HF_API_TOKEN", True)
+
+        self._ram_monitor = ram_monitor
 
     @property
     def mode(self):
@@ -1086,6 +1101,10 @@ class EngineManager(object):
             self._active.deactivate()
             # Explicitly mark as not active, in case there's an error later
             self._active = None
+
+            if self._ram_monitor:
+                print("Existing pipeline deactivated")
+                self._ram_monitor.print()
 
         self._active = self._pipelines[id]
         self._active.activate()

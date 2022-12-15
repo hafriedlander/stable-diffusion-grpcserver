@@ -24,6 +24,8 @@ class RamMonitor(threading.Thread):
     def run(self):
         ps = psutil.Process()
 
+        self.loop_lock = threading.Lock()
+
         self.vram = False
         try:
             pynvml.nvmlInit()
@@ -48,12 +50,17 @@ class RamMonitor(threading.Thread):
             self.vram_current = pynvml.nvmlDeviceGetMemoryInfo(handle).used
             self.vram_max_usage = max(self.vram_max_usage, self.vram_current)
 
+            if self.loop_lock.locked():
+                self.loop_lock.release()
+
             time.sleep(0.1)
 
         print("Stopped recording.")
         pynvml.nvmlShutdown()
 
     def print(self):
+        # Wait for the update loop to run at least once
+        self.loop_lock.acquire(timeout=0.5)
         print(
             f"Current RAM: {mb(self.ram_current)}, VRAM: {mb(self.vram_current)} | "
             f"Peak RAM: {mb(self.ram_max_usage)}, VRAM: {mb(self.vram_max_usage)}"

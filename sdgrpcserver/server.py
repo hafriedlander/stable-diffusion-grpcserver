@@ -578,6 +578,7 @@ def main():
                 safety_margin=args.batch_autodetect_margin,
             ),
             nsfw_behaviour=args.nsfw_behaviour,
+            ram_monitor=ram_monitor,
         )
 
         print("Manager loaded")
