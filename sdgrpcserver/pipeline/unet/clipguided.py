@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Callable, Literal, cast
 
 import numpy as np
 import torch
@@ -104,6 +104,7 @@ class ClipGuidedMode:
         text_embeddings_clip: torch.Tensor,
         config: ClipGuidanceConfig,
         generators: list[torch.Generator],
+        reversible_ctx: Callable,
         **kwargs
     ):
         self.wrapped_mode = wrapped_mode
@@ -114,6 +115,7 @@ class ClipGuidedMode:
 
         self.text_embeddings_clip = text_embeddings_clip
         self.config = config
+        self.reversible_ctx = reversible_ctx
 
         self.normalize = T.Normalize(
             mean=self.pipeline.feature_extractor.image_mean,
@@ -189,13 +191,15 @@ class ClipGuidedMode:
         def wrapper_unet(latents: XtTensor, t: ScheduleTimestep) -> EpsTensor:
             if self.config.guidance_base == "guided":
                 noise_pred_u = cfg_unets.u(latents, t)
-                noise_pred_g, grads = self.model_d_fn(cfg_unets.g, latents, t)
+                with self.reversible_ctx():
+                    noise_pred_g, grads = self.model_d_fn(cfg_unets.g, latents, t)
 
                 noise_pred = noise_pred_u + guidance_scale * (
                     noise_pred_g - noise_pred_u
                 )
             else:
-                noise_pred, grads = self.model_d_fn(child_wrapped_unet, latents, t)
+                with self.reversible_ctx():
+                    noise_pred, grads = self.model_d_fn(child_wrapped_unet, latents, t)
 
             if isinstance(self.scheduler, DiffusersKScheduler):
                 sigma = self.scheduler.scheduler.t_to_sigma(t)
@@ -269,14 +273,18 @@ class ClipGuidedMode:
             else:
                 if self.config.guidance_base == "guided":
                     self._guided_stem_only = True
-                    _, grads = self.model_k_fn(child_wrapped_unet, latents, sigma, u=u)
+                    with self.reversible_ctx():
+                        _, grads = self.model_k_fn(
+                            child_wrapped_unet, latents, sigma, u=u
+                        )
                     self._guided_stem_only = False
                     res = child_wrapped_unet(latents, sigma, u=u)
                 else:
                     self._guided_stem_only = False
-                    res, grads = self.model_k_fn(
-                        child_wrapped_unet, latents, sigma, u=u
-                    )
+                    with self.reversible_ctx():
+                        res, grads = self.model_k_fn(
+                            child_wrapped_unet, latents, sigma, u=u
+                        )
 
                 # grads * sigma will fail if batchsize > 1 unless we match shape
                 if isinstance(sigma, torch.Tensor):

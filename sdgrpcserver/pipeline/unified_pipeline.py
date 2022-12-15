@@ -1,3 +1,4 @@
+import contextlib
 import inspect
 from copy import copy
 from typing import Callable, List, Literal, Optional, Protocol, Tuple, Union, cast
@@ -67,6 +68,7 @@ from sdgrpcserver.pipeline.unet.types import (
     PX0Tensor,
     XtTensor,
 )
+from sdgrpcserver.pipeline.xformers_utils import xformers_mea_available
 
 try:
     from nonfree import tome_patcher
@@ -1045,11 +1047,41 @@ class UnifiedPipeline(DiffusionPipeline):
             set_requires_grad(self.clip_model, False)
             set_requires_grad(self.unet, False)
             set_requires_grad(self.vae, False)
+            if self.inpaint_unet:
+                set_requires_grad(self.inpaint_unet, False)
             if self.inpaint_text_encoder:
                 set_requires_grad(self.inpaint_text_encoder, False)
 
-        if is_xformers_available():
+        self._xformers_available = False
+        self._xformers = False
+
+        if xformers_mea_available():
+            self._xformers_available = True
+            self._xformers = "forward_only"
             self.enable_xformers_memory_efficient_attention()
+
+    def _build_reversible_ctx(self, unet):
+        if self._xformers != "forward_only":
+            return contextlib.nullcontext
+
+        modules = [
+            module
+            for _, module in unet.named_modules()
+            if hasattr(module, "_use_memory_efficient_attention_xformers")
+        ]
+
+        @contextlib.contextmanager
+        def reversiblectx():
+            # Disable xformers while context manager is open
+            for module in modules:
+                module._use_memory_efficient_attention_xformers = False
+            # Run context
+            yield
+            # Enable xformers now context manager is closed
+            for module in modules:
+                module._use_memory_efficient_attention_xformers = False
+
+        return reversiblectx
 
     @property
     def latent_debugger(self):
@@ -1087,9 +1119,22 @@ class UnifiedPipeline(DiffusionPipeline):
                     "Please remove it from your engines.yaml."
                 )
             elif key == "xformers":
-                if bool(value):
+                if value:
+                    # Check if xformers is available at all, ignore if not
+                    if not self._xformers_available:
+                        print(
+                            "Xformers requested, but not available. Xformers will remain off"
+                        )
+                        continue
+                    # Check value is one of the two acceptable positive values
+                    if value is not True and value != "forward_only":
+                        raise ValueError(
+                            "xformers must be one of True, False or 'forward_only'"
+                        )
+                    self._xformers = value
                     self.enable_xformers_memory_efficient_attention()
                 else:
+                    self._xformers = False
                     self.disable_xformers_memory_efficient_attention()
             elif key == "tome" and bool(value):
                 print("Warning: ToMe isn't finished, and shouldn't be used")
@@ -1656,6 +1701,7 @@ class UnifiedPipeline(DiffusionPipeline):
                     text_embeddings_clip=text_embeddings_clip,
                     config=clip_config,
                     generators=generators,
+                    reversible_ctx=self._build_reversible_ctx(leaf.opts["unet"]),
                 )
 
         for leaf in mode_tree.leaves:

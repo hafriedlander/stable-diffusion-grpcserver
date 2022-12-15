@@ -29,8 +29,8 @@ from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
 from sdgrpcserver.k_diffusion import sampling as k_sampling
-from sdgrpcserver.model_utils import clone_model
 from sdgrpcserver.pipeline.kschedulers import *
+from sdgrpcserver.pipeline.model_utils import clone_model
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 from sdgrpcserver.pipeline.schedulers.sample_dpmpp_2m import sample_dpmpp_2m
 from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
@@ -404,7 +404,8 @@ class PipelineWrapper(object):
             module = getattr(self._pipeline, name)
             if isinstance(module, torch.nn.Module):
                 self._previous[name] = module
-                setattr(self._pipeline, name, clone_model(module, self.mode.device))
+                cloned = clone_model(module, self.mode.device)
+                setattr(self._pipeline, name, cloned)
 
     def deactivate(self):
         if self.mode.cpu_offload:

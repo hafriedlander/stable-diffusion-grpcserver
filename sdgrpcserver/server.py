@@ -12,6 +12,7 @@ from concurrent import futures
 
 import yaml
 
+from sdgrpcserver.pipeline.xformers_utils import xformers_mea_available
 from sdgrpcserver.ram_monitor import RamMonitor
 
 try:
@@ -553,6 +554,9 @@ def main():
         print(
             f"Edit {enginecfg_path} to enable, disable or add additional models and engines."
         )
+
+    if xformers_mea_available():
+        print("Xformers defaults to on")
 
     with open(os.path.normpath(args.enginecfg), "r") as cfg:
         engines = yaml.load(cfg, Loader=Loader)
