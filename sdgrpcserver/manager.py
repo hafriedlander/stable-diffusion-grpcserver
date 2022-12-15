@@ -16,29 +16,20 @@ import accelerate
 import generation_pb2
 import huggingface_hub
 import torch
-from diffusers.configuration_utils import FrozenDict
-from diffusers.models import AutoencoderKL, UNet2DConditionModel
-from diffusers.pipeline_utils import DiffusionPipeline
-from diffusers.utils import deprecate, logging
-from huggingface_hub.file_download import http_get
-from tqdm.auto import tqdm
-from transformers import (
-    CLIPFeatureExtractor,
-    CLIPModel,
-    CLIPTextModel,
-    CLIPTokenizer,
-    PreTrainedModel,
-)
-
 from diffusers import (
-    ConfigMixin,
     DPMSolverMultistepScheduler,
     LMSDiscreteScheduler,
     ModelMixin,
     PNDMScheduler,
-    StableDiffusionPipeline,
     pipelines,
 )
+from diffusers.configuration_utils import FrozenDict
+from diffusers.pipeline_utils import DiffusionPipeline
+from diffusers.utils import deprecate
+from huggingface_hub.file_download import http_get
+from tqdm.auto import tqdm
+from transformers import PreTrainedModel
+
 from sdgrpcserver.k_diffusion import sampling as k_sampling
 from sdgrpcserver.pipeline.kschedulers import *
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
@@ -46,14 +37,28 @@ from sdgrpcserver.pipeline.schedulers.sample_dpmpp_2m import sample_dpmpp_2m
 from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
 from sdgrpcserver.pipeline.unified_pipeline import (
     SCHEDULER_NOISE_TYPE,
-    UnifiedPipeline,
     UnifiedPipelineImageType,
     UnifiedPipelinePromptType,
 )
-from sdgrpcserver.pipeline.upscaler_pipeline import (
-    NoiseLevelAndTextConditionedUpscaler,
-    UpscalerPipeline,
-)
+
+DEFAULT_LIBRARIES = {
+    "StableDiffusionPipeline": "stable_diffusion",
+    "UnifiedPipeline": "sdgrpcserver.pipeline.unified_pipeline",
+    "UpscalerPipeline": "sdgrpcserver.pipeline.upscaler_pipeline",
+}
+
+TYPE_CLASSES = {
+    "vae": "diffusers.AutoencoderKL",
+    "unet": "diffusers.UNet2DConditionModel",
+    "inpaint_unet": "diffusers.UNet2DConditionModel",
+    "clip_model": "transformers.CLIPModel",
+    "feature_extractor": "transformers.CLIPFeatureExtractor",
+    "tokenizer": "transformers.CLIPTokenizer",
+    "clip_tokenizer": "transformers.CLIPTokenizer",
+    "text_encoder": "transformers.CLIPTextModel",
+    "inpaint_text_encoder": "transformers.CLIPTextModel",
+    "upscaler": "sdgrpcserver.pipeline.upscaler_pipeline.NoiseLevelAndTextConditionedUpscaler",
+}
 
 
 class ProgressBarWrapper(object):
@@ -575,6 +580,26 @@ sd_cache_home = os.path.expanduser(
 )
 
 
+class ModelSet(SN):
+    def update(self, other: dict | SN):
+        if isinstance(other, dict):
+            self.__dict__.update(other)
+        else:  # isinstance(other, SN)
+            self.__dict__.update(other.__dict__)
+
+    def get(self, key, default=None):
+        return self.__dict__.get(key, default)
+
+    def __contains__(self, item):
+        return item in self.__dict__
+
+    def __getitem__(self, key):
+        return self.__dict__[key]
+
+    def __setitem__(self, key, value):
+        self.__dict__[key] = value
+
+
 class EngineManager(object):
     def __init__(
         self,
@@ -612,16 +637,18 @@ class EngineManager(object):
     def batchMode(self):
         return self._batchMode
 
-    def _getWeightPath(self, opts, force_recheck=False, force_redownload=False):
+    def _get_weight_path(
+        self, spec: dict, force_recheck: bool = False, force_redownload: bool = False
+    ) -> str:
         # TODO: Break this up, it's too long
 
-        usefp16 = self.mode.fp16 and opts.get("has_fp16", True)
+        usefp16 = self.mode.fp16 and spec.get("has_fp16", True)
 
-        local_path = opts.get("local_model_fp16" if usefp16 else "local_model", None)
-        model_path = opts.get("model", None)
-        subfolder = opts.get("subfolder", None)
-        use_auth_token = self._token if opts.get("use_auth_token", False) else False
-        urls = opts.get("urls", None)
+        local_path = spec.get("local_model_fp16" if usefp16 else "local_model", None)
+        model_path = spec.get("model", None)
+        subfolder = spec.get("subfolder", None)
+        use_auth_token = self._token if spec.get("use_auth_token", False) else False
+        urls = spec.get("urls", None)
 
         # Keep a list of the things we tried that failed, so we can report them all in one go later
         # in the case that we weren't able to load it any way at all
@@ -650,7 +677,7 @@ class EngineManager(object):
             # This lets us control the behaviour if the model fails to download
             extra_kwargs = {}
 
-            ignore_patterns = opts.get("ignore_patterns", [])
+            ignore_patterns = spec.get("ignore_patterns", [])
             if isinstance(ignore_patterns, str):
                 ignore_patterns = [ignore_patterns]
             extra_kwargs["ignore_patterns"] = ignore_patterns + ["*.ckpt"]
@@ -749,109 +776,97 @@ class EngineManager(object):
 
         raise EnvironmentError("\n".join(failures))
 
-    def _fromLoaded(self, klass, opts, extra_kwargs):
-        parts = opts["model"][1:].split("/")
-        local_model = self.loadModel(parts.pop(0))
-        if parts:
-            local_model = getattr(local_model, parts.pop(0))
+    def _import_class(self, fqclass_name: str | tuple[str, str]):
+        # You can pass in either a (dot seperated) string or a tuple of library, class
+        if isinstance(fqclass_name, str):
+            *library_name, class_name = fqclass_name.split(".")
+            library_name = ".".join(library_name)
+        else:
+            library_name, class_name = fqclass_name
 
-        if isinstance(local_model, klass):
-            return clone_model(local_model)
+        if not library_name:
+            library_name = DEFAULT_LIBRARIES.get(class_name, None)
 
-        if isinstance(local_model, SN) and issubclass(klass, DiffusionPipeline):
-            available = local_model.__dict__
-            expected_modules = set(
-                inspect.signature(klass.__init__).parameters.keys()
-            ) - set(["self"])
-            modules = {
-                k: clone_model(getattr(local_model, k))
-                for k in expected_modules
-                if hasattr(local_model, k)
-            }
-            modules = {**modules, **extra_kwargs}
-            return klass(**modules)
+        if not library_name:
+            raise EnvironmentError(
+                f"Don't know the library name for class {class_name}"
+            )
 
-        raise ValueError(
-            f"Error loading model - {local_model.__class__} is not an instance of {klass}"
-        )
+        # Is `library_name` a submodule of diffusers.pipelines?
+        is_pipeline_module = hasattr(pipelines, library_name)
 
-    def _fromWeights(self, klass, opts, extra_kwargs, force_redownload=False):
-        weight_path = self._getWeightPath(opts, force_redownload=force_redownload)
-        if self.mode.fp16:
-            extra_kwargs["torch_dtype"] = torch.float16
-        if opts.get("subfolder", None):
-            extra_kwargs["subfolder"] = opts.get("subfolder")
+        if is_pipeline_module:
+            # If so, look it up from there
+            pipeline_module = getattr(pipelines, library_name)
+            class_obj = getattr(pipeline_module, class_name)
+        else:
+            # else we just import it from the library.
+            library = importlib.import_module(library_name)
+            class_obj = getattr(library, class_name, None)
 
-        constructor_keys = set(inspect.signature(klass.__init__).parameters.keys())
-        accepts_safety_checker = "safety_checker" in constructor_keys
-        accepts_inpaint_unet = "inpaint_unet" in constructor_keys
-        accepts_clip_model = "clip_model" in constructor_keys
+            # Backwards compatibility - if config asks for transformers.CLIPImageProcessor
+            # and we don't have it, use transformers.CLIPFeatureExtractor, that's the old name
+            if not class_obj:
+                if (
+                    library_name == "transformers"
+                    and class_name == "CLIPImageProcessor"
+                ):
+                    class_obj = getattr(library, "CLIPFeatureExtractor", None)
 
-        if accepts_safety_checker:
-            if self._nsfw == "flag":
-                extra_kwargs["safety_checker"] = self.fromPretrained(
-                    FlagOnlySafetyChecker, {**opts, "subfolder": "safety_checker"}
+            if not class_obj:
+                raise EnvironmentError(
+                    f"Config attempts to import {library}.{class_name} that doesn't appear to exist"
                 )
-            if self._nsfw == "ignore":
-                extra_kwargs["safety_checker"] = None
-        if accepts_inpaint_unet and "inpaint_unet" not in extra_kwargs:
-            extra_kwargs["inpaint_unet"] = None
-        if accepts_clip_model and "clip_model" not in extra_kwargs:
-            extra_kwargs["clip_model"] = None
 
-        # Supress warnings during pipeline load. Unfortunately there isn't a better
-        # way to override the behaviour (beyond duplicating a huge function)
-        current_log_level = logging.get_verbosity()
-        logging.set_verbosity(logging.ERROR)
+        return class_obj
 
-        result = klass.from_pretrained(weight_path, **extra_kwargs)
+    def _load_model_from_weights(
+        self,
+        weight_path: str,
+        name: str,
+        fqclass_name: str | tuple[str, str] | None = None,
+    ):
+        if fqclass_name is None:
+            fqclass_name = TYPE_CLASSES.get(name, None)
 
-        logging.set_verbosity(current_log_level)
+        if fqclass_name is None:
+            raise EnvironmentError(
+                f"Type {name} does not specify a class, and there is no default set for it."
+            )
 
-        return result
+        class_obj = self._import_class(fqclass_name)
 
-    def _weightRetry(self, callback, *args, **kwargs):
-        if self._refresh_on_error:
-            try:
-                return callback(*args, **kwargs)
-            except Exception as e:
-                print(e)
-                pass
+        load_method_names = ["from_pretrained", "from_config"]
+        load_candidates = [getattr(class_obj, name, None) for name in load_method_names]
+        load_method = [m for m in load_candidates if m is not None][0]
 
-            return callback(*args, **kwargs, force_redownload=True)
+        loading_kwargs = {}
 
-        else:
-            return callback(*args, **kwargs)
+        if self.mode.fp16 and issubclass(class_obj, torch.nn.Module):
+            loading_kwargs["torch_dtype"] = torch.float16
 
-    def fromPretrained(self, klass, opts, extra_kwargs=None):
-        if extra_kwargs is None:
-            extra_kwargs = {}
+        is_diffusers_model = issubclass(class_obj, ModelMixin)
+        is_transformers_model = issubclass(class_obj, PreTrainedModel)
 
-        model = opts.get("model", None)
-        is_local = model and len(model) > 1 and model[0] == "@"
+        if is_diffusers_model or is_transformers_model:
+            loading_kwargs["low_cpu_mem_usage"] = True
 
-        # Handle copying a local model
-        if is_local:
-            return self._fromLoaded(klass, opts, extra_kwargs)
-        else:
-            return self._weightRetry(self._fromWeights, klass, opts, extra_kwargs)
+        # check if the module is in a subdirectory
+        sub_path = os.path.join(weight_path, name)
+        if os.path.isdir(sub_path):
+            weight_path = sub_path
 
-    def _nakedFromLoaded(self, opts):
-        local_model = self.loadModel(opts["model"][1:])
-        if not isinstance(local_model, SN):
-            raise ValueError(f"Model is not a pipeline, it's a {local_model}")
-        return local_model
+        model = load_method(weight_path, **loading_kwargs)
+        model._source = weight_path
+        return model
 
-    def _nakedFromWeights(self, opts, force_redownload=False):
-        weight_path = self._getWeightPath(opts, force_redownload=force_redownload)
+    def _load_modelset_from_weights(self, weight_path, whitelist=None, blacklist=None):
         config_dict = DiffusionPipeline.load_config(weight_path)
 
-        whitelist = opts.get("whitelist", None)
         if isinstance(whitelist, str):
             whitelist = [whitelist]
         if whitelist:
             whitelist = set(whitelist)
-        blacklist = opts.get("blacklist", None)
         if isinstance(blacklist, str):
             blacklist = [blacklist]
         if blacklist:
@@ -862,191 +877,186 @@ class EngineManager(object):
         class_items = [
             item for item in config_dict.items() if isinstance(item[1], list)
         ]
-        for name, (library_name, class_name) in class_items:
+
+        for name, fqclass_name in class_items:
             if whitelist and name not in whitelist:
                 continue
             if blacklist and name in blacklist:
                 continue
-            if class_name is None:
+            if fqclass_name[1] is None:
                 pipeline[name] = None
                 continue
 
-            if library_name == "transformers" and class_name == "CLIPImageProcessor":
-                class_name = "CLIPFeatureExtractor"
-
             if name == "safety_checker":
                 if self._nsfw == "flag":
-                    library_name = "sdgrpcserver.pipeline.safety_checkers"
-                    class_name = "FlagOnlySafetyChecker"
+                    fqclass_name = (
+                        "sdgrpcserver.pipeline.safety_checkers.FlagOnlySafetyChecker"
+                    )
                 elif self._nsfw == "ignore":
                     pipeline[name] = None
                     continue
 
-            # This is mostly from DiffusersPipeline.from_preloaded. Why is that method _so long_?
-            is_pipeline_module = hasattr(pipelines, library_name)
+            pipeline[name] = self._load_model_from_weights(
+                weight_path, name, fqclass_name
+            )
 
-            if is_pipeline_module:
-                pipeline_module = getattr(pipelines, library_name)
-                class_obj = getattr(pipeline_module, class_name)
-            else:
-                # else we just import it from the library.
-                library = importlib.import_module(library_name)
-                class_obj = getattr(library, class_name, None)
+        return ModelSet(**pipeline)
 
-                if not class_obj:
-                    if (
-                        library_name == "transformers"
-                        and class_name == "CLIPImageProcessor"
-                    ):
-                        class_obj = getattr(library, "CLIPFeatureExtractor", None)
+    def _load_from_weights(
+        self, spec: dict, force_redownload: bool = False
+    ) -> ModelSet:
+        # Determine if this set of weights is a pipeline, a clip
+        type = spec.get("type", "pipeline")
 
-                if not class_obj:
-                    raise EnvironmentError(
-                        f"Pipeline references class {library}.{class_name} that doesn't appear to exist"
-                    )
+        weight_path = self._get_weight_path(spec, force_redownload=force_redownload)
 
-            load_method_names = ["from_pretrained", "from_config"]
-            load_candidates = [
-                getattr(class_obj, name, None) for name in load_method_names
-            ]
-            load_method = [m for m in load_candidates if m is not None][0]
-
-            loading_kwargs = {}
-
-            if self.mode.fp16 and issubclass(class_obj, torch.nn.Module):
-                loading_kwargs["torch_dtype"] = torch.float16
-
-            is_diffusers_model = issubclass(class_obj, ModelMixin)
-            is_transformers_model = issubclass(class_obj, PreTrainedModel)
-
-            if is_diffusers_model or is_transformers_model:
-                loading_kwargs["low_cpu_mem_usage"] = True
-
-            # check if the module is in a subdirectory
-            if os.path.isdir(os.path.join(weight_path, name)):
-                loaded_sub_model = load_method(
-                    os.path.join(weight_path, name), **loading_kwargs
-                )
-            else:
-                # else load from the root directory
-                loaded_sub_model = load_method(weight_path, **loading_kwargs)
-
-            pipeline[name] = loaded_sub_model
-
-        return SN(**pipeline)
-
-    def buildModel(self, opts, name=None):
-        if name is None:
-            name = opts["type"]
-
-        if name == "vae":
-            return self.fromPretrained(AutoencoderKL, opts)
-        elif name == "unet" or name == "inpaint_unet":
-            return self.fromPretrained(UNet2DConditionModel, opts)
-        elif name == "clip_model":
-            return self.fromPretrained(CLIPModel, opts)
-        elif name == "feature_extractor":
-            return self.fromPretrained(CLIPFeatureExtractor, opts)
-        elif name == "upscaler":
-            return self.fromPretrained(NoiseLevelAndTextConditionedUpscaler, opts)
-        elif name == "tokenizer" or name == "clip_tokenizer":
-            return self.fromPretrained(CLIPTokenizer, opts)
-        elif name == "text_encoder" or name == "inpaint_text_encoder":
-            return self.fromPretrained(CLIPTextModel, opts)
+        # A pipeline has a top-level json file that describes a set of models
+        if type == "pipeline":
+            models = self._load_modelset_from_weights(
+                weight_path,
+                whitelist=spec.get("whitelist"),
+                blacklist=spec.get("blacklist"),
+            )
+        # `clip` type is a special case that loads the same weights into two different models
+        elif type == "clip":
+            models = {
+                "clip_model": self._load_model_from_weights(weight_path, "clip_model"),
+                "feature_extractor": self._load_model_from_weights(
+                    weight_path, "feature_extractor"
+                ),
+            }
+        # Otherwise load the individual model
         else:
-            raise ValueError(f"Unknown model {name}")
-
-    def buildNakedPipeline(self, opts, extras=None):
-        model = opts.get("model", None)
-        is_local = model and len(model) > 1 and model[0] == "@"
-
-        if is_local:
-            pipeline = self._nakedFromLoaded(opts)
-        else:
-            pipeline = self._weightRetry(self._nakedFromWeights, opts)
-
-        if extras:
-            args = {**pipeline.__dict__, **extras}
-            return SN(**args)
-        else:
-            return pipeline
-
-    def buildPipeline(self, engine, naked=False):
-        extra_kwargs = {}
-
-        for name, opts in engine.get("overrides", {}).items():
-            if isinstance(opts, str):
-                opts = {"model": opts}
-
-            if name == "clip":
-                extra_kwargs["clip_model"] = self.buildModel(
-                    {**opts, "model": opts["model"] + "/clip_model"}, "clip_model"
+            models = {
+                type: self._load_model_from_weights(
+                    weight_path, type, spec.get("class")
                 )
-                extra_kwargs["feature_extractor"] = self.buildModel(
-                    {**opts, "model": opts["model"] + "/feature_extractor"},
-                    "feature_extractor",
+            }
+
+        return models if isinstance(models, ModelSet) else ModelSet(**models)
+
+    def _load_from_weights_with_retry(self, spec: dict) -> ModelSet:
+        try:
+            return self._load_from_weights(spec)
+        except Exception as e:
+            print(e)
+            pass
+
+        return self._load_from_weights(spec, force_redownload=True)
+
+    def _load_from_reference(self, modelid: str):
+        modelid, *submodel = modelid.split("/")
+        if submodel:
+            if len(submodel) > 1:
+                raise EnvironmentError(
+                    f"Can't have multiple sub-model references ({modelid}/{'/'.join(submodel)})"
                 )
-            else:
-                extra_kwargs[name] = self.buildModel(opts, name)
+            submodel = submodel[0]
 
-        if naked:
-            return self.buildNakedPipeline(engine, extra_kwargs)
+        print(f"    - Model {modelid}...")
 
-        else:
-            pipeline = None
-
-            klass = engine.get("class", "UnifiedPipeline")
-
-            if klass == "StableDiffusionPipeline":
-                pipeline = self.fromPretrained(
-                    StableDiffusionPipeline, engine, extra_kwargs
-                )
-
-            elif klass == "UnifiedPipeline":
-                pipeline = self.fromPretrained(UnifiedPipeline, engine, extra_kwargs)
-
-            elif klass == "UpscalerPipeline":
-                pipeline = self.fromPretrained(UpscalerPipeline, engine, extra_kwargs)
-
-            else:
-                raise Exception(f'Unknown engine class "{klass}"')
-
-            if engine.get("options", False):
-                try:
-                    pipeline.set_options(engine.get("options"))
-                except:
-                    raise ValueError(
-                        f"Engine {engine['id']} has options, but created pipeline rejected them"
-                    )
-
-            return pipeline
-
-    def loadModel(self, modelid):
+        # If we've previous loaded this model, just return the same model
         if modelid in self._models:
-            return self._models[modelid]
+            model = self._models[modelid]
 
-        for engine in self.engines:
-            if not engine.get("enabled", True):
-                continue
+        else:
+            # Otherwise find the specification that matches the model_id reference
+            spec = [
+                spec
+                for spec in self.engines
+                if spec.get("enabled", True)
+                and "model_id" in spec
+                and spec["model_id"] == modelid
+            ]
 
-            otherid = engine.get("model_id", None)
-            if otherid is not None and otherid == modelid:
-                print(f"    - Model {modelid}...")
+            if not spec:
+                raise EnvironmentError(f"Model {modelid} referenced does not exist")
 
-                type = engine.get("type", "pipeline")
-                if type == "pipeline":
-                    self._models[modelid] = self.buildPipeline(engine, naked=True)
-                elif type == "clip":
-                    self._models[modelid] = SN(
-                        clip_model=self.buildModel(engine, "clip_model"),
-                        feature_extractor=self.buildModel(engine, "feature_extractor"),
-                    )
+            # And load it, storing in cache before continuing
+            self._models[modelid] = model = self._load_model(spec[0])
+
+        return getattr(model, submodel) if submodel else model
+
+    def _load_model(self, spec):
+        model = spec.get("model", None)
+
+        # Call the correct subroutine based on source to build the model
+        if isinstance(model, str) and model.startswith("@"):
+            model = self._load_from_reference(model[1:])
+        else:
+            if self._refresh_on_error:
+                model = self._load_from_weights_with_retry(spec)
+            else:
+                model = self._load_from_weights(spec)
+
+        overrides = spec.get("overrides", None)
+
+        if overrides:
+            for name, override in overrides.items():
+                if isinstance(override, str):
+                    override = {"model": override}
+
+                override_spec = {**override, "type": name}
+                override_model = self._load_model(override_spec)
+
+                if isinstance(override_model, SN):
+                    model.__dict__.update(override_model.__dict__)
                 else:
-                    self._models[modelid] = self.buildModel(engine)
+                    setattr(model, name, override_model)
 
-                return self._models[modelid]
+        return model
 
-        raise EnvironmentError(f"Model {modelid} referenced does not exist")
+    def _instantiate_pipeline(self, engine, model, extra_kwargs):
+        fqclass_name = engine.get("class", "UnifiedPipeline")
+        class_obj = self._import_class(fqclass_name)
+
+        available = set(model.__dict__.keys())
+
+        class_init_params = inspect.signature(class_obj.__init__).parameters
+        expected = set(class_init_params.keys()) - set(["self"])
+
+        required = set(
+            [
+                name
+                for name, param in class_init_params.items()
+                if param.default is inspect._empty and name != "self"
+            ]
+        )
+
+        # optional = expected - required
+
+        if required - available:
+            raise EnvironmentError(
+                "Model definition did not provide model(s) the pipeline requires. Missing: "
+                + repr(required - available)
+            )
+
+        modules = {k: clone_model(model[k]) for k in expected & available}
+
+        if False:
+            # Debug print source of each model
+            max_len = max([len(n) for n in modules.keys()])
+            for n, m in modules.items():
+                print(f"{n.rjust(max_len, ' ')} | {'None' if m is None else m._source}")
+
+        modules = {**modules, **extra_kwargs}
+        return class_obj(**modules)
+
+    def _load_engine(self, engine):
+        model = self._load_model(engine)
+        pipeline = self._instantiate_pipeline(engine, model, {})
+
+        pipeline_options = engine.get("options", False)
+
+        if pipeline_options:
+            try:
+                pipeline.set_options(pipeline_options)
+            except Exception:
+                raise ValueError(
+                    f"Engine {engine['id']} has options, but created pipeline rejected them"
+                )
+
+        return pipeline
 
     def loadPipelines(self):
 
@@ -1066,7 +1076,7 @@ class EngineManager(object):
                 self._default = engineid
 
             print(f"  - Engine {engineid}...")
-            pipeline = self.buildPipeline(engine)
+            pipeline = self._load_engine(engine)
 
             self._pipelines[engineid] = PipelineWrapper(
                 id=engineid, mode=self._mode, pipeline=pipeline
