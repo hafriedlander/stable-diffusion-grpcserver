@@ -12,6 +12,8 @@ from concurrent import futures
 
 import yaml
 
+from sdgrpcserver.ram_monitor import RamMonitor
+
 try:
     from yaml import CLoader as Loader
 except ImportError:
@@ -444,6 +446,11 @@ def main():
         default=os.environ.get("SD_VRAM_FRACTION", 1.0),
         help="The fraction of memory that we should restrict ourselves to",
     )
+    debug_opts.add_argument(
+        "--monitor_ram",
+        action=argparse.BooleanOptionalAction,
+        help="Enable or disable monitoring of RAM and VRAM usage",
+    )
 
     args = parser.parse_args()
 
@@ -481,6 +488,14 @@ def main():
             "See the README.md for how to submit a debug sample for troubleshooting."
         )
 
+    if torch.cuda.is_available():
+        torch.cuda.set_per_process_memory_fraction(args.vram_fraction)
+
+    ram_monitor = None
+    if args.monitor_ram:
+        ram_monitor = RamMonitor()
+        ram_monitor.start()
+
     grpc = GrpcServer(args)
     grpc.start()
 
@@ -496,6 +511,8 @@ def main():
 
     def shutdown_reactor_handler(*args):
         print("Waiting for server to shutdown...")
+        if ram_monitor:
+            ram_monitor.stop()
         if localtunnel:
             localtunnel.stop()
         http.stop()
@@ -504,9 +521,6 @@ def main():
         sys.exit(0)
 
     prevHandler = signal.signal(signal.SIGINT, shutdown_reactor_handler)
-
-    if torch.cuda.is_available():
-        torch.cuda.set_per_process_memory_fraction(args.vram_fraction)
 
     enginecfg_path = os.path.normpath(args.enginecfg)
     distcfg_path = os.path.join(os.path.dirname(__file__), "config")
@@ -564,11 +578,15 @@ def main():
 
         print("Manager loaded")
 
+        if ram_monitor:
+            ram_monitor.print()
+
         generation_pb2_grpc.add_GenerationServiceServicer_to_server(
             GenerationServiceServicer(
                 manager,
                 supress_metadata=args.supress_metadata,
                 debug_recorder=debug_recorder,
+                ram_monitor=ram_monitor,
             ),
             grpc.grpc_server,
         )
@@ -584,6 +602,7 @@ def main():
                 manager,
                 supress_metadata=args.supress_metadata,
                 debug_recorder=debug_recorder,
+                ram_monitor=ram_monitor,
             ),
             http.grpc_server,
         )
@@ -601,6 +620,9 @@ def main():
         manager.loadPipelines()
 
         print("All engines ready")
+
+        if ram_monitor:
+            ram_monitor.print()
 
         # Block until termination
         grpc.block()

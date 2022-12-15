@@ -314,11 +314,16 @@ class ParameterExtractor:
 
 class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
     def __init__(
-        self, manager, supress_metadata=False, debug_recorder=DebugNullRecorder()
+        self,
+        manager,
+        supress_metadata=False,
+        debug_recorder=DebugNullRecorder(),
+        ram_monitor=None,
     ):
         self._manager = manager
         self._supress_metadata = supress_metadata
         self._debug_recorder = debug_recorder
+        self._ram_monitor = ram_monitor
 
     def unimp(self, what):
         raise NotImplementedError(f"{what} not implemented")
@@ -447,6 +452,9 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
 
                         yield answer
                         ctr += 1
+
+                if self._ram_monitor:
+                    self._ram_monitor.print()
 
             except NotImplementedError as e:
                 context.set_code(grpc.StatusCode.UNIMPLEMENTED)

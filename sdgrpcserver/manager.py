@@ -6,11 +6,9 @@ import math
 import os
 import tempfile
 import traceback
-from copy import deepcopy
 from fnmatch import fnmatch
-from functools import cache
 from types import SimpleNamespace as SN
-from typing import Callable, Iterable, List, Literal, Optional, Tuple, Union
+from typing import Iterable, Optional, Union
 
 import accelerate
 import generation_pb2
@@ -31,6 +29,7 @@ from tqdm.auto import tqdm
 from transformers import PreTrainedModel
 
 from sdgrpcserver.k_diffusion import sampling as k_sampling
+from sdgrpcserver.model_utils import clone_model
 from sdgrpcserver.pipeline.kschedulers import *
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 from sdgrpcserver.pipeline.schedulers.sample_dpmpp_2m import sample_dpmpp_2m
@@ -405,7 +404,7 @@ class PipelineWrapper(object):
             module = getattr(self._pipeline, name)
             if isinstance(module, torch.nn.Module):
                 self._previous[name] = module
-                setattr(self._pipeline, name, deepcopy(module).to(self.mode.device))
+                setattr(self._pipeline, name, clone_model(module, self.mode.device))
 
     def deactivate(self):
         if self.mode.cpu_offload:
@@ -544,30 +543,6 @@ class PipelineWrapper(object):
         images = self._pipeline(**pipeline_args)
 
         return images
-
-
-def clone_model(model, share_parameters=True, share_buffers=True):
-    """
-    Copies a model so you get a different set of instances, but they share
-    all their parameters and buffers
-    """
-
-    # Start by deep cloning the model
-    clone = deepcopy(model)
-
-    # If this isn't actually a model, return the deepcopy as is
-    if not isinstance(model, torch.nn.Module):
-        return clone
-
-    for (_, source), (_, dest) in zip(model.named_modules(), clone.named_modules()):
-        if share_parameters:
-            for name, param in source.named_parameters(recurse=False):
-                dest.register_parameter(name, param)
-        if share_buffers:
-            for name, buf in source.named_buffers(recurse=False):
-                dest.register_buffer(name, buf)
-
-    return clone
 
 
 # TODO: Not here
