@@ -9,6 +9,9 @@ def mb(v):
     return f"{v / 1024 / 1024 :.2f}MB"
 
 
+UPDATE_PERIOD = 0.001
+
+
 class RamMonitor(threading.Thread):
     stop_flag = False
     ram_current = 0
@@ -53,7 +56,7 @@ class RamMonitor(threading.Thread):
             if self.loop_lock.locked():
                 self.loop_lock.release()
 
-            time.sleep(0.1)
+            time.sleep(UPDATE_PERIOD)
 
         print("Stopped recording.")
         pynvml.nvmlShutdown()

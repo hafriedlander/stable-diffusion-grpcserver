@@ -28,11 +28,11 @@ from diffusers.pipeline_utils import DiffusionPipeline
 from diffusers.utils import deprecate
 from huggingface_hub.file_download import http_get
 from tqdm.auto import tqdm
-from transformers import PreTrainedModel
+from transformers import CLIPModel, PreTrainedModel
 
 from sdgrpcserver.k_diffusion import sampling as k_sampling
 from sdgrpcserver.pipeline.kschedulers import *
-from sdgrpcserver.pipeline.model_utils import clone_model, clone_model_hook_reset
+from sdgrpcserver.pipeline.model_utils import GPUExclusionSet, clone_model
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 from sdgrpcserver.pipeline.schedulers.sample_dpmpp_2m import sample_dpmpp_2m
 from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
@@ -122,8 +122,16 @@ class EngineMode(object):
         return self.device == "cuda" and self._vramO > 1
 
     @property
-    def cpu_offload(self):
-        return True if self.device == "cuda" and self._vramO > 2 else False
+    def unet_exclusion(self):
+        return self.device == "cuda" and self._vramO > 2
+
+    @property
+    def allexceptclip_exclusion(self):
+        return self.device == "cuda" and self._vramO > 3
+
+    @property
+    def all_exclusion(self):
+        return self.device == "cuda" and self._vramO > 4
 
 
 class BatchMode:
@@ -223,11 +231,6 @@ class PipelineWrapper(object):
         else:
             self._pipeline.disable_attention_slicing()
             self._pipeline.disable_vae_slicing()
-
-        if self.mode.cpu_offload:
-            for key, value in self._pipeline.__dict__.items():
-                if isinstance(value, torch.nn.Module):
-                    accelerate.cpu_offload(value, self.mode.device)
 
         self.prediction_type = getattr(
             self._pipeline.scheduler, "prediction_type", "epsilon"
@@ -399,29 +402,39 @@ class PipelineWrapper(object):
             if isinstance(module, torch.nn.Module):
                 yield name, module
 
-
     def activate(self):
-        if self.mode.cpu_offload:
-            return
-
         if self._previous is not None:
             raise Exception("Activate called without previous deactivate")
 
         self._previous = {}
 
+        exclusion_set = GPUExclusionSet(1)
+
         for name, module in self.pipeline_modules():
             self._previous[name] = module
+
             # Should we delay moving this to CUDA until forward is called?
-            delayed = isinstance(module, UNet2DConditionModel)
+            delayed = False
+            if self.mode.all_exclusion:
+                delayed = True
+            elif self.mode.allexceptclip_exclusion:
+                if not isinstance(module, CLIPModel):
+                    delayed = True
+            elif self.mode.unet_exclusion:
+                if isinstance(module, UNet2DConditionModel):
+                    delayed = True
+
             # Clone from CPU to either CUDA or Meta with a hook to move to CUDA
-            cloned = clone_model(module, self.mode.device, delayed=delayed)
+            cloned = clone_model(
+                module,
+                self.mode.device,
+                exclusion_set=exclusion_set if delayed else None,
+            )
+
             # And set it on the pipeline
             setattr(self._pipeline, name, cloned)
 
     def deactivate(self):
-        if self.mode.cpu_offload:
-            return
-
         if self._previous is None:
             raise Exception("Deactivate called without previous activate")
 
@@ -551,9 +564,6 @@ class PipelineWrapper(object):
                 del pipeline_args[k]
 
         images = self._pipeline(**pipeline_args)
-
-        for name, module in self.pipeline_modules():
-            clone_model_hook_reset(module)
 
         return images
 
@@ -1108,5 +1118,9 @@ class EngineManager(object):
 
         self._active = self._pipelines[id]
         self._active.activate()
+
+        if self._ram_monitor:
+            print("New pipeline activated")
+            self._ram_monitor.print()
 
         return self._active

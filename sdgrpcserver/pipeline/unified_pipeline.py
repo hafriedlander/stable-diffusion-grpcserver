@@ -1057,11 +1057,12 @@ class UnifiedPipeline(DiffusionPipeline):
 
         if xformers_mea_available():
             self._xformers_available = True
-            self._xformers = "forward_only"
+            self._xformers = True
             self.enable_xformers_memory_efficient_attention()
 
     def _build_reversible_ctx(self, unet):
-        if self._xformers != "forward_only":
+        # If we're not using xformers, no need to do anything
+        if not self._xformers:
             return contextlib.nullcontext
 
         modules = [
@@ -1079,7 +1080,7 @@ class UnifiedPipeline(DiffusionPipeline):
             yield
             # Enable xformers now context manager is closed
             for module in modules:
-                module._use_memory_efficient_attention_xformers = False
+                module._use_memory_efficient_attention_xformers = True
 
         return reversiblectx
 
@@ -1126,12 +1127,7 @@ class UnifiedPipeline(DiffusionPipeline):
                             "Xformers requested, but not available. Xformers will remain off"
                         )
                         continue
-                    # Check value is one of the two acceptable positive values
-                    if value is not True and value != "forward_only":
-                        raise ValueError(
-                            "xformers must be one of True, False or 'forward_only'"
-                        )
-                    self._xformers = value
+                    self._xformers = True
                     self.enable_xformers_memory_efficient_attention()
                 else:
                     self._xformers = False

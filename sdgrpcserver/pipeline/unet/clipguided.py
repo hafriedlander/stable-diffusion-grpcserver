@@ -181,6 +181,24 @@ class ClipGuidedMode:
     def wrap_unet(self, unet: NoisePredictionUNet) -> NoisePredictionUNet:
         return self.wrapped_mode.wrap_unet(unet)
 
+    def xformers_retry(self, callback, *args, **kwargs):
+        # Unless we've specifically found we need a reversible context
+        # try just running callback
+        if not getattr(self.pipeline, "_needs_reversible_ctx", False):
+            try:
+                return callback(*args, **kwargs)
+            # If we do get an error, try using a reversible ctx
+            except RuntimeError:
+                print(
+                    "XFormers will be disabled during CLIP guidance for this pipeline"
+                )
+                self.pipeline._needs_reversible_ctx = True
+
+        # If we get here, we need a reversible context (either _needs_reverible_ctx
+        # is True or the above unwrapped callback call failed) so wrap callable in one
+        with self.reversible_ctx():
+            return callback(*args, **kwargs)
+
     def wrap_guidance_unet_ford(
         self,
         cfg_unets: CFGChildUnets,
@@ -191,15 +209,17 @@ class ClipGuidedMode:
         def wrapper_unet(latents: XtTensor, t: ScheduleTimestep) -> EpsTensor:
             if self.config.guidance_base == "guided":
                 noise_pred_u = cfg_unets.u(latents, t)
-                with self.reversible_ctx():
-                    noise_pred_g, grads = self.model_d_fn(cfg_unets.g, latents, t)
+                noise_pred_g, grads = self.xformers_retry(
+                    self.model_d_fn, cfg_unets.g, latents, t
+                )
 
                 noise_pred = noise_pred_u + guidance_scale * (
                     noise_pred_g - noise_pred_u
                 )
             else:
-                with self.reversible_ctx():
-                    noise_pred, grads = self.model_d_fn(child_wrapped_unet, latents, t)
+                noise_pred, grads = self.xformers_retry(
+                    self.model_d_fn, child_wrapped_unet, latents, t
+                )
 
             if isinstance(self.scheduler, DiffusersKScheduler):
                 sigma = self.scheduler.scheduler.t_to_sigma(t)
@@ -273,18 +293,16 @@ class ClipGuidedMode:
             else:
                 if self.config.guidance_base == "guided":
                     self._guided_stem_only = True
-                    with self.reversible_ctx():
-                        _, grads = self.model_k_fn(
-                            child_wrapped_unet, latents, sigma, u=u
-                        )
+                    _, grads = self.xformers_retry(
+                        self.model_k_fn, child_wrapped_unet, latents, sigma, u=u
+                    )
                     self._guided_stem_only = False
                     res = child_wrapped_unet(latents, sigma, u=u)
                 else:
                     self._guided_stem_only = False
-                    with self.reversible_ctx():
-                        res, grads = self.model_k_fn(
-                            child_wrapped_unet, latents, sigma, u=u
-                        )
+                    res, grads = self.xformers_retry(
+                        self.model_k_fn, child_wrapped_unet, latents, sigma, u=u
+                    )
 
                 # grads * sigma will fail if batchsize > 1 unless we match shape
                 if isinstance(sigma, torch.Tensor):

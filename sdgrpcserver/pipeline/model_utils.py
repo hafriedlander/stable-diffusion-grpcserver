@@ -7,12 +7,17 @@ from accelerate.utils import send_to_device, set_module_tensor_to_device
 
 
 class CloneToGPUHook(ModelHook):
-    def __init__(self, execution_device, params, buffers):
+    def __init__(self, execution_device, exclusion_set, top, params, buffers):
         self.execution_device = execution_device
+        self.exclusion_set = exclusion_set
+        self.top = top
         self.params = params
         self.buffers = buffers
 
     def pre_forward(self, module, *args, **kwargs):
+        if self.exclusion_set:
+            self.exclusion_set.activate(self.top)
+
         dev = self.execution_device
 
         for name, param in module.named_parameters(recurse=False):
@@ -32,9 +37,55 @@ class CloneToGPUHook(ModelHook):
             send_to_device(kwargs, dev),
         )
 
+    def reset(self, model):
+        for name in self.params.keys():
+            set_module_tensor_to_device(model, name, "meta")
+        for name in self.buffers.keys():
+            set_module_tensor_to_device(model, name, "meta")
+
+
+class GPUExclusionSet:
+    def __init__(self, max_activated=-1):
+        self.sets = []
+        self.activated = []
+        self.max_activated = max_activated
+
+    def add(self, top):
+        models = [
+            model
+            for _, model in top.named_modules()
+            if hasattr(model, "_hf_hook") and isinstance(model._hf_hook, CloneToGPUHook)
+        ]
+
+        self.sets.append((top, models))
+
+    def reset(self, exclude=[]):
+        exclude = list(exclude)
+
+        for top, models in self.sets:
+            if top in exclude:
+                continue
+
+            for model in models:
+                model._hf_hook.reset(model)
+
+    def activate(self, top):
+        # No-op if top is already the most recently activated
+        if self.activated and self.activated[0] is top:
+            return
+
+        # Update the LRU activated queue
+        self.activated = [model for model in self.activated if model is not top]
+        self.activated.insert(0, top)
+        self.activated = self.activated[: self.max_activated]
+
+        self.reset(exclude=self.activated)
+
 
 def clone_model(
-    model, clone_tensors: Literal["share"] | str | torch.device = "share", delayed=False
+    model,
+    clone_tensors: Literal["share"] | str | torch.device = "share",
+    exclusion_set=None,
 ):
     """
     Copies a model so you get a different set of instances, but they share
@@ -88,17 +139,23 @@ def clone_model(
             dest.register_buffer(name, buffer)
 
     if clone_tensors != "share":
+        if exclusion_set:
+            exclusion_set.add(clone)
+
         for (model_name, dest) in clone.named_modules():
             model_params, model_buffers = cache[model_name]
 
-            if delayed:
+            if exclusion_set:
                 for name in model_params.keys():
                     set_module_tensor_to_device(dest, name, "meta")
                 for name in model_buffers.keys():
                     set_module_tensor_to_device(dest, name, "meta")
 
                 add_hook_to_module(
-                    dest, CloneToGPUHook(clone_tensors, model_params, model_buffers)
+                    dest,
+                    CloneToGPUHook(
+                        clone_tensors, exclusion_set, clone, model_params, model_buffers
+                    ),
                 )
             else:
                 for name, param in model_params.items():
@@ -109,12 +166,3 @@ def clone_model(
                     set_module_tensor_to_device(dest, name, clone_tensors, new_buffer)
 
     return clone
-
-
-def clone_model_hook_reset(top):
-    for _, model in top.named_modules():
-        if hasattr(model, "_hf_hook") and isinstance(model._hf_hook, CloneToGPUHook):
-            for name in model._hf_hook.params.keys():
-                set_module_tensor_to_device(model, name, "meta")
-            for name in model._hf_hook.buffers.keys():
-                set_module_tensor_to_device(model, name, "meta")
