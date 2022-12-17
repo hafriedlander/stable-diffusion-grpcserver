@@ -26,6 +26,7 @@ from transformers.models.clip import (
 )
 
 from sdgrpcserver import images, resize_right
+from sdgrpcserver.patching import patch_module_references
 from sdgrpcserver.pipeline import diffusers_types
 from sdgrpcserver.pipeline.attention_replacer import replace_cross_attention
 from sdgrpcserver.pipeline.common_scheduler import (
@@ -1461,7 +1462,7 @@ class UnifiedPipeline(DiffusionPipeline):
             )
             generators = [torch.Generator(generator_device)] * batch_total
 
-        inspect.getmodule(scheduler).torch = TorchRandOverride(generators)  # type: ignore
+        patch_module_references(scheduler, torch=TorchRandOverride(generators))
 
         if (callback_steps is None) or (
             callback_steps is not None

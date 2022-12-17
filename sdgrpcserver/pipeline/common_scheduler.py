@@ -10,6 +10,7 @@ from torch import FloatTensor, IntTensor, Tensor
 from sdgrpcserver.k_diffusion import external as k_external
 from sdgrpcserver.k_diffusion import sampling as k_sampling
 from sdgrpcserver.k_diffusion import utils as k_utils
+from sdgrpcserver.patching import patch_module_references
 from sdgrpcserver.pipeline.kschedulers.scheduling_utils import KSchedulerMixin
 from sdgrpcserver.pipeline.randtools import batched_randn
 from sdgrpcserver.pipeline.unet.types import (
@@ -360,9 +361,13 @@ class KDiffusionPositionTracker:
     # Unet wrapper that adds u (floating point progress, from 0..1)
     def get_u(self, sigma):
         i, i_max = self.i, self.i_max
+
         # If we're not looping through a fixed range, fall back
         # to guessing position based on sigmas
         if i is None:
+            if isinstance(sigma, torch.Tensor) and sigma.shape:
+                sigma = sigma[0]
+
             i = len([s for s in self.sigmas if s >= sigma])
 
         u = i / i_max
@@ -558,8 +563,9 @@ class KDiffusionScheduler(CommonScheduler):
             u = tracker.get_u(sigma)
             return unet(latents, sigma, u=u)
 
-        k_sampling.trange = tracker.trange
-        k_sampling.tqdm = tracker.tqdm
+        patch_module_references(
+            self.scheduler, trange=tracker.trange, tqdm=tracker.tqdm
+        )
 
         kwargs = {}
         if self.accepts_eta and self.eta is not None:
