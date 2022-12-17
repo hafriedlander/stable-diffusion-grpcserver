@@ -1,10 +1,12 @@
 import functools
 import gc
+import glob
 import importlib
 import inspect
 import json
 import math
 import os
+import shutil
 import tempfile
 import traceback
 from fnmatch import fnmatch
@@ -588,6 +590,15 @@ class ModelSet(SN):
     def get(self, key, default=None):
         return self.__dict__.get(key, default)
 
+    def keys(self):
+        return self.__dict__.keys()
+
+    def values(self):
+        return self.__dict__.values()
+
+    def items(self):
+        return self.__dict__.items()
+
     def __contains__(self, item):
         return item in self.__dict__
 
@@ -638,144 +649,145 @@ class EngineManager(object):
     def batchMode(self):
         return self._batchMode
 
-    def _get_weight_path(
-        self, spec: dict, force_recheck: bool = False, force_redownload: bool = False
-    ) -> str:
-        # TODO: Break this up, it's too long
+    def _get_local_path(self, spec, fp16=False):
+        key = "local_model_fp16" if fp16 else "local_model"
+        path = spec.get(key)
+        # Throw error if no such key in spec
+        if not path:
+            raise ValueError(f"No local model field `{key}` was provided")
+        # Add path to weight root if not absolute
+        if not os.path.isabs(path):
+            path = os.path.join(self._weight_root, path)
+        # Normalise
+        path = os.path.normpath(path)
+        # Throw error if result isn't a directory
+        if not os.path.isdir(path):
+            raise ValueError(f"Path '{path}' isn't a directory")
 
-        usefp16 = self.mode.fp16 and spec.get("has_fp16", True)
+        return path
 
-        local_path = spec.get("local_model_fp16" if usefp16 else "local_model", None)
-        model_path = spec.get("model", None)
+    def _get_hf_path(self, spec, local_only=True):
+        extra_kwargs = {}
+
+        model_path = spec.get("model")
+
+        # If no model_path is provided, don't try and download
+        if not model_path:
+            raise ValueError("No remote model name was provided")
+
+        fp16 = self.mode.fp16 and spec.get("has_fp16", True)
         subfolder = spec.get("subfolder", None)
         use_auth_token = self._token if spec.get("use_auth_token", False) else False
-        urls = spec.get("urls", None)
 
-        # Keep a list of the things we tried that failed, so we can report them all in one go later
-        # in the case that we weren't able to load it any way at all
-        failures = ["Loading model failed, because:"]
+        ignore_patterns = spec.get("ignore_patterns", [])
+        if isinstance(ignore_patterns, str):
+            ignore_patterns = [ignore_patterns]
+        extra_kwargs["ignore_patterns"] = ignore_patterns + ["*.ckpt"]
 
-        if local_path:
-            test_path = (
-                local_path
-                if os.path.isabs(local_path)
-                else os.path.join(self._weight_root, local_path)
+        if subfolder:
+            extra_kwargs["allow_patterns"] = [f"{subfolder}*"]
+        if use_auth_token:
+            extra_kwargs["use_auth_token"] = use_auth_token
+        if fp16:
+            extra_kwargs["revision"] = "fp16"
+
+        try:
+            # Try getting the cached path without connecting to internet
+            return huggingface_hub.snapshot_download(
+                model_path,
+                repo_type="model",
+                local_files_only=local_only,
+                **extra_kwargs,
             )
-            test_path = os.path.normpath(test_path)
-            if os.path.isdir(test_path):
-                return test_path
+        except Exception as e:
+            if local_only:
+                raise ValueError("Couldn't query local HuggingFace cache." + str(e)
             else:
-                failures.append(f"    - Local path '{test_path}' doesn't exist")
-        else:
-            failures.append(
-                "    - No local path for "
-                + ("fp16" if usefp16 else "fp32")
-                + " model was provided"
+                raise ValueError("Downloading from HuggingFace failed." + str(e))
+
+    def _get_hf_forced_path(self, spec):
+        model_path = spec.get("model")
+
+        # If no model_path is provided, don't try and download
+        if not model_path:
+            raise ValueError("No remote model name was provided")
+
+        try:
+            repo_info = next(
+                (
+                    repo
+                    for repo in huggingface_hub.scan_cache_dir().repos
+                    if repo.repo_id == model_path
+                )
             )
+            hashes = [revision.commit_hash for revision in repo_info.revisions]
+            huggingface_hub.scan_cache_dir().delete_revisions(*hashes).execute()
+        except:
+            pass
 
-        if model_path:
-            # We always download the file ourselves, rather than passing model path through to from_pretrained
-            # This lets us control the behaviour if the model fails to download
-            extra_kwargs = {}
+        return self._get_hf_path(spec, local_only=False)
 
-            ignore_patterns = spec.get("ignore_patterns", [])
-            if isinstance(ignore_patterns, str):
-                ignore_patterns = [ignore_patterns]
-            extra_kwargs["ignore_patterns"] = ignore_patterns + ["*.ckpt"]
+    def _get_url_path(self, spec):
+        id = urls["id"]
+        cache_path = os.path.join(sd_cache_home, id)
+        os.makedirs(cache_path, exist_ok=True)
 
-            if subfolder:
-                extra_kwargs["allow_patterns"] = [f"{subfolder}*"]
-            if use_auth_token:
-                extra_kwargs["use_auth_token"] = use_auth_token
-            if usefp16:
-                extra_kwargs["revision"] = "fp16"
+        try:
+            for name, url in urls.items():
+                if name == "id":
+                    continue
+                full_name = os.path.join(cache_path, name)
+                if os.path.exists(full_name):
+                    continue
 
-            if force_redownload:
-                try:
-                    repo_info = next(
-                        (
-                            repo
-                            for repo in huggingface_hub.scan_cache_dir().repos
-                            if repo.repo_id == model_path
-                        )
-                    )
-                    hashes = [revision.commit_hash for revision in repo_info.revisions]
-                    huggingface_hub.scan_cache_dir().delete_revisions(*hashes).execute()
-                except:
-                    pass
-
-            cache_path = None
-            attempt_download = force_recheck or force_redownload
-
-            try:
-                # Try getting the cached path without connecting to internet
-                cache_path = huggingface_hub.snapshot_download(
-                    model_path, repo_type="model", local_files_only=True, **extra_kwargs
-                )
-            except FileNotFoundError:
-                attempt_download = True
-            except:
-                failures.append(
-                    "    - Couldn't query local HuggingFace cache. Error was:"
-                )
-                failures.append(traceback.format_exc())
-
-            if self._refresh_models:
-                attempt_download = attempt_download or any(
-                    (
-                        True
-                        for pattern in self._refresh_models
-                        if fnmatch(model_path, pattern)
-                    )
-                )
-
-            if attempt_download:
-                try:
-                    cache_path = huggingface_hub.snapshot_download(
-                        model_path, repo_type="model", **extra_kwargs
-                    )
-                except:
-                    if cache_path:
-                        print(
-                            f"Couldn't refresh cache for {model_path}. Using existing cache."
-                        )
-                    else:
-                        failures.append(
-                            "    - Downloading from HuggingFace failed. Error was:"
-                        )
-                        failures.append(traceback.format_exc())
-
-            if cache_path:
-                return cache_path
-
+                with tempfile.NamedTemporaryFile(
+                    mode="wb", dir=cache_path, delete=False
+                ) as temp_file:
+                    http_get(url, temp_file)
+                    os.replace(temp_file.name, full_name)
+        except:
+            failures.append("    - Download failed. Error was:")
+            failures.append(traceback.format_exc())
         else:
-            failures.append("    - No remote model name was provided")
+            return cache_path
 
-        if urls:
-            id = urls["id"]
-            cache_path = os.path.join(sd_cache_home, id)
-            os.makedirs(cache_path, exist_ok=True)
+    def _get_weight_path_candidates(self, spec: dict):
+        candidates = []
 
-            try:
-                for name, url in urls.items():
-                    if name == "id":
-                        continue
-                    full_name = os.path.join(cache_path, name)
-                    if os.path.exists(full_name):
-                        continue
+        def add_candidate(callable, *args, **kwargs):
+            candidates.append((callable, args, kwargs))
 
-                    with tempfile.NamedTemporaryFile(
-                        mode="wb", dir=cache_path, delete=False
-                    ) as temp_file:
-                        http_get(url, temp_file)
-                        os.replace(temp_file.name, full_name)
-            except:
-                failures.append("    - Download failed. Error was:")
-                failures.append(traceback.format_exc())
-            else:
-                return cache_path
+        model_path = spec.get("model")
+        matches_refresh = (
+            self._refresh_models
+            and model_path
+            and any(
+                (
+                    True
+                    for pattern in self._refresh_models
+                    if fnmatch(model_path, pattern)
+                )
+            )
+        )
 
-        raise EnvironmentError("\n".join(failures))
+        # 1st: If this model should explicitly be refreshed, try refreshing from HuggingFace
+        if matches_refresh:
+            add_candidate(self._get_hf_path, local_only=False)
+        # 2nd: If we're in fp16 mode, try loading the fp16-specific local model
+        if self.mode.fp16:
+            add_candidate(self._get_local_path, fp16=True)
+        # 3rd: Try loading the general local model
+        add_candidate(self._get_local_path, fp16=False)
+        # 4th: Try loading from the existing HuggingFace cache
+        add_candidate(self._get_hf_path, local_only=True)
+        # 5th: If this model wasn't explicitly flagged to be refreshed, try anyway
+        if not matches_refresh:
+            add_candidate(self._get_hf_path, local_only=False)
+        # 6th: If configured so, try a forced empty-cache-and-reload from HuggingFace
+        if self._refresh_on_error:
+            add_candidate(self._get_hf_forced_path)
+
+        return candidates
 
     def _import_class(self, fqclass_name: str | tuple[str, str]):
         # You can pass in either a (dot seperated) string or a tuple of library, class
@@ -862,7 +874,7 @@ class EngineManager(object):
         return model
 
     def _load_modelset_from_weights(self, weight_path, whitelist=None, blacklist=None):
-        config_dict = DiffusionPipeline.load_config(weight_path)
+        config_dict = DiffusionPipeline.load_config(weight_path, local_files_only=True)
 
         if isinstance(whitelist, str):
             whitelist = [whitelist]
@@ -903,13 +915,9 @@ class EngineManager(object):
 
         return ModelSet(**pipeline)
 
-    def _load_from_weights(
-        self, spec: dict, force_redownload: bool = False
-    ) -> ModelSet:
+    def _load_from_weights(self, spec: dict, weight_path: str) -> ModelSet:
         # Determine if this set of weights is a pipeline, a clip
         type = spec.get("type", "pipeline")
-
-        weight_path = self._get_weight_path(spec, force_redownload=force_redownload)
 
         # A pipeline has a top-level json file that describes a set of models
         if type == "pipeline":
@@ -936,14 +944,36 @@ class EngineManager(object):
 
         return models if isinstance(models, ModelSet) else ModelSet(**models)
 
-    def _load_from_weights_with_retry(self, spec: dict) -> ModelSet:
-        try:
-            return self._load_from_weights(spec)
-        except Exception as e:
-            print(e)
-            pass
+    def _load_from_weight_candidates(self, spec: dict) -> tuple[ModelSet, str]:
+        candidates = self._get_weight_path_candidates(spec)
 
-        return self._load_from_weights(spec, force_redownload=True)
+        failures = []
+
+        for callback, args, kwargs in candidates:
+            weight_path = None
+            try:
+                weight_path = callback(spec, *args, **kwargs)
+                models = self._load_from_weights(spec, weight_path)
+                return models, weight_path
+            except ValueError as e:
+                if str(e) not in failures:
+                    failures.append(str(e))
+            except Exception as e:
+                if weight_path:
+                    errstr = f"Error when trying to load weights from {weight_path}. " + str(e)
+                    if errstr not in failures:
+                        failures.append(errstr)
+                else:
+                    raise e
+
+        if "id" in spec:
+            name = f"engine {spec['id']}"
+        else:
+            name = f"model {spec['model_id']}"
+
+        raise EnvironmentError(
+            "\n  - ".join([f"Failed to load {name}. Failed attempts:"] + failures)
+        )
 
     def _load_from_reference(self, modelid: str):
         modelid, *submodel = modelid.split("/")
@@ -985,10 +1015,7 @@ class EngineManager(object):
         if isinstance(model, str) and model.startswith("@"):
             model = self._load_from_reference(model[1:])
         else:
-            if self._refresh_on_error:
-                model = self._load_from_weights_with_retry(spec)
-            else:
-                model = self._load_from_weights(spec)
+            model, _ = self._load_from_weight_candidates(spec)
 
         overrides = spec.get("overrides", None)
 
@@ -1085,6 +1112,142 @@ class EngineManager(object):
 
         if self.batchMode.autodetect:
             self.batchMode.run_autodetect(self)
+
+    def _fixcfg(self, model, key, test, value):
+        if hasattr(model.config, key) and test(getattr(model.config, key)):
+            print("Fixing", model._source)
+            new_config = dict(model.config)
+            new_config[key] = value
+            model._internal_dict = FrozenDict(new_config)
+
+    def _save_model_as_safetensor(self, spec):
+        # What's the local model attribute in the spec?
+        local_model_attr = "local_model_fp16" if self.mode.fp16 else "local_model"
+
+        _id = spec.get("model_id", spec.get("id"))
+        type = spec.get("type", "pipeline")
+        outpath = spec.get(local_model_attr, None)
+
+        if not outpath:
+            raise EnvironmentError(
+                f"Can't save safetensor for {type} {_id} if {local_model_attr} not set"
+            )
+
+        if not os.path.isabs(outpath):
+            outpath = os.path.join(self._weight_root, outpath)
+
+        print(f"Saving {type} {_id} to {outpath}")
+
+        # Load the model
+        models, inpath = self._load_from_weight_candidates(spec)
+
+        if type == "pipeline":
+            for name, model in models.items():
+                if not model:
+                    continue
+
+                # Fix model issues before saving
+                if name == "scheduler":
+                    self._fixcfg(model, "steps_offset", lambda x: x != 1, 1)
+                elif name == "unet":
+                    self._fixcfg(model, "sample_size", lambda x: x < 64, 64)
+
+                subpath = os.path.join(outpath, name)
+                print(f"  Submodule {name} to {subpath}")
+                model.save_pretrained(save_directory=subpath, safe_serialization=True)
+
+            if not os.path.samefile(inpath, outpath):
+                shutil.copyfile(
+                    os.path.join(inpath, "model_index.json"),
+                    os.path.join(outpath, "model_index.json"),
+                )
+        elif type == "clip":
+            models.clip_model.save_pretrained(
+                save_directory=outpath, safe_serialization=True
+            )
+            if not os.path.samefile(inpath, outpath):
+                for cfg_file in glob.glob(os.path.join(inpath, "*.json")):
+                    shutil.copy(cfg_file, outpath)
+        else:
+            model = list(models.values())[0]
+            model.save_pretrained(save_directory=outpath, safe_serialization=True)
+
+    def _find_specs(
+        self,
+        id: str | Iterable[str] | None = None,
+        model_id: str | Iterable[str] | None = None,
+    ):
+        if id and model_id:
+            raise ValueError("Must provide only one of id or model_id")
+        if not id and not model_id:
+            raise ValueError("Must provide one of id or model_id")
+
+        key = "id" if id else "model_id"
+        val = id if id else model_id
+        assert val
+        val = (val,) if isinstance(val, str) else val
+
+        return (
+            spec
+            for spec in self.engines
+            if key in spec
+            and any((True for pattern in val if fnmatch(spec.get(key), pattern)))
+        )
+
+    def _find_spec(
+        self,
+        id: str | Iterable[str] | None = None,
+        model_id: str | Iterable[str] | None = None,
+    ):
+        res = self._find_specs(id=id, model_id=model_id)
+        return next(res, None)
+
+    def save_models_as_safetensor(self, patterns):
+        specs = self._find_specs(model_id=patterns)
+
+        for spec in specs:
+            self._save_model_as_safetensor(spec)
+
+        print("Done")
+
+    def _find_referenced_weightspecs(self, spec):
+        referenced = []
+        model = spec.get("model")
+
+        if model and model[0] == "@":
+            model_id, *_ = model[1:].split("/")
+            model_spec = self._find_spec(model_id=model_id)
+            referenced += self._find_referenced_weightspecs(model_spec)
+        else:
+            referenced.append(spec)
+
+        overrides = spec.get("overrides")
+
+        if overrides:
+            for _, override in overrides.items():
+                if isinstance(override, str):
+                    override = {"model": override}
+                referenced += self._find_referenced_weightspecs(override)
+
+        return referenced
+
+    def save_engine_as_safetensor(self, patterns):
+        specs = self._find_specs(id=patterns)
+
+        involved = []
+
+        for spec in specs:
+            involved += self._find_referenced_weightspecs(spec)
+
+        unique = {
+            f"e/{spec['id']}" if "id" in spec else f"m/{spec['model_id']}": spec
+            for spec in involved
+        }
+
+        for spec in unique.values():
+            self._save_model_as_safetensor(spec)
+
+        print("Done")
 
     def getStatus(self):
         return {

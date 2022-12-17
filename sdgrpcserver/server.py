@@ -312,6 +312,8 @@ def git_object_hash(bs: bytes):
 
 
 def main():
+    start_time = time.time()
+
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
@@ -440,6 +442,12 @@ def main():
         action="store_true",
         help="Enable collection of debug information for reporting with later. This collection is local only, until you deliberately choose to submit a sample.",
     )
+    util_opts.add_argument(
+        "--save_safetensors",
+        type=str,
+        default=None,
+        help="'*' or a comma-seperated list of engine IDs to save as safetensors. All the models used in that engine will also be saved. Server will exit after completing.",
+    )
 
     debug_opts.add_argument(
         "--vram_fraction",
@@ -471,6 +479,11 @@ def main():
     refresh_models = None
     if args.refresh_models:
         refresh_models = re.split("\s*,\s*", args.refresh_models.strip())
+
+    save_safetensor_patterns = None
+    if args.save_safetensors:
+        save_safetensor_patterns = re.split("\s*,\s*", args.save_safetensors.strip())
+        args.reload = False
 
     if args.localtunnel and not args.access_token:
         args.access_token = secrets.token_urlsafe(16)
@@ -583,6 +596,10 @@ def main():
 
         print("Manager loaded")
 
+        if save_safetensor_patterns:
+            manager.save_engine_as_safetensor(save_safetensor_patterns)
+            shutdown_reactor_handler()
+
         if ram_monitor:
             ram_monitor.print()
 
@@ -622,9 +639,13 @@ def main():
             f"GRPC listening on port {args.grpc_port}, HTTP listening on port {args.http_port}. Start your engines...."
         )
 
+        loads_time = time.time()
+
         manager.loadPipelines()
 
-        print("All engines ready")
+        print(
+            f"All engines ready, loading took {time.time()-loads_time:.1f}s, total startup {time.time()-start_time:.1f}s"
+        )
 
         if ram_monitor:
             ram_monitor.print()
