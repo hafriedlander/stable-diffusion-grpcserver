@@ -145,8 +145,9 @@ RUN tar cvjf /triton.tbz /env/envs/sd-grpc-server/lib/python3.*/site-packages/tr
 FROM tritonbase AS xformersbase
 
 WORKDIR /
+ARG XFORMERS_REPO=https://github.com/facebookresearch/xformers.git
 ARG XFORMERS_REF=main
-RUN git clone https://github.com/facebookresearch/xformers.git
+RUN git clone $XFORMERS_REPO
 
 WORKDIR /xformers
 RUN git checkout $XFORMERS_REF
