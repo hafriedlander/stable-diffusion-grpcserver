@@ -7,10 +7,14 @@ import itertools
 import json
 import math
 import os
+import queue
 import shutil
 import tempfile
 import traceback
+from contextlib import contextmanager
+from dataclasses import dataclass
 from fnmatch import fnmatch
+from queue import Queue
 from types import SimpleNamespace as SN
 from typing import Iterable, Optional, Union
 
@@ -168,7 +172,6 @@ class BatchMode:
     def run_autodetect(self, manager, resmax=2048, resstep=256):
         torch.cuda.set_per_process_memory_fraction(1 - self.safety_margin)
 
-        pipe = manager.getPipe()
         params = SN(
             height=512,
             width=512,
@@ -196,7 +199,8 @@ class BatchMode:
                 b = (l + r) // 2
                 print(f"Trying {b}")
                 try:
-                    pipe.generate(["A Crocodile"] * b, params, suppress_output=True)
+                    with manager.with_engine() as pipe:
+                        pipe.generate(["A Crocodile"] * b, params, suppress_output=True)
                 except Exception as e:
                     r = b
                 else:
@@ -405,7 +409,7 @@ class PipelineWrapper(object):
             if isinstance(module, torch.nn.Module):
                 yield name, module
 
-    def activate(self):
+    def activate(self, device):
         if self._previous is not None:
             raise Exception("Activate called without previous deactivate")
 
@@ -430,7 +434,7 @@ class PipelineWrapper(object):
             # Clone from CPU to either CUDA or Meta with a hook to move to CUDA
             cloned = clone_model(
                 module,
-                self.mode.device,
+                device,
                 exclusion_set=exclusion_set if delayed else None,
             )
 
@@ -610,6 +614,20 @@ class ModelSet(SN):
         self.__dict__[key] = value
 
 
+@dataclass
+class DeviceQueueSlot:
+    device: torch.device
+    pipeline: DiffusionPipeline | None = None
+
+
+class EngineNotFoundError(Exception):
+    pass
+
+
+class EngineNotReadyError(Exception):
+    pass
+
+
 class EngineManager(object):
     def __init__(
         self,
@@ -625,8 +643,10 @@ class EngineManager(object):
         self.engines = engines
         self._default = None
 
+        # Models that are explictly loaded with a model_id and can be referenced
         self._models = {}
-        self._pipelines = {}
+        # Models for each engine
+        self._engine_models = {}
 
         self._activeId = None
         self._active = None
@@ -641,6 +661,12 @@ class EngineManager(object):
         self._token = os.environ.get("HF_API_TOKEN", True)
 
         self._ram_monitor = ram_monitor
+
+        self._device_queue = Queue()
+        self._available_pipelines: dict[str, Queue] = {}
+
+        for i in range(torch.cuda.device_count()):
+            self._device_queue.put(DeviceQueueSlot(device=torch.device("cuda", i)))
 
     @property
     def mode(self):
@@ -1117,21 +1143,24 @@ class EngineManager(object):
         modules = {**modules, **extra_kwargs}
         return class_obj(**modules)
 
-    def _load_engine(self, engine):
-        model = self._load_model(engine)
-        pipeline = self._instantiate_pipeline(engine, model, {})
+    def _build_pipeline_for_engine(self, spec):
+        model = self._engine_models.get(spec["id"])
+        if not model:
+            raise EngineNotReadyError("Not ready yet")
 
-        pipeline_options = engine.get("options", False)
+        pipeline = self._instantiate_pipeline(spec, model, {})
+
+        pipeline_options = spec.get("options", False)
 
         if pipeline_options:
             try:
                 pipeline.set_options(pipeline_options)
             except Exception:
                 raise ValueError(
-                    f"Engine {engine['id']} has options, but created pipeline rejected them"
+                    f"Engine {spec['id']} has options, but created pipeline rejected them"
                 )
 
-        return pipeline
+        return PipelineWrapper(id=spec["id"], mode=self._mode, pipeline=pipeline)
 
     def loadPipelines(self):
 
@@ -1151,11 +1180,7 @@ class EngineManager(object):
                 self._default = engineid
 
             print(f"  - Engine {engineid}...")
-            pipeline = self._load_engine(engine)
-
-            self._pipelines[engineid] = PipelineWrapper(
-                id=engineid, mode=self._mode, pipeline=pipeline
-            )
+            self._engine_models[engineid] = self._load_model(engine)
 
         if self.batchMode.autodetect:
             self.batchMode.run_autodetect(self)
@@ -1298,12 +1323,47 @@ class EngineManager(object):
 
     def getStatus(self):
         return {
-            engine["id"]: engine["id"] in self._pipelines
+            engine["id"]: engine["id"] in self._engine_models
             for engine in self.engines
             if engine.get("id", False) and engine.get("enabled", False)
         }
 
-    def getPipe(self, id=None):
+    def _return_pipeline_to_pool(self, slot):
+        assert slot.pipeline, "No pipeline to return to pool"
+
+        # Get the current slot pipeline
+        pipeline = slot.pipeline
+
+        # Deactivate and remove it from the slot
+        slot.pipeline.deactivate()
+        slot.pipeline = None
+
+        # Return it to the pool (creating a pool if needed)
+        pool = self._available_pipelines.setdefault(pipeline.id, Queue())
+        pool.put(pipeline)
+
+    def _get_pipeline_from_pool(self, slot, id):
+        assert not slot.pipeline, "Cannot allocate pipeline to full device slot"
+
+        # Get the pool. If none available, return
+        pool = self._available_pipelines.get(id)
+        if not pool:
+            return None
+
+        # Try getting a pipeline from the pool. Again, if none available, just return
+        try:
+            pipeline = pool.get(block=False)
+        except queue.Empty:
+            return None
+
+        # Assign the pipeline to the slot and activate
+        slot.pipeline = pipeline
+        slot.pipeline.activate(slot.device)
+
+        return pipeline
+
+    @contextmanager
+    def with_engine(self, id=None):
         """
         Get and activate a pipeline
         TODO: Better activate / deactivate logic. Right now we just keep a max of one pipeline active.
@@ -1312,25 +1372,48 @@ class EngineManager(object):
         if id is None:
             id = self._default
 
-        # If we're already active, just return it
-        if self._active and id == self._active.id:
-            return self._active
+        if id is None:
+            raise EngineNotFoundError("No engine ID provided and no default is set.")
 
-        # Otherwise deactivate it
-        if self._active:
-            self._active.deactivate()
-            # Explicitly mark as not active, in case there's an error later
-            self._active = None
+        # Get the engine spec
+        spec = self._find_spec(id=id)
+        if not spec or not spec.get("enabled", False):
+            raise EngineNotFoundError(f"Engine ID {id} doesn't exist or isn't enabled.")
+
+        # Get device queue slot
+        slot = self._device_queue.get()
+
+        # Get pipeline (create if all pipelines for the id are busy)
+
+        # If a pipeline is already active on this device slot, check if it's the right
+        # one. If not, deactivate it and clear it
+        if slot.pipeline and slot.pipeline.id != id:
+            old_id = slot.pipeline.id
+            self._return_pipeline_to_pool(slot)
 
             if self._ram_monitor:
-                print("Existing pipeline deactivated")
+                print(f"Existing pipeline {old_id} deactivated")
                 self._ram_monitor.print()
 
-        self._active = self._pipelines[id]
-        self._active.activate()
+        # If there's no pipeline on this device slot yet, find it (creating it
+        # if all the existing pipelines are busy)
+        if not slot.pipeline:
+            existing = True
+            self._get_pipeline_from_pool(slot, id)
 
-        if self._ram_monitor:
-            print("New pipeline activated")
-            self._ram_monitor.print()
+            if not slot.pipeline:
+                existing = False
+                slot.pipeline = self._build_pipeline_for_engine(spec)
+                slot.pipeline.activate(slot.device)
 
-        return self._active
+            if self._ram_monitor:
+                print(f"{'Existing' if existing else 'New'} pipeline {id} activated")
+                self._ram_monitor.print()
+
+        # Do the work
+        yield slot.pipeline
+
+        # Release device handle
+        self._device_queue.put(slot)
+
+        # All done

@@ -13,6 +13,7 @@ from google.protobuf import json_format as pb_json_format
 
 from sdgrpcserver import constants, images
 from sdgrpcserver.debug_recorder import DebugNullRecorder
+from sdgrpcserver.manager import EngineNotFoundError
 from sdgrpcserver.utils import artifact_to_image, image_to_artifact
 
 
@@ -381,13 +382,6 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                     if val is not None:
                         kwargs[field] = val
 
-                try:
-                    pipe = self._manager.getPipe(request.engine_id)
-                except KeyError as e:
-                    context.set_code(grpc.StatusCode.NOT_FOUND)
-                    context.set_details("Engine not found")
-                    return
-
                 stop_event = threading.Event()
                 context.add_callback(lambda: stop_event.set())
 
@@ -415,7 +409,8 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
 
                     recorder.store("pipe.generate calls", kwargs)
 
-                    results = pipe.generate(**batchargs, stop_event=stop_event)
+                    with self._manager.with_engine(request.engine_id) as engine:
+                        results = engine.generate(**batchargs, stop_event=stop_event)
 
                     meta = pb_json_format.MessageToDict(request)
                     for prompt in meta["prompt"]:
@@ -456,6 +451,10 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                 if self._ram_monitor:
                     self._ram_monitor.print()
 
+            except EngineNotFoundError as e:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details(str(e))
+                print(f"Engine not found: {e}")
             except NotImplementedError as e:
                 context.set_code(grpc.StatusCode.UNIMPLEMENTED)
                 context.set_details(str(e))
