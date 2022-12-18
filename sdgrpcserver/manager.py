@@ -3,6 +3,7 @@ import gc
 import glob
 import importlib
 import inspect
+import itertools
 import json
 import math
 import os
@@ -26,7 +27,7 @@ from diffusers import (
     pipelines,
 )
 from diffusers.configuration_utils import FrozenDict
-from diffusers.pipeline_utils import DiffusionPipeline
+from diffusers.pipeline_utils import DiffusionPipeline, is_safetensors_compatible
 from diffusers.utils import deprecate
 from huggingface_hub.file_download import http_get
 from tqdm.auto import tqdm
@@ -692,7 +693,50 @@ class EngineManager(object):
             extra_kwargs["revision"] = "fp16"
 
         try:
-            # Try getting the cached path without connecting to internet
+            # If we're not loading from local_only, do some extra logic to avoid downloading
+            # other unusused large files in the repo unnessecarily (like .ckpt files and
+            # the .safetensors version of .ckpt files )
+            if not local_only:
+                # Get a list of files, split into path and extension
+                repo_info = huggingface_hub.model_info(model_path)
+                repo_files = [os.path.splitext(f.rfilename) for f in repo_info.siblings]
+                # Sort by extension (grouping fails if not correctly sorted)
+                repo_files.sort(key=lambda x: x[1])
+                # Turn into a dictionary of { extension: set_of_files }
+                grouped = {
+                    k: {f[0] for f in v}
+                    for k, v in itertools.groupby(repo_files, lambda x: x[1])
+                }
+
+                has_ckpt = ".ckpt" in grouped
+                has_bin = ".bin" in grouped
+                has_safe = ".safetensors" in grouped
+                # If we have ckpt and safetensors files, don't consider matching safetensors
+                if has_ckpt and has_safe:
+                    has_safe = bool(grouped[".safetensors"] - grouped[".ckpt"])
+
+                if not has_bin and not has_safe:
+                    if has_ckpt:
+                        raise EnvironmentError(
+                            "Repo {model_path} only contains .ckpt files. We can only load Diffusers structured models."
+                        )
+                    else:
+                        raise EnvironmentError(
+                            "Repo {model_path} doesn't appear to contain any model files."
+                        )
+
+                if has_bin and is_safetensors_compatible(repo_info):
+                    # Only use safetensors
+                    extra_kwargs["ignore_patterns"] += ["*.bin"]
+
+                # Exclude safetensors that match ckpt files
+                exclude_safetensors = [
+                    f"{f}.safetensors"
+                    for f in grouped[".safetensors"]
+                    if f in grouped[".ckpt"]
+                ]
+                extra_kwargs["ignore_patterns"] += exclude_safetensors
+
             return huggingface_hub.snapshot_download(
                 model_path,
                 repo_type="model",
@@ -701,7 +745,7 @@ class EngineManager(object):
             )
         except Exception as e:
             if local_only:
-                raise ValueError("Couldn't query local HuggingFace cache." + str(e)
+                raise ValueError("Couldn't query local HuggingFace cache." + str(e))
             else:
                 raise ValueError("Downloading from HuggingFace failed." + str(e))
 
@@ -960,7 +1004,10 @@ class EngineManager(object):
                     failures.append(str(e))
             except Exception as e:
                 if weight_path:
-                    errstr = f"Error when trying to load weights from {weight_path}. " + str(e)
+                    errstr = (
+                        f"Error when trying to load weights from {weight_path}. "
+                        + str(e)
+                    )
                     if errstr not in failures:
                         failures.append(errstr)
                 else:
