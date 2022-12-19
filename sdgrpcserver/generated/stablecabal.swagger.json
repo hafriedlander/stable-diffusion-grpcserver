@@ -1,0 +1,1468 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "generation.proto",
+    "version": "version not set"
+  },
+  "tags": [
+    {
+      "name": "GenerationService"
+    },
+    {
+      "name": "EnginesService"
+    }
+  ],
+  "consumes": [
+    "application/json"
+  ],
+  "produces": [
+    "application/json"
+  ],
+  "paths": {
+    "/engines": {
+      "get": {
+        "operationId": "ListEngines",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/Engines"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/Status"
+            }
+          }
+        },
+        "tags": [
+          "EnginesService"
+        ]
+      }
+    },
+    "/generate": {
+      "post": {
+        "operationId": "Generate",
+        "responses": {
+          "200": {
+            "description": "A successful response.(streaming responses)",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "result": {
+                  "$ref": "#/definitions/Answer"
+                },
+                "error": {
+                  "$ref": "#/definitions/Status"
+                }
+              },
+              "title": "Stream result of Answer"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "engineId",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "requestId",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "requestedType",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "ARTIFACT_NONE",
+              "ARTIFACT_IMAGE",
+              "ARTIFACT_VIDEO",
+              "ARTIFACT_TEXT",
+              "ARTIFACT_TOKENS",
+              "ARTIFACT_EMBEDDING",
+              "ARTIFACT_CLASSIFICATIONS",
+              "ARTIFACT_MASK",
+              "ARTIFACT_LATENT",
+              "ARTIFACT_TENSOR",
+              "ARTIFACT_LORA"
+            ],
+            "default": "ARTIFACT_NONE"
+          },
+          {
+            "name": "image.height",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "uint64"
+          },
+          {
+            "name": "image.width",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "uint64"
+          },
+          {
+            "name": "image.seed",
+            "in": "query",
+            "required": false,
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "collectionFormat": "multi"
+          },
+          {
+            "name": "image.samples",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "uint64"
+          },
+          {
+            "name": "image.steps",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "uint64"
+          },
+          {
+            "name": "image.transform.diffusion",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "SAMPLER_DDIM",
+              "SAMPLER_DDPM",
+              "SAMPLER_K_EULER",
+              "SAMPLER_K_EULER_ANCESTRAL",
+              "SAMPLER_K_HEUN",
+              "SAMPLER_K_DPM_2",
+              "SAMPLER_K_DPM_2_ANCESTRAL",
+              "SAMPLER_K_LMS",
+              "SAMPLER_DPMSOLVERPP_1ORDER",
+              "SAMPLER_DPMSOLVERPP_2ORDER",
+              "SAMPLER_DPMSOLVERPP_3ORDER",
+              "SAMPLER_DPM_FAST",
+              "SAMPLER_DPM_ADAPTIVE",
+              "SAMPLER_DPMSOLVERPP_2S_ANCESTRAL",
+              "SAMPLER_DPMSOLVERPP_SDE",
+              "SAMPLER_DPMSOLVERPP_2M"
+            ],
+            "default": "SAMPLER_DDIM"
+          },
+          {
+            "name": "image.transform.upscaler",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "UPSCALER_RGB",
+              "UPSCALER_GFPGAN",
+              "UPSCALER_ESRGAN"
+            ],
+            "default": "UPSCALER_RGB"
+          },
+          {
+            "name": "image.hires.enable",
+            "description": "Should it be enabled at all",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "name": "image.hires.oosFraction",
+            "description": "How out-of-square will we allow the fixed area to be, 0...1",
+            "in": "query",
+            "required": false,
+            "type": "number",
+            "format": "float"
+          },
+          {
+            "name": "image.tiling",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "name": "classifier.realizedAction",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "ACTION_PASSTHROUGH",
+              "ACTION_REGENERATE_DUPLICATE",
+              "ACTION_REGENERATE",
+              "ACTION_OBFUSCATE_DUPLICATE",
+              "ACTION_OBFUSCATE",
+              "ACTION_DISCARD"
+            ],
+            "default": "ACTION_PASSTHROUGH"
+          },
+          {
+            "name": "asset.action",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "ASSET_PUT",
+              "ASSET_GET",
+              "ASSET_DELETE"
+            ],
+            "default": "ASSET_PUT"
+          },
+          {
+            "name": "asset.projectId",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "asset.use",
+            "description": " - ASSET_USE_UNDEFINED: Asset does not have use defined\n - ASSET_USE_INPUT: Asset is used as an input for the project\n - ASSET_USE_OUTPUT: Asset is an output from the project\n - ASSET_USE_INTERMEDIATE: Asset is an output from an intermediate step of the project\n - ASSET_USE_PROJECT: Asset is used as the project file for the project",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "ASSET_USE_UNDEFINED",
+              "ASSET_USE_INPUT",
+              "ASSET_USE_OUTPUT",
+              "ASSET_USE_INTERMEDIATE",
+              "ASSET_USE_PROJECT"
+            ],
+            "default": "ASSET_USE_UNDEFINED"
+          },
+          {
+            "name": "conditioner.vectorAdjustPrior",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "conditioner.conditioner.architecture",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "MODEL_ARCHITECTURE_NONE",
+              "MODEL_ARCHITECTURE_CLIP_VIT",
+              "MODEL_ARCHITECTURE_CLIP_RESNET",
+              "MODEL_ARCHITECTURE_LDM"
+            ],
+            "default": "MODEL_ARCHITECTURE_NONE"
+          },
+          {
+            "name": "conditioner.conditioner.publisher",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "conditioner.conditioner.dataset",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "conditioner.conditioner.version",
+            "in": "query",
+            "required": false,
+            "type": "number",
+            "format": "float"
+          },
+          {
+            "name": "conditioner.conditioner.semanticVersion",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "conditioner.conditioner.alias",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "GenerationService"
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "Action": {
+      "type": "string",
+      "enum": [
+        "ACTION_PASSTHROUGH",
+        "ACTION_REGENERATE_DUPLICATE",
+        "ACTION_REGENERATE",
+        "ACTION_OBFUSCATE_DUPLICATE",
+        "ACTION_OBFUSCATE",
+        "ACTION_DISCARD"
+      ],
+      "default": "ACTION_PASSTHROUGH"
+    },
+    "Answer": {
+      "type": "object",
+      "properties": {
+        "answerId": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "received": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "created": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "meta": {
+          "$ref": "#/definitions/AnswerMeta"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Artifact"
+          }
+        }
+      },
+      "description": "An Answer is a response to a Request. It is a set of Artifacts, which can be\nof any type and forwarded to the client or the next stage."
+    },
+    "AnswerMeta": {
+      "type": "object",
+      "properties": {
+        "gpuId": {
+          "type": "string"
+        },
+        "cpuId": {
+          "type": "string"
+        },
+        "nodeId": {
+          "type": "string"
+        },
+        "engineId": {
+          "type": "string"
+        }
+      },
+      "description": "AnswerMeta is a set of metadata about an answer, usually the operating\nenvironment."
+    },
+    "Any": {
+      "type": "object",
+      "properties": {
+        "@type": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": {}
+    },
+    "Artifact": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "type": {
+          "$ref": "#/definitions/ArtifactType"
+        },
+        "mime": {
+          "type": "string",
+          "title": "MIME type identifier, e.g. \"image/png\""
+        },
+        "magic": {
+          "type": "string",
+          "title": "Magic number, e.g. \"PNG\""
+        },
+        "binary": {
+          "type": "string",
+          "format": "byte",
+          "title": "Binary data, e.g. PNG image"
+        },
+        "text": {
+          "type": "string",
+          "title": "Text data, e.g. text prompt"
+        },
+        "tokens": {
+          "$ref": "#/definitions/Tokens",
+          "title": "Tokenized text data, e.g. GPT tokens"
+        },
+        "classifier": {
+          "$ref": "#/definitions/ClassifierParameters"
+        },
+        "tensor": {
+          "$ref": "#/definitions/Tensor",
+          "title": "torch.Tensor:"
+        },
+        "lora": {
+          "$ref": "#/definitions/Lora",
+          "description": "A Lora embedding",
+          "title": "RGB tensor (C,H,W)\n   VAE latent (C,H//8,W//8, assuming VAE-f8)"
+        },
+        "index": {
+          "type": "integer",
+          "format": "int64",
+          "title": "Index of this artifact in input/output list"
+        },
+        "finishReason": {
+          "$ref": "#/definitions/FinishReason",
+          "title": "Reason for finishing, if applicable"
+        },
+        "seed": {
+          "type": "integer",
+          "format": "int64",
+          "title": "Seed used to generate this artifact"
+        },
+        "uuid": {
+          "type": "string",
+          "title": "UUIDv4 of the artifact, used for asset lookup"
+        },
+        "size": {
+          "type": "string",
+          "format": "uint64",
+          "title": "Size of the artifact in bytes"
+        },
+        "adjustments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ImageAdjustment"
+          },
+          "title": "Adjustments to this image / mask before generation"
+        },
+        "postAdjustments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ImageAdjustment"
+          },
+          "title": "Adjustments to this image / mask after generation"
+        }
+      },
+      "description": "A tangible Artifact, such as an image, video, or text that is used for input\nor output."
+    },
+    "ArtifactType": {
+      "type": "string",
+      "enum": [
+        "ARTIFACT_NONE",
+        "ARTIFACT_IMAGE",
+        "ARTIFACT_VIDEO",
+        "ARTIFACT_TEXT",
+        "ARTIFACT_TOKENS",
+        "ARTIFACT_EMBEDDING",
+        "ARTIFACT_CLASSIFICATIONS",
+        "ARTIFACT_MASK",
+        "ARTIFACT_LATENT",
+        "ARTIFACT_TENSOR",
+        "ARTIFACT_LORA"
+      ],
+      "default": "ARTIFACT_NONE"
+    },
+    "AssetAction": {
+      "type": "string",
+      "enum": [
+        "ASSET_PUT",
+        "ASSET_GET",
+        "ASSET_DELETE"
+      ],
+      "default": "ASSET_PUT"
+    },
+    "AssetParameters": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/AssetAction"
+        },
+        "projectId": {
+          "type": "string"
+        },
+        "use": {
+          "$ref": "#/definitions/AssetUse"
+        }
+      }
+    },
+    "AssetUse": {
+      "type": "string",
+      "enum": [
+        "ASSET_USE_UNDEFINED",
+        "ASSET_USE_INPUT",
+        "ASSET_USE_OUTPUT",
+        "ASSET_USE_INTERMEDIATE",
+        "ASSET_USE_PROJECT"
+      ],
+      "default": "ASSET_USE_UNDEFINED",
+      "description": "AssetUse defines how the asset is used within a project.  This enum matches\nthe values the project proto.\n\n - ASSET_USE_UNDEFINED: Asset does not have use defined\n - ASSET_USE_INPUT: Asset is used as an input for the project\n - ASSET_USE_OUTPUT: Asset is an output from the project\n - ASSET_USE_INTERMEDIATE: Asset is an output from an intermediate step of the project\n - ASSET_USE_PROJECT: Asset is used as the project file for the project"
+    },
+    "AttributeType": {
+      "type": "string",
+      "enum": [
+        "AT_PARAMETER",
+        "AT_BUFFER"
+      ],
+      "default": "AT_PARAMETER"
+    },
+    "ChannelSource": {
+      "type": "string",
+      "enum": [
+        "CHANNEL_R",
+        "CHANNEL_G",
+        "CHANNEL_B",
+        "CHANNEL_A",
+        "CHANNEL_ZERO",
+        "CHANNEL_ONE",
+        "CHANNEL_DISCARD"
+      ],
+      "default": "CHANNEL_R"
+    },
+    "ChurnSettings": {
+      "type": "object",
+      "properties": {
+        "churn": {
+          "type": "number",
+          "format": "float"
+        },
+        "churnTmin": {
+          "type": "number",
+          "format": "float"
+        },
+        "churnTmax": {
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "ClassifierCategory": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "concepts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ClassifierConcept"
+          }
+        },
+        "adjustment": {
+          "type": "number",
+          "format": "float"
+        },
+        "action": {
+          "$ref": "#/definitions/Action"
+        },
+        "classifierMode": {
+          "$ref": "#/definitions/ClassifierMode"
+        }
+      }
+    },
+    "ClassifierConcept": {
+      "type": "object",
+      "properties": {
+        "concept": {
+          "type": "string"
+        },
+        "threshold": {
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "ClassifierMode": {
+      "type": "string",
+      "enum": [
+        "CLSFR_MODE_ZEROSHOT",
+        "CLSFR_MODE_MULTICLASS"
+      ],
+      "default": "CLSFR_MODE_ZEROSHOT",
+      "title": "- CLSFR_MODE_MULTICLASS: CLSFR_MODE_ODDSRATIO = 2;"
+    },
+    "ClassifierParameters": {
+      "type": "object",
+      "properties": {
+        "categories": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ClassifierCategory"
+          }
+        },
+        "exceeds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ClassifierCategory"
+          }
+        },
+        "realizedAction": {
+          "$ref": "#/definitions/Action"
+        }
+      }
+    },
+    "ConditionerParameters": {
+      "type": "object",
+      "properties": {
+        "vectorAdjustPrior": {
+          "type": "string"
+        },
+        "conditioner": {
+          "$ref": "#/definitions/Model"
+        }
+      },
+      "description": "Unused, but reserved for future use. Adjustments to the latents after\ninitialization."
+    },
+    "CutoutParameters": {
+      "type": "object",
+      "properties": {
+        "cutouts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CutoutParameters"
+          },
+          "title": "Nested cutouts, unsupported"
+        },
+        "count": {
+          "type": "integer",
+          "format": "int64",
+          "title": "0 to n, usually 8 to 32, 0 inner"
+        },
+        "gray": {
+          "type": "number",
+          "format": "float",
+          "title": "0.0 to 1.0, defaults to 0.2"
+        },
+        "blur": {
+          "type": "number",
+          "format": "float",
+          "title": "percentage of cutouts to blur"
+        },
+        "sizePower": {
+          "type": "number",
+          "format": "float",
+          "title": "defaults to inner: 0.5, outer: 0.0"
+        }
+      }
+    },
+    "DiffusionSampler": {
+      "type": "string",
+      "enum": [
+        "SAMPLER_DDIM",
+        "SAMPLER_DDPM",
+        "SAMPLER_K_EULER",
+        "SAMPLER_K_EULER_ANCESTRAL",
+        "SAMPLER_K_HEUN",
+        "SAMPLER_K_DPM_2",
+        "SAMPLER_K_DPM_2_ANCESTRAL",
+        "SAMPLER_K_LMS",
+        "SAMPLER_DPMSOLVERPP_1ORDER",
+        "SAMPLER_DPMSOLVERPP_2ORDER",
+        "SAMPLER_DPMSOLVERPP_3ORDER",
+        "SAMPLER_DPM_FAST",
+        "SAMPLER_DPM_ADAPTIVE",
+        "SAMPLER_DPMSOLVERPP_2S_ANCESTRAL",
+        "SAMPLER_DPMSOLVERPP_SDE",
+        "SAMPLER_DPMSOLVERPP_2M"
+      ],
+      "default": "SAMPLER_DDIM",
+      "description": "DiffusionSampler identifies which sampler to use for Diffusion, and represents\nthe internal set of supported samplers."
+    },
+    "Dtype": {
+      "type": "string",
+      "enum": [
+        "DT_INVALID",
+        "DT_FLOAT32",
+        "DT_FLOAT64",
+        "DT_FLOAT16",
+        "DT_BFLOAT16",
+        "DT_COMPLEX32",
+        "DT_COMPLEX64",
+        "DT_COMPLEX128",
+        "DT_UINT8",
+        "DT_INT8",
+        "DT_INT16",
+        "DT_INT32",
+        "DT_INT64",
+        "DT_BOOL",
+        "DT_QUINT8",
+        "DT_QINT8",
+        "DT_QINT32",
+        "DT_QUINT4_2"
+      ],
+      "default": "DT_INVALID"
+    },
+    "EngineInfo": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "type": {
+          "$ref": "#/definitions/EngineType"
+        },
+        "tokenizer": {
+          "$ref": "#/definitions/EngineTokenizer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "supportedSamplers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/EngineSampler"
+          }
+        }
+      },
+      "title": "Engine info struct"
+    },
+    "EngineSampler": {
+      "type": "object",
+      "properties": {
+        "sampler": {
+          "$ref": "#/definitions/DiffusionSampler"
+        },
+        "supportsEta": {
+          "type": "boolean"
+        },
+        "supportsChurn": {
+          "type": "boolean"
+        },
+        "supportsSigmaLimits": {
+          "type": "boolean"
+        },
+        "supportsKarrasRho": {
+          "type": "boolean"
+        },
+        "supportedNoiseTypes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SamplerNoiseType"
+          }
+        }
+      }
+    },
+    "EngineTokenizer": {
+      "type": "string",
+      "enum": [
+        "GPT2",
+        "PILE"
+      ],
+      "default": "GPT2"
+    },
+    "EngineType": {
+      "type": "string",
+      "enum": [
+        "TEXT",
+        "PICTURE",
+        "AUDIO",
+        "VIDEO",
+        "CLASSIFICATION",
+        "STORAGE"
+      ],
+      "default": "TEXT",
+      "title": "Possible engine type"
+    },
+    "Engines": {
+      "type": "object",
+      "properties": {
+        "engine": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/EngineInfo"
+          }
+        }
+      },
+      "title": "Engine info list"
+    },
+    "ExtendedParameter": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "float": {
+          "type": "number",
+          "format": "float"
+        },
+        "int": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "str": {
+          "type": "string"
+        }
+      }
+    },
+    "ExtendedParameters": {
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ExtendedParameter"
+          }
+        }
+      }
+    },
+    "FinishReason": {
+      "type": "string",
+      "enum": [
+        "NULL",
+        "LENGTH",
+        "STOP",
+        "ERROR",
+        "FILTER"
+      ],
+      "default": "NULL"
+    },
+    "GaussianDirection": {
+      "type": "string",
+      "enum": [
+        "DIRECTION_NONE",
+        "DIRECTION_UP",
+        "DIRECTION_DOWN"
+      ],
+      "default": "DIRECTION_NONE"
+    },
+    "GuidanceInstanceParameters": {
+      "type": "object",
+      "properties": {
+        "models": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Model"
+          },
+          "title": "models to use for this set"
+        },
+        "guidanceStrength": {
+          "type": "number",
+          "format": "float",
+          "title": "0.0 to 1.0, usually 0.05 to 0.225"
+        },
+        "schedule": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/GuidanceScheduleParameters"
+          },
+          "title": "when to apply guidance"
+        },
+        "cutouts": {
+          "$ref": "#/definitions/CutoutParameters",
+          "title": "cutout parameters"
+        },
+        "prompt": {
+          "$ref": "#/definitions/Prompt",
+          "title": "prompt to use for guidance"
+        }
+      },
+      "description": "Parameters that affect the behavior of the guidance, typically used for CLIP.\nWe can specify more than one model, and the guidance will be a weighted sum\nof the models."
+    },
+    "GuidanceParameters": {
+      "type": "object",
+      "properties": {
+        "guidancePreset": {
+          "$ref": "#/definitions/GuidancePreset",
+          "title": "base preset for guidance"
+        },
+        "instances": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/GuidanceInstanceParameters"
+          },
+          "title": "guidance instances"
+        }
+      },
+      "description": "Parameters that affect the behavior of the guidance, typically used for CLIP.\nThe omission of this field implies the default guidance of CFG."
+    },
+    "GuidancePreset": {
+      "type": "string",
+      "enum": [
+        "GUIDANCE_PRESET_NONE",
+        "GUIDANCE_PRESET_SIMPLE",
+        "GUIDANCE_PRESET_FAST_BLUE",
+        "GUIDANCE_PRESET_FAST_GREEN",
+        "GUIDANCE_PRESET_SLOW",
+        "GUIDANCE_PRESET_SLOWER",
+        "GUIDANCE_PRESET_SLOWEST"
+      ],
+      "default": "GUIDANCE_PRESET_NONE",
+      "description": "Presets for CLIP guidance."
+    },
+    "GuidanceScheduleParameters": {
+      "type": "object",
+      "properties": {
+        "duration": {
+          "type": "number",
+          "format": "float"
+        },
+        "value": {
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "description": "GuidanceScheduleParameters are used to define a schedule for CLIP guidance, and\nare used to define the behavior of the guidance over time. They are relative\nto the total number of steps, and are scaled to the number of steps in the\ncurrent run."
+    },
+    "HiresFixParameters": {
+      "type": "object",
+      "properties": {
+        "enable": {
+          "type": "boolean",
+          "title": "Should it be enabled at all"
+        },
+        "oosFraction": {
+          "type": "number",
+          "format": "float",
+          "title": "How out-of-square will we allow the fixed area to be, 0...1"
+        }
+      },
+      "title": "Parameters that control the hires fix feature"
+    },
+    "ImageAdjustment": {
+      "type": "object",
+      "properties": {
+        "blur": {
+          "$ref": "#/definitions/ImageAdjustment_Gaussian"
+        },
+        "invert": {
+          "$ref": "#/definitions/ImageAdjustment_Invert"
+        },
+        "levels": {
+          "$ref": "#/definitions/ImageAdjustment_Levels"
+        },
+        "channels": {
+          "$ref": "#/definitions/ImageAdjustment_Channels"
+        },
+        "rescale": {
+          "$ref": "#/definitions/ImageAdjustment_Rescale"
+        },
+        "crop": {
+          "$ref": "#/definitions/ImageAdjustment_Crop"
+        }
+      }
+    },
+    "ImageAdjustment_Channels": {
+      "type": "object",
+      "properties": {
+        "r": {
+          "$ref": "#/definitions/ChannelSource"
+        },
+        "g": {
+          "$ref": "#/definitions/ChannelSource"
+        },
+        "b": {
+          "$ref": "#/definitions/ChannelSource"
+        },
+        "a": {
+          "$ref": "#/definitions/ChannelSource"
+        }
+      }
+    },
+    "ImageAdjustment_Crop": {
+      "type": "object",
+      "properties": {
+        "top": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "left": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "width": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "height": {
+          "type": "string",
+          "format": "uint64"
+        }
+      }
+    },
+    "ImageAdjustment_Gaussian": {
+      "type": "object",
+      "properties": {
+        "sigma": {
+          "type": "number",
+          "format": "float"
+        },
+        "direction": {
+          "$ref": "#/definitions/GaussianDirection"
+        }
+      }
+    },
+    "ImageAdjustment_Invert": {
+      "type": "object"
+    },
+    "ImageAdjustment_Levels": {
+      "type": "object",
+      "properties": {
+        "inputLow": {
+          "type": "number",
+          "format": "float"
+        },
+        "inputHigh": {
+          "type": "number",
+          "format": "float"
+        },
+        "outputLow": {
+          "type": "number",
+          "format": "float"
+        },
+        "outputHigh": {
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "ImageAdjustment_Rescale": {
+      "type": "object",
+      "properties": {
+        "height": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "width": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "mode": {
+          "$ref": "#/definitions/RescaleMode"
+        },
+        "algorithmHint": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "ImageParameters": {
+      "type": "object",
+      "properties": {
+        "height": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "width": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "seed": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "samples": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "steps": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "transform": {
+          "$ref": "#/definitions/TransformType"
+        },
+        "parameters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/StepParameter"
+          }
+        },
+        "extension": {
+          "$ref": "#/definitions/ExtendedParameters"
+        },
+        "hires": {
+          "$ref": "#/definitions/HiresFixParameters"
+        },
+        "tiling": {
+          "type": "boolean"
+        }
+      }
+    },
+    "Lora": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "$ref": "#/definitions/LoraTarget"
+        },
+        "tensors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Tensor"
+          }
+        }
+      }
+    },
+    "LoraTarget": {
+      "type": "string",
+      "enum": [
+        "LORA_UNET",
+        "LORA_TEXT_ENCODER"
+      ],
+      "default": "LORA_UNET"
+    },
+    "Model": {
+      "type": "object",
+      "properties": {
+        "architecture": {
+          "$ref": "#/definitions/ModelArchitecture"
+        },
+        "publisher": {
+          "type": "string"
+        },
+        "dataset": {
+          "type": "string"
+        },
+        "version": {
+          "type": "number",
+          "format": "float"
+        },
+        "semanticVersion": {
+          "type": "string"
+        },
+        "alias": {
+          "type": "string"
+        }
+      }
+    },
+    "ModelArchitecture": {
+      "type": "string",
+      "enum": [
+        "MODEL_ARCHITECTURE_NONE",
+        "MODEL_ARCHITECTURE_CLIP_VIT",
+        "MODEL_ARCHITECTURE_CLIP_RESNET",
+        "MODEL_ARCHITECTURE_LDM"
+      ],
+      "default": "MODEL_ARCHITECTURE_NONE"
+    },
+    "OnStatus": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/FinishReason"
+          }
+        },
+        "target": {
+          "type": "string"
+        },
+        "action": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/StageAction"
+          }
+        }
+      }
+    },
+    "Prompt": {
+      "type": "object",
+      "properties": {
+        "parameters": {
+          "$ref": "#/definitions/PromptParameters"
+        },
+        "text": {
+          "type": "string"
+        },
+        "tokens": {
+          "$ref": "#/definitions/Tokens"
+        },
+        "artifact": {
+          "$ref": "#/definitions/Artifact"
+        }
+      },
+      "title": "A Prompt is a special type of Artifact that is used to generate an output.\nThere can be multiple Prompts that affect the same output. Currently, the\nonly Prompts supported are:\n  - Text (singular)\n  - Init Image (singular, optional, type ARTIFACT_IMAGE, with init=true)\n  - Mask (singular, optional, Artifact type ARTIFACT_MASK)"
+    },
+    "PromptParameters": {
+      "type": "object",
+      "properties": {
+        "init": {
+          "type": "boolean"
+        },
+        "weight": {
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "description": "A set of parameters for each individual Prompt."
+    },
+    "Request": {
+      "type": "object",
+      "properties": {
+        "engineId": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "requestedType": {
+          "$ref": "#/definitions/ArtifactType"
+        },
+        "prompt": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Prompt"
+          }
+        },
+        "image": {
+          "$ref": "#/definitions/ImageParameters"
+        },
+        "classifier": {
+          "$ref": "#/definitions/ClassifierParameters"
+        },
+        "asset": {
+          "$ref": "#/definitions/AssetParameters"
+        },
+        "conditioner": {
+          "$ref": "#/definitions/ConditionerParameters"
+        }
+      },
+      "description": "A Request is a set of Artifacts, which can be of any type with model or\ntransform parameters. It is sent to the server, which will respond with an\nAnswer."
+    },
+    "RescaleMode": {
+      "type": "string",
+      "enum": [
+        "RESCALE_STRICT",
+        "RESCALE_CROP",
+        "RESCALE_FIT"
+      ],
+      "default": "RESCALE_STRICT"
+    },
+    "SamplerNoiseType": {
+      "type": "string",
+      "enum": [
+        "SAMPLER_NOISE_NORMAL",
+        "SAMPLER_NOISE_BROWNIAN"
+      ],
+      "default": "SAMPLER_NOISE_NORMAL"
+    },
+    "SamplerParameters": {
+      "type": "object",
+      "properties": {
+        "eta": {
+          "type": "number",
+          "format": "float"
+        },
+        "samplingSteps": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "latentChannels": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "downsamplingFactor": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "cfgScale": {
+          "type": "number",
+          "format": "float"
+        },
+        "churn": {
+          "$ref": "#/definitions/ChurnSettings"
+        },
+        "sigma": {
+          "$ref": "#/definitions/SigmaParameters"
+        },
+        "noiseType": {
+          "$ref": "#/definitions/SamplerNoiseType"
+        }
+      },
+      "description": "Parameters that affect the behavior of the sampler, typically used for CFG."
+    },
+    "ScheduleParameters": {
+      "type": "object",
+      "properties": {
+        "start": {
+          "type": "number",
+          "format": "float",
+          "title": "0.0 to 1.0"
+        },
+        "end": {
+          "type": "number",
+          "format": "float",
+          "title": "0.0 to 1.0"
+        },
+        "value": {
+          "type": "number",
+          "format": "float",
+          "title": "float value to apply on this schedule"
+        }
+      },
+      "title": "When does this schedule definition apply?"
+    },
+    "SigmaParameters": {
+      "type": "object",
+      "properties": {
+        "sigmaMin": {
+          "type": "number",
+          "format": "float"
+        },
+        "sigmaMax": {
+          "type": "number",
+          "format": "float"
+        },
+        "karrasRho": {
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "Stage": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "request": {
+          "$ref": "#/definitions/Request"
+        },
+        "onStatus": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/OnStatus"
+          }
+        }
+      }
+    },
+    "StageAction": {
+      "type": "string",
+      "enum": [
+        "STAGE_ACTION_PASS",
+        "STAGE_ACTION_DISCARD",
+        "STAGE_ACTION_RETURN"
+      ],
+      "default": "STAGE_ACTION_PASS"
+    },
+    "Status": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "message": {
+          "type": "string"
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Any"
+          }
+        }
+      }
+    },
+    "StepParameter": {
+      "type": "object",
+      "properties": {
+        "scaledStep": {
+          "type": "number",
+          "format": "float"
+        },
+        "sampler": {
+          "$ref": "#/definitions/SamplerParameters"
+        },
+        "schedule": {
+          "$ref": "#/definitions/ScheduleParameters"
+        },
+        "guidance": {
+          "$ref": "#/definitions/GuidanceParameters"
+        }
+      },
+      "description": "Parameters that apply to this block of the schedule."
+    },
+    "Tensor": {
+      "type": "object",
+      "properties": {
+        "dtype": {
+          "$ref": "#/definitions/Dtype"
+        },
+        "shape": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "int64"
+          }
+        },
+        "data": {
+          "type": "string",
+          "format": "byte"
+        },
+        "attrType": {
+          "$ref": "#/definitions/AttributeType"
+        }
+      }
+    },
+    "Token": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "id": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "description": "Generally, a GPT BPE 16-bit token, paired with an optional string representation."
+    },
+    "Tokens": {
+      "type": "object",
+      "properties": {
+        "tokens": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Token"
+          }
+        },
+        "tokenizerId": {
+          "type": "string"
+        }
+      },
+      "description": "Sequence of tokens, paired with the id of the tokenizer used to generate them."
+    },
+    "TransformType": {
+      "type": "object",
+      "properties": {
+        "diffusion": {
+          "$ref": "#/definitions/DiffusionSampler"
+        },
+        "upscaler": {
+          "$ref": "#/definitions/Upscaler"
+        }
+      }
+    },
+    "Upscaler": {
+      "type": "string",
+      "enum": [
+        "UPSCALER_RGB",
+        "UPSCALER_GFPGAN",
+        "UPSCALER_ESRGAN"
+      ],
+      "default": "UPSCALER_RGB",
+      "description": "Future, unimplemented."
+    }
+  }
+}
