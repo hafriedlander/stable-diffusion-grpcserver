@@ -395,7 +395,7 @@ class PipelineWrapper(object):
         if scheduler is None:
             samplers = self.get_samplers()
             if sampler is None:
-                scheduler = samplers.items()[0]
+                scheduler = list(samplers.values())[0]
             else:
                 scheduler = samplers.get(sampler, None)
 
