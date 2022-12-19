@@ -1,0 +1,8 @@
+name: sdgrpcserver
+title: Stable Diffusion Image Generation API
+http:
+  rules:
+    - selector: gooseai.EnginesService.ListEngines
+      get: "/engines"
+    - selector: gooseai.GenerationService.Generate
+      post: "/generate"

@@ -1,7 +1,17 @@
 import contextlib
 import inspect
 from copy import copy
-from typing import Callable, List, Literal, Optional, Protocol, Tuple, Union, cast
+from typing import (
+    Callable,
+    Iterable,
+    List,
+    Literal,
+    Optional,
+    Protocol,
+    Tuple,
+    Union,
+    cast,
+)
 
 import numpy as np
 import torch
@@ -42,6 +52,7 @@ from sdgrpcserver.pipeline.common_scheduler import (
 )
 from sdgrpcserver.pipeline.kschedulers.scheduling_utils import KSchedulerMixin
 from sdgrpcserver.pipeline.latent_debugger import LatentDebugger
+from sdgrpcserver.pipeline.lora import addorreplace_lora, remove_lora, tune_lora_scale
 from sdgrpcserver.pipeline.models.structured_cross_attention import (
     StructuredCrossAttention,
 )
@@ -1296,6 +1307,8 @@ class UnifiedPipeline(DiffusionPipeline):
         approx_cutouts: Optional[int] = None,
         no_cutouts: CLIP_NO_CUTOUTS_TYPE = False,
         scheduler: DiffusersSchedulerProtocol | Callable | None = None,
+        lora: list[tuple[list[torch.Tensor], float]] | None = None,
+        lora_text: list[tuple[list[torch.Tensor], float]] | None = None,
         hires_fix=None,
         hires_oos_fraction=None,
         tiling=False,
@@ -1374,6 +1387,18 @@ class UnifiedPipeline(DiffusionPipeline):
                 hires_oos_fraction = self._hires_image_oos_fraction
 
         self.set_tiling_mode(tiling)
+
+        if lora:
+            addorreplace_lora(self.unet, lora[0][0])
+            tune_lora_scale(self.unet, lora[0][1])
+        else:
+            remove_lora(self.unet)
+
+        if lora_text:
+            addorreplace_lora(self.text_encoder, lora_text[0][0], target_replace_module=["CLIPAttention"],)
+            tune_lora_scale(self.text_encoder, lora_text[0][1])
+        else:
+            remove_lora(self.text_encoder, target_replace_module=["CLIPAttention"])
 
         latent_debugger = LatentDebugger(
             vae=self.vae,

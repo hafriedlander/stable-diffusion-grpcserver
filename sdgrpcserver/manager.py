@@ -490,6 +490,9 @@ class PipelineWrapper(object):
         outmask_image: Optional[UnifiedPipelineImageType] = None,
         # The strength of the img2img or inpaint process, if init_image is provided
         strength: float = None,
+        # Lora
+        lora=None,
+        lora_text=None,
         # Hires control
         hires_fix=None,
         hires_oos_fraction=None,
@@ -551,6 +554,8 @@ class PipelineWrapper(object):
             mask_image=mask_image,
             outmask_image=outmask_image,
             strength=strength,
+            lora=lora,
+            lora_text=lora_text,
             hires_fix=hires_fix,
             hires_oos_fraction=hires_oos_fraction,
             tiling=tiling,
@@ -709,7 +714,7 @@ class EngineManager(object):
         ignore_patterns = spec.get("ignore_patterns", [])
         if isinstance(ignore_patterns, str):
             ignore_patterns = [ignore_patterns]
-        extra_kwargs["ignore_patterns"] = ignore_patterns + ["*.ckpt"]
+        extra_kwargs["ignore_patterns"] = ignore_patterns + ["*.ckpt", "*.pt"]
 
         if subfolder:
             extra_kwargs["allow_patterns"] = [f"{subfolder}*"]
@@ -737,9 +742,16 @@ class EngineManager(object):
                 has_ckpt = ".ckpt" in grouped
                 has_bin = ".bin" in grouped
                 has_safe = ".safetensors" in grouped
-                # If we have ckpt and safetensors files, don't consider matching safetensors
-                if has_ckpt and has_safe:
+                if has_safe and has_ckpt:
+                    # If we have ckpt and safetensors files, don't consider matching safetensors
                     has_safe = bool(grouped[".safetensors"] - grouped[".ckpt"])
+
+                    # Exclude safetensors that match ckpt files
+                    exclude_safetensors = [
+                        f"{f}.safetensors"
+                        for f in grouped[".safetensors"] & grouped[".ckpt"]
+                    ]
+                    extra_kwargs["ignore_patterns"] += exclude_safetensors
 
                 if not has_bin and not has_safe:
                     if has_ckpt:
@@ -751,17 +763,12 @@ class EngineManager(object):
                             "Repo {model_path} doesn't appear to contain any model files."
                         )
 
-                if has_bin and is_safetensors_compatible(repo_info):
+                safe_only = has_bin and is_safetensors_compatible(repo_info)
+                safe_only = safe_only or spec.get("safe_only", False)
+
+                if safe_only:
                     # Only use safetensors
                     extra_kwargs["ignore_patterns"] += ["*.bin"]
-
-                # Exclude safetensors that match ckpt files
-                exclude_safetensors = [
-                    f"{f}.safetensors"
-                    for f in grouped[".safetensors"]
-                    if f in grouped[".ckpt"]
-                ]
-                extra_kwargs["ignore_patterns"] += exclude_safetensors
 
             return huggingface_hub.snapshot_download(
                 model_path,

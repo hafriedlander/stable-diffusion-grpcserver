@@ -11,3 +11,7 @@
 	path = sdgrpcserver/src/ResizeRight
 	url = https://github.com/assafshocher/ResizeRight.git
 	ignore = dirty
+[submodule "sdgrpcserver/src/lora"]
+	path = sdgrpcserver/src/lora
+	url = https://github.com/cloneofsimo/lora.git
+

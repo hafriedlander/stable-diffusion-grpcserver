@@ -21,6 +21,7 @@ from argparse import ArgumentParser, BooleanOptionalAction, Namespace
 from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple, Union
 
 import grpc
+import torch
 from google.protobuf.json_format import MessageToJson
 from PIL import Image, ImageOps
 
@@ -40,6 +41,9 @@ import engines_pb2 as engines
 import engines_pb2_grpc as engines_grpc
 import generation_pb2 as generation
 import generation_pb2_grpc as generation_grpc
+import tensors_pb2 as tensors
+
+from sdgrpcserver.protobuf_tensors import serialize_tensor
 
 logger = logging.getLogger(__name__)
 logger.setLevel(level=logging.INFO)
@@ -146,6 +150,23 @@ def image_to_prompt(
             type=generation.ARTIFACT_IMAGE, binary=buf.getvalue()
         ),
         parameters=generation.PromptParameters(init=init),
+    )
+
+
+def lora_to_prompt(path, weight, target=generation.LORA_UNET):
+
+    lora_tensors: list[tensors.Tensor] = []
+
+    lora = torch.load(path)
+    for param in lora:
+        lora_tensors += [serialize_tensor(param, tensors.AT_PARAMETER)]
+
+    return generation.Prompt(
+        parameters=generation.PromptParameters(weight=weight),
+        artifact=generation.Artifact(
+            type=generation.ARTIFACT_LORA,
+            lora=generation.Lora(target=target, tensors=lora_tensors),
+        ),
     )
 
 
@@ -298,6 +319,8 @@ class StabilityInference:
         hires_fix: bool | None = None,
         hires_oos_fraction: float | None = None,
         tiling: bool = False,
+        lora: list[tuple[str, float]] | None = None,
+        lora_text: list[tuple[str, float]] | None = None,
     ) -> Generator[generation.Answer, None, None]:
         """
         Generate images from a prompt.
@@ -401,6 +424,14 @@ class StabilityInference:
 
             elif mask_from_image_alpha:
                 prompts += [image_to_prompt(init_image, mask=True, use_alpha=True)]
+
+        if lora:
+            for path, weight in lora:
+                prompts += [lora_to_prompt(path, weight, generation.LORA_UNET)]
+
+        if lora_text:
+            for path, weight in lora_text:
+                prompts += [lora_to_prompt(path, weight, generation.LORA_TEXT_ENCODER)]
 
         if guidance_prompt:
             if isinstance(guidance_prompt, str):
@@ -689,6 +720,16 @@ if __name__ == "__main__":
         help="Enable or disable producing a tilable result",
     )
     parser.add_argument(
+        "--lora",
+        action="append",
+        help="Add a unet Lora. Either a path, or path:weight (i.e. ./lora_weight.pt:0.5)",
+    )
+    parser.add_argument(
+        "--lora_text",
+        action="append",
+        help="Add a text encoder Lora. Either a path, or path:weight (i.e. ./lora_weight.text_encoder.pt:0.5)",
+    )
+    parser.add_argument(
         "--list_engines",
         "-L",
         action="store_true",
@@ -714,6 +755,20 @@ if __name__ == "__main__":
 
     if args.mask_image:
         args.mask_image = Image.open(args.mask_image)
+
+    lora = []
+    if args.lora:
+        for path in args.lora:
+            path, *weight = path.rsplit(":", 1)
+            weight = float(weight[0]) if weight else 1.0
+            lora.append((path, weight))
+
+    lora_text = []
+    if args.lora_text:
+        for path in args.lora_text:
+            path, *weight = path.rsplit(":", 1)
+            weight = float(weight[0]) if weight else 1.0
+            lora_text.append((path, weight))
 
     request = {
         "negative_prompt": args.negative_prompt,
@@ -741,6 +796,8 @@ if __name__ == "__main__":
         "hires_fix": args.hires_fix,
         "hires_oos_fraction": args.hires_oos_fraction,
         "tiling": args.tiling,
+        "lora": lora,
+        "lora_text": lora_text,
     }
 
     stability_api = StabilityInference(

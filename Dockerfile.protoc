@@ -1,7 +1,35 @@
 FROM python:3
 
+# Install python grpc support for generating python .py files
 RUN pip install grpcio==1.49.1
 RUN pip install grpcio-tools==1.49.1
+RUN pip install mypy-protobuf==3.4.0
+
+# Install general grpc support for generating OpenAPI 2.0 files
+RUN curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protoc-21.12-linux-x86_64.zip
+RUN unzip protoc*.zip
+RUN curl -OL https://github.com/grpc-ecosystem/grpc-gateway/releases/download/v2.14.0/protoc-gen-openapiv2-v2.14.0-linux-x86_64
+RUN mv protoc-gen-openapiv2-v2.14.0-linux-x86_64 /bin/protoc-gen-openapiv2
+RUN chmod +x /bin/protoc-gen-openapiv2
+
+# Setup NVM & Node for Open API 2.0 -> 3.0 converter
+ENV NVM_DIR=/nvm
+ENV NODE_VERSION=18.12.1
+
+RUN mkdir -p $NVM_DIR
+
+RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.1/install.sh | bash \
+    && . $NVM_DIR/nvm.sh \
+    && nvm install $NODE_VERSION \
+    && nvm alias default $NODE_VERSION \
+    && nvm use default
+
+ENV NODE_PATH $NVM_DIR/versions/node/v$NODE_VERSION/lib/node_modules
+ENV PATH      $NVM_DIR/versions/node/v$NODE_VERSION/bin:$PATH
+
+RUN npm install -g swagger2openapi
+
+# Code setup
 
 COPY docker_support/build_protoc.sh /
 
