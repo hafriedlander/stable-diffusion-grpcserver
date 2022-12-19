@@ -119,15 +119,38 @@ class grpcWSGI(grpc.Server):
         else:
             wrap_message = protocol.wrap_message
 
-        if rpc_method.response_streaming:
-            yield from self._do_streaming_response(
-                rpc_method, start_response, wrap_message, context, headers, resp
-            )
+        try:
+            if rpc_method.response_streaming:
+                yield from self._do_streaming_response(
+                    rpc_method, start_response, wrap_message, context, headers, resp
+                )
 
-        else:
-            yield from self._do_unary_response(
-                rpc_method, start_response, wrap_message, context, headers, resp
-            )
+            else:
+                yield from self._do_unary_response(
+                    rpc_method, start_response, wrap_message, context, headers, resp
+                )
+        except Exception:
+            # grpc framing requires that errors are encoded with a 200 status
+            start_response("200 OK", headers)
+            trailers = self._get_trailers_from_context(context)
+            trailer_message = protocol.pack_trailers(trailers)
+            yield wrap_message(True, False, trailer_message)
+
+
+    def _set_headers_from_context(self, headers, context):
+        if context._initial_metadata:
+            headers.extend(context._initial_metadata)
+
+    def _get_trailers_from_context(self, context):
+        trailers = [("grpc-status", str(context.code.value[0]))]
+
+        if context.details:
+            trailers.append(("grpc-message", quote(context.details.encode("utf8"))))
+
+        if context._trailing_metadata:
+            trailers.extend(context._trailing_metadata)
+
+        return trailers
 
     def _do_streaming_response(
         self, rpc_method, start_response, wrap_message, context, headers, resp
@@ -137,8 +160,7 @@ class grpcWSGI(grpc.Server):
         except grpc.RpcError:
             pass
 
-        if context._initial_metadata:
-            headers.extend(context._initial_metadata)
+        self._set_headers_from_context(headers, context)
 
         start_response("200 OK", headers)
 
@@ -152,13 +174,7 @@ class grpcWSGI(grpc.Server):
         except grpc.RpcError:
             pass
 
-        trailers = [("grpc-status", str(context.code.value[0]))]
-
-        if context.details:
-            trailers.append(("grpc-message", quote(context.details.encode("utf8"))))
-
-        if context._trailing_metadata:
-            trailers.extend(context._trailing_metadata)
+        trailers = self._get_trailers_from_context(context)
 
         trailer_message = protocol.pack_trailers(trailers)
 
@@ -174,17 +190,8 @@ class grpcWSGI(grpc.Server):
         else:
             message_data = b""
 
-        if context._initial_metadata:
-            headers.extend(context._initial_metadata)
-
-        trailers = [("grpc-status", str(context.code.value[0]))]
-
-        if context.details:
-            trailers.append(("grpc-message", quote(context.details.encode("utf8"))))
-
-        if context._trailing_metadata:
-            trailers.extend(context._trailing_metadata)
-
+        self._set_headers_from_context(headers, context)
+        trailers = self._get_trailers_from_context(context)
         trailer_message = protocol.pack_trailers(trailers)
         trailer_data = wrap_message(True, False, trailer_message)
 
