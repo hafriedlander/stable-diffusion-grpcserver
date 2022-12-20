@@ -59,8 +59,14 @@ def addorreplace_lora(
         # switch the module
         parent._modules[name] = _tmp
 
-        up_weight = loras.pop(0)
-        down_weight = loras.pop(0)
+        try:
+            up_weight = loras.pop(0)
+            down_weight = loras.pop(0)
+        except IndexError:
+            # If ran out of parameters, that means the lora doesn't match the model
+            raise RuntimeError(
+                f"Lora doesn't match this {model.__class__} - was it trained for it?"
+            )
 
         parent._modules[name].lora_up.weight = Parameter(up_weight.type(weight.dtype))
         parent._modules[name].lora_down.weight = Parameter(
@@ -69,9 +75,11 @@ def addorreplace_lora(
 
         parent._modules[name].to(weight.device)
 
+    # If we still have parameters left, that means the lora doesn't match the model
     if loras:
-        print(len(loras))
-        raise ValueError(f"Loras model doesn't match this {model.__class__}")
+        raise RuntimeError(
+            f"Loras model doesn't match this {model.__class__} - was it trained for it?"
+        )
 
 
 def remove_lora(model, target_replace_module=["CrossAttention", "Attention"]):

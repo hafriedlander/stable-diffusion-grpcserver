@@ -1389,13 +1389,17 @@ class UnifiedPipeline(DiffusionPipeline):
         self.set_tiling_mode(tiling)
 
         if lora:
-            addorreplace_lora(self.unet, lora[0][0])
+            addorreplace_lora(self.unet, [*lora[0][0]])
             tune_lora_scale(self.unet, lora[0][1])
         else:
             remove_lora(self.unet)
 
         if lora_text:
-            addorreplace_lora(self.text_encoder, lora_text[0][0], target_replace_module=["CLIPAttention"],)
+            addorreplace_lora(
+                self.text_encoder,
+                [*lora_text[0][0]],
+                target_replace_module=["CLIPAttention"],
+            )
             tune_lora_scale(self.text_encoder, lora_text[0][1])
         else:
             remove_lora(self.text_encoder, target_replace_module=["CLIPAttention"])
