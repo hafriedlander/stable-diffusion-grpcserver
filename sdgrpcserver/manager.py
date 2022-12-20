@@ -38,9 +38,9 @@ from tqdm.auto import tqdm
 from transformers import CLIPModel, PreTrainedModel
 
 from sdgrpcserver.k_diffusion import sampling as k_sampling
-from sdgrpcserver.pipeline.kschedulers import *
 from sdgrpcserver.pipeline.model_utils import GPUExclusionSet, clone_model
 from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
+from sdgrpcserver.pipeline.samplers import build_sampler_set
 from sdgrpcserver.pipeline.schedulers.sample_dpmpp_2m import sample_dpmpp_2m
 from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
 from sdgrpcserver.pipeline.unified_pipeline import (
@@ -243,134 +243,11 @@ class PipelineWrapper(object):
             self._pipeline.scheduler, "prediction_type", "epsilon"
         )
 
-        self._plms = self._prepScheduler(
-            PNDMScheduler(
-                beta_start=0.00085,
-                beta_end=0.012,
-                beta_schedule="scaled_linear",
-                num_train_timesteps=1000,
-                skip_prk_steps=True,
-                steps_offset=1,
-            )
+        self._samplers = build_sampler_set(
+            self._pipeline.scheduler.config,
+            include_diffusers=True,
+            include_kdiffusion=True,
         )
-        self._klms = self._prepScheduler(
-            LMSDiscreteScheduler(
-                beta_start=0.00085,
-                beta_end=0.012,
-                beta_schedule="scaled_linear",
-                num_train_timesteps=1000,
-            )
-        )
-        self._ddim = self._prepScheduler(
-            DDIMScheduler(
-                beta_start=0.00085,
-                beta_end=0.012,
-                beta_schedule="scaled_linear",
-                clip_sample=False,
-                set_alpha_to_one=False,
-                steps_offset=1,
-                prediction_type=self.prediction_type,
-            )
-        )
-        self._euler = self._prepScheduler(
-            EulerDiscreteScheduler(
-                beta_start=0.00085,
-                beta_end=0.012,
-                beta_schedule="scaled_linear",
-                num_train_timesteps=1000,
-            )
-        )
-        self._eulera = self._prepScheduler(
-            EulerAncestralDiscreteScheduler(
-                beta_start=0.00085,
-                beta_end=0.012,
-                beta_schedule="scaled_linear",
-                num_train_timesteps=1000,
-            )
-        )
-        self._dpm2 = self._prepScheduler(
-            DPM2DiscreteScheduler(
-                beta_start=0.00085,
-                beta_end=0.012,
-                beta_schedule="scaled_linear",
-                num_train_timesteps=1000,
-            )
-        )
-        self._dpm2a = self._prepScheduler(
-            DPM2AncestralDiscreteScheduler(
-                beta_start=0.00085,
-                beta_end=0.012,
-                beta_schedule="scaled_linear",
-                num_train_timesteps=1000,
-            )
-        )
-        self._heun = self._prepScheduler(
-            HeunDiscreteScheduler(
-                beta_start=0.00085,
-                beta_end=0.012,
-                beta_schedule="scaled_linear",
-                num_train_timesteps=1000,
-            )
-        )
-
-        self._dpmspp1 = self._prepScheduler(
-            DPMSolverMultistepScheduler(
-                beta_start=0.00085,
-                beta_end=0.012,
-                beta_schedule="scaled_linear",
-                num_train_timesteps=1000,
-                solver_order=1,
-                prediction_type=self.prediction_type,
-            )
-        )
-        self._dpmspp2 = self._prepScheduler(
-            DPMSolverMultistepScheduler(
-                beta_start=0.00085,
-                beta_end=0.012,
-                beta_schedule="scaled_linear",
-                num_train_timesteps=1000,
-                solver_order=2,
-                prediction_type=self.prediction_type,
-            )
-        )
-        self._dpmspp3 = self._prepScheduler(
-            DPMSolverMultistepScheduler(
-                beta_start=0.00085,
-                beta_end=0.012,
-                beta_schedule="scaled_linear",
-                num_train_timesteps=1000,
-                solver_order=3,
-                prediction_type=self.prediction_type,
-            )
-        )
-
-        # Common set of samplers that can handle epsilon or v_prediction unets
-        self._samplers = {
-            generation_pb2.SAMPLER_DDIM: self._ddim,
-            generation_pb2.SAMPLER_DPMSOLVERPP_1ORDER: self._dpmspp1,
-            generation_pb2.SAMPLER_DPMSOLVERPP_2ORDER: self._dpmspp2,
-            generation_pb2.SAMPLER_DPMSOLVERPP_3ORDER: self._dpmspp3,
-            generation_pb2.SAMPLER_K_LMS: k_sampling.sample_lms,  # self._klms
-            generation_pb2.SAMPLER_K_EULER: k_sampling.sample_euler,  # self._euler
-            generation_pb2.SAMPLER_K_EULER_ANCESTRAL: k_sampling.sample_euler_ancestral,  # self._eulera
-            generation_pb2.SAMPLER_K_DPM_2: k_sampling.sample_dpm_2,  # self._dpm2
-            generation_pb2.SAMPLER_K_DPM_2_ANCESTRAL: k_sampling.sample_dpm_2_ancestral,  # self._dpm2a
-            generation_pb2.SAMPLER_K_HEUN: k_sampling.sample_heun,  # self._heun
-            generation_pb2.SAMPLER_DPM_FAST: k_sampling.sample_dpm_fast,
-            generation_pb2.SAMPLER_DPM_ADAPTIVE: k_sampling.sample_dpm_adaptive,
-            generation_pb2.SAMPLER_DPMSOLVERPP_2S_ANCESTRAL: k_sampling.sample_dpmpp_2s_ancestral,
-            generation_pb2.SAMPLER_DPMSOLVERPP_SDE: k_sampling.sample_dpmpp_sde,
-            generation_pb2.SAMPLER_DPMSOLVERPP_2M: functools.partial(
-                sample_dpmpp_2m, warmup_lms=True, ddim_cutoff=0.1
-            ),
-        }
-
-        # If we're not using a v_prediction unet, add in the samplers that can only handle epsilon too
-        if self.prediction_type != "v_prediction":
-            self._samplers = {
-                **self._samplers,
-                generation_pb2.SAMPLER_DDPM: self._plms,
-            }
 
     def _prepScheduler(self, scheduler):
         if (

@@ -928,6 +928,8 @@ class UnifiedPipeline(DiffusionPipeline):
             Model that extracts features from generated images to be used as inputs for the `safety_checker`.
     """
 
+    _kdiffusion_capable = True
+
     def _check_scheduler_config(self, scheduler):
         if (
             hasattr(scheduler.config, "steps_offset")

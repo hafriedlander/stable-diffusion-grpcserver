@@ -4,6 +4,8 @@ import engines_pb2
 import engines_pb2_grpc
 import generation_pb2
 
+from sdgrpcserver.pipeline.samplers import sampler_properties
+
 
 class EnginesServiceServicer(engines_pb2_grpc.EnginesServiceServicer):
     def __init__(self, manager):
@@ -11,12 +13,6 @@ class EnginesServiceServicer(engines_pb2_grpc.EnginesServiceServicer):
 
     def ListEngines(self, request, context):
         engines = engines_pb2.Engines()
-
-        all_noise_types = [
-            generation_pb2.SAMPLER_NOISE_NORMAL,
-            generation_pb2.SAMPLER_NOISE_BROWNIAN,
-        ]
-        normal_only = [generation_pb2.SAMPLER_NOISE_NORMAL]
 
         status = self._manager.getStatus()
         for engine in self._manager.engines:
@@ -35,33 +31,14 @@ class EnginesServiceServicer(engines_pb2_grpc.EnginesServiceServicer):
             info.ready = status.get(engine["id"], False)
             info.type = engines_pb2.EngineType.PICTURE
 
-            if info.ready:
-                pipeline = self._manager._pipelines[engine["id"]]
-                for k, v in pipeline.get_samplers().items():
-                    if callable(v):
-                        args = set(inspect.signature(v).parameters.keys())
+            fqclass_name = engine.get("class", "UnifiedPipeline")
+            class_obj = self._manager._import_class(fqclass_name)
 
-                        info.supported_samplers.append(
-                            engines_pb2.EngineSampler(
-                                sampler=k,
-                                supports_eta="eta" in args,
-                                supports_churn="churn" in args,
-                                supports_sigma_limits="sigmas" in args
-                                or "sigma_min" in args,
-                                supports_karras_rho="sigmas" in args,
-                                supported_noise_types=all_noise_types
-                                if "noise_sampler" in args
-                                else normal_only,
-                            )
-                        )
-                    else:
-                        args = set(inspect.signature(v.step).parameters.keys())
-
-                        info.supported_samplers.append(
-                            engines_pb2.EngineSampler(
-                                sampler=k, supports_eta="eta" in args
-                            )
-                        )
+            for sampler in sampler_properties(
+                include_diffusers=getattr(class_obj, "_diffusers_capable", True),
+                include_kdiffusion=getattr(class_obj, "_kdiffusion_capable", False),
+            ):
+                info.supported_samplers.append(engines_pb2.EngineSampler(**sampler))
 
             engines.engine.append(info)
 
