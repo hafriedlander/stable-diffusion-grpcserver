@@ -492,6 +492,9 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                         yield answer
                         ctr += 1
 
+                    if stop_event.is_set():
+                        break
+
                 if self._ram_monitor:
                     self._ram_monitor.print()
 

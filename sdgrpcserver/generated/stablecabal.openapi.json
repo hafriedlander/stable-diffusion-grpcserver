@@ -13,7 +13,7 @@
         }
     ],
     "paths": {
-        "/engines": {
+        "/grpcgateway/engines": {
             "get": {
                 "operationId": "ListEngines",
                 "responses": {
@@ -43,7 +43,7 @@
                 ]
             }
         },
-        "/generate": {
+        "/grpcgateway/generate": {
             "post": {
                 "operationId": "Generate",
                 "responses": {

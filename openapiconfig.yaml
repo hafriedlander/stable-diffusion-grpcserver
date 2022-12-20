@@ -3,6 +3,6 @@ title: Stable Diffusion Image Generation API
 http:
   rules:
     - selector: gooseai.EnginesService.ListEngines
-      get: "/engines"
+      get: "/grpcgateway/engines"
     - selector: gooseai.GenerationService.Generate
-      post: "/generate"
+      post: "/grpcgateway/generate"

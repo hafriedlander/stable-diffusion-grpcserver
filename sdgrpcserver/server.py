@@ -23,10 +23,9 @@ except ImportError:
 import grpc
 import hupper
 import torch
-from twisted import web
 from twisted.internet import endpoints, protocol, reactor
 from twisted.web import resource, server, static
-from twisted.web.resource import ForbiddenResource
+from twisted.web.resource import ForbiddenResource, NoResource
 from twisted.web.wsgi import WSGIResource
 from wsgicors import CORS
 
@@ -47,6 +46,7 @@ import engines_pb2_grpc
 import generation_pb2_grpc
 
 from sdgrpcserver.debug_recorder import DebugNullRecorder, DebugRecorder
+from sdgrpcserver.http.grpc_gateway import GrpcGatewayController
 from sdgrpcserver.manager import BatchMode, EngineManager, EngineMode
 from sdgrpcserver.services.dashboard import DashboardServiceServicer
 from sdgrpcserver.services.engines import EnginesServiceServicer
@@ -155,18 +155,22 @@ class HttpServer(object):
         wsgi_resource = WSGIResource(reactor, reactor.getThreadPool(), wsgi_app)
 
         # Build the web handler
-        controller = RoutingController(
+        self.controller = RoutingController(
             args.http_file_root, wsgi_resource, access_token=args.access_token
         )
 
         # Connect to an endpoint
-        site = server.Site(controller)
+        site = server.Site(self.controller)
         endpoint = endpoints.TCP4ServerEndpoint(reactor, port, interface=host)
         endpoint.listen(site)
 
     @property
     def grpc_server(self):
         return self._grpcapp
+
+    @property
+    def grpc_gateway(self):
+        return self.controller.grpc_gateway
 
     def start(self, block=False):
         # Run the Twisted reactor
@@ -262,6 +266,7 @@ class RoutingController(resource.Resource, CheckAuthHeaderMixin):
         self.details = ServerDetails()
         self.fileroot = fileroot
         self.files = static.File(fileroot) if fileroot else None
+        self.grpc_gateway = GrpcGatewayController()
         self.wsgi = wsgiapp
 
         self.access_token = access_token
@@ -283,23 +288,47 @@ class RoutingController(resource.Resource, CheckAuthHeaderMixin):
         if not self._checkAuthorization(request):
             return ForbiddenResource()
 
+        # -- These handlers are all nested
+
+        # Hardcoded handler for service discovery
+        if child == b"server.json":
+            return self.details
+
+        # Pass off stability REST API
+        if child == b"v1alpha":
+            print("Stability REST API not implemented yet")
+            return NoResource()
+
+        if child == b"grpcgateway":
+            return self.grpc_gateway
+
+        # -- These handler are all overlapped on root
+
+        # Resert path to include the first section of the URL
         request.prepath.pop()
         request.postpath.insert(0, child)
 
-        filepath = os.path.join(self.fileroot, *[x.decode() for x in request.postpath])
-
-        if request.postpath[0] == b"server.json":
-            return self.details
-        elif self.fileroot and os.path.exists(filepath):
-            return self.files
-        else:
+        # Pass off GRPC-WEB requests (detect via content-type header)
+        content_type = request.getHeader("content-type")
+        if content_type and content_type.startswith("application/grpc-web"):
             return self.wsgi
+
+        # If we're serving files, check to see if the request is for a served file
+        if self.fileroot:
+            return self.files
+
+        return NoResource()
 
     def render(self, request):
         if not self._checkAuthorization(request):
             return ForbiddenResource().render(request)
 
-        return self.files.render(request) if self.files else self.wsgi.render(request)
+        print("render", request)
+
+        if self.files:
+            return self.files.render(request)
+
+        return NoResource().render(request)
 
 
 def git_object_hash(bs: bytes):
@@ -603,36 +632,44 @@ def main():
         if ram_monitor:
             ram_monitor.print()
 
-        generation_pb2_grpc.add_GenerationServiceServicer_to_server(
-            GenerationServiceServicer(
-                manager,
-                supress_metadata=args.supress_metadata,
-                debug_recorder=debug_recorder,
-                ram_monitor=ram_monitor,
-            ),
-            grpc.grpc_server,
-        )
-        dashboard_pb2_grpc.add_DashboardServiceServicer_to_server(
-            DashboardServiceServicer(), grpc.grpc_server
-        )
-        engines_pb2_grpc.add_EnginesServiceServicer_to_server(
-            EnginesServiceServicer(manager), grpc.grpc_server
+        # Create Generation Servicer and attach to all the servers
+
+        generation_servicer = GenerationServiceServicer(
+            manager,
+            supress_metadata=args.supress_metadata,
+            debug_recorder=debug_recorder,
+            ram_monitor=ram_monitor,
         )
 
         generation_pb2_grpc.add_GenerationServiceServicer_to_server(
-            GenerationServiceServicer(
-                manager,
-                supress_metadata=args.supress_metadata,
-                debug_recorder=debug_recorder,
-                ram_monitor=ram_monitor,
-            ),
-            http.grpc_server,
+            generation_servicer, grpc.grpc_server
+        )
+        generation_pb2_grpc.add_GenerationServiceServicer_to_server(
+            generation_servicer, http.grpc_server
+        )
+        http.grpc_gateway.add_GenerationServiceServicer(generation_servicer)
+
+        # Create Engines Servicer and attach to all the servers
+
+        engines_servicer = EnginesServiceServicer(manager)
+
+        engines_pb2_grpc.add_EnginesServiceServicer_to_server(
+            engines_servicer, grpc.grpc_server
+        )
+        engines_pb2_grpc.add_EnginesServiceServicer_to_server(
+            engines_servicer, http.grpc_server
+        )
+        http.grpc_gateway.add_EnginesServiceServicer(engines_servicer)
+
+        # Create Dashobard Servicer and attach to all the servers
+
+        dashboard_servicer = DashboardServiceServicer()
+
+        dashboard_pb2_grpc.add_DashboardServiceServicer_to_server(
+            dashboard_servicer, grpc.grpc_server
         )
         dashboard_pb2_grpc.add_DashboardServiceServicer_to_server(
             DashboardServiceServicer(), http.grpc_server
-        )
-        engines_pb2_grpc.add_EnginesServiceServicer_to_server(
-            EnginesServiceServicer(manager), http.grpc_server
         )
 
         print(
