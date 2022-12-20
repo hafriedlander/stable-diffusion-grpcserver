@@ -6,3 +6,7 @@ http:
       get: "/grpcgateway/engines"
     - selector: gooseai.GenerationService.Generate
       post: "/grpcgateway/generate"
+    - selector: gooseai.GenerationService.AsyncGenerate
+      post: "/grpcgateway/asyncGenerate"
+    - selector: gooseai.GenerationService.AsyncQueryResult
+      post: "/grpcgateway/asyncQueryResult"

@@ -19,6 +19,257 @@
     "application/json"
   ],
   "paths": {
+    "/grpcgateway/asyncGenerate": {
+      "post": {
+        "operationId": "AsyncGenerate",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/AsyncHandle"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "engineId",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "requestId",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "requestedType",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "ARTIFACT_NONE",
+              "ARTIFACT_IMAGE",
+              "ARTIFACT_VIDEO",
+              "ARTIFACT_TEXT",
+              "ARTIFACT_TOKENS",
+              "ARTIFACT_EMBEDDING",
+              "ARTIFACT_CLASSIFICATIONS",
+              "ARTIFACT_MASK",
+              "ARTIFACT_LATENT",
+              "ARTIFACT_TENSOR",
+              "ARTIFACT_LORA"
+            ],
+            "default": "ARTIFACT_NONE"
+          },
+          {
+            "name": "image.height",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "uint64"
+          },
+          {
+            "name": "image.width",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "uint64"
+          },
+          {
+            "name": "image.seed",
+            "in": "query",
+            "required": false,
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "collectionFormat": "multi"
+          },
+          {
+            "name": "image.samples",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "uint64"
+          },
+          {
+            "name": "image.steps",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "uint64"
+          },
+          {
+            "name": "image.transform.diffusion",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "SAMPLER_DDIM",
+              "SAMPLER_DDPM",
+              "SAMPLER_K_EULER",
+              "SAMPLER_K_EULER_ANCESTRAL",
+              "SAMPLER_K_HEUN",
+              "SAMPLER_K_DPM_2",
+              "SAMPLER_K_DPM_2_ANCESTRAL",
+              "SAMPLER_K_LMS",
+              "SAMPLER_DPMSOLVERPP_1ORDER",
+              "SAMPLER_DPMSOLVERPP_2ORDER",
+              "SAMPLER_DPMSOLVERPP_3ORDER",
+              "SAMPLER_DPM_FAST",
+              "SAMPLER_DPM_ADAPTIVE",
+              "SAMPLER_DPMSOLVERPP_2S_ANCESTRAL",
+              "SAMPLER_DPMSOLVERPP_SDE",
+              "SAMPLER_DPMSOLVERPP_2M"
+            ],
+            "default": "SAMPLER_DDIM"
+          },
+          {
+            "name": "image.transform.upscaler",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "UPSCALER_RGB",
+              "UPSCALER_GFPGAN",
+              "UPSCALER_ESRGAN"
+            ],
+            "default": "UPSCALER_RGB"
+          },
+          {
+            "name": "image.hires.enable",
+            "description": "Should it be enabled at all",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "name": "image.hires.oosFraction",
+            "description": "How out-of-square will we allow the fixed area to be, 0...1",
+            "in": "query",
+            "required": false,
+            "type": "number",
+            "format": "float"
+          },
+          {
+            "name": "image.tiling",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "name": "classifier.realizedAction",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "ACTION_PASSTHROUGH",
+              "ACTION_REGENERATE_DUPLICATE",
+              "ACTION_REGENERATE",
+              "ACTION_OBFUSCATE_DUPLICATE",
+              "ACTION_OBFUSCATE",
+              "ACTION_DISCARD"
+            ],
+            "default": "ACTION_PASSTHROUGH"
+          },
+          {
+            "name": "asset.action",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "ASSET_PUT",
+              "ASSET_GET",
+              "ASSET_DELETE"
+            ],
+            "default": "ASSET_PUT"
+          },
+          {
+            "name": "asset.projectId",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "asset.use",
+            "description": " - ASSET_USE_UNDEFINED: Asset does not have use defined\n - ASSET_USE_INPUT: Asset is used as an input for the project\n - ASSET_USE_OUTPUT: Asset is an output from the project\n - ASSET_USE_INTERMEDIATE: Asset is an output from an intermediate step of the project\n - ASSET_USE_PROJECT: Asset is used as the project file for the project",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "ASSET_USE_UNDEFINED",
+              "ASSET_USE_INPUT",
+              "ASSET_USE_OUTPUT",
+              "ASSET_USE_INTERMEDIATE",
+              "ASSET_USE_PROJECT"
+            ],
+            "default": "ASSET_USE_UNDEFINED"
+          },
+          {
+            "name": "conditioner.vectorAdjustPrior",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "conditioner.conditioner.architecture",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "MODEL_ARCHITECTURE_NONE",
+              "MODEL_ARCHITECTURE_CLIP_VIT",
+              "MODEL_ARCHITECTURE_CLIP_RESNET",
+              "MODEL_ARCHITECTURE_LDM"
+            ],
+            "default": "MODEL_ARCHITECTURE_NONE"
+          },
+          {
+            "name": "conditioner.conditioner.publisher",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "conditioner.conditioner.dataset",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "conditioner.conditioner.version",
+            "in": "query",
+            "required": false,
+            "type": "number",
+            "format": "float"
+          },
+          {
+            "name": "conditioner.conditioner.semanticVersion",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "conditioner.conditioner.alias",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "GenerationService"
+        ]
+      }
+    },
     "/grpcgateway/engines": {
       "get": {
         "operationId": "ListEngines",
@@ -506,6 +757,31 @@
       "default": "ASSET_USE_UNDEFINED",
       "description": "AssetUse defines how the asset is used within a project.  This enum matches\nthe values the project proto.\n\n - ASSET_USE_UNDEFINED: Asset does not have use defined\n - ASSET_USE_INPUT: Asset is used as an input for the project\n - ASSET_USE_OUTPUT: Asset is an output from the project\n - ASSET_USE_INTERMEDIATE: Asset is an output from an intermediate step of the project\n - ASSET_USE_PROJECT: Asset is used as the project file for the project"
     },
+    "AsyncAnswer": {
+      "type": "object",
+      "properties": {
+        "answer": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Answer"
+          }
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "AsyncHandle": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string"
+        },
+        "asyncHandle": {
+          "type": "string"
+        }
+      }
+    },
     "AttributeType": {
       "type": "string",
       "enum": [
@@ -587,7 +863,7 @@
         "CLSFR_MODE_MULTICLASS"
       ],
       "default": "CLSFR_MODE_ZEROSHOT",
-      "title": "- CLSFR_MODE_MULTICLASS: CLSFR_MODE_ODDSRATIO = 2;"
+      "description": "Classifier Mode.\n\n - CLSFR_MODE_MULTICLASS: CLSFR_MODE_ODDSRATIO = 2;"
     },
     "ClassifierParameters": {
       "type": "object",
@@ -933,7 +1209,7 @@
           "title": "How out-of-square will we allow the fixed area to be, 0...1"
         }
       },
-      "title": "Parameters that control the hires fix feature"
+      "description": "Parameters that control the hires fix feature."
     },
     "ImageAdjustment": {
       "type": "object",
@@ -1156,6 +1432,9 @@
       ],
       "default": "MODEL_ARCHITECTURE_NONE"
     },
+    "Nothing": {
+      "type": "object"
+    },
     "OnStatus": {
       "type": "object",
       "properties": {
@@ -1192,7 +1471,7 @@
           "$ref": "#/definitions/Artifact"
         }
       },
-      "title": "A Prompt is a special type of Artifact that is used to generate an output.\nThere can be multiple Prompts that affect the same output. Currently, the\nonly Prompts supported are:\n  - Text (singular)\n  - Init Image (singular, optional, type ARTIFACT_IMAGE, with init=true)\n  - Mask (singular, optional, Artifact type ARTIFACT_MASK)"
+      "description": "A Prompt is a special type of Artifact that is used to generate an output.\nThere can be multiple Prompts that affect the same output. Currently, the\nonly Prompts supported are:\n  - Text (singular)\n  - Init Image (singular, optional, type ARTIFACT_IMAGE, with init=true)\n  - Mask (singular, optional, Artifact type ARTIFACT_MASK)\n."
     },
     "PromptParameters": {
       "type": "object",
@@ -1311,7 +1590,7 @@
           "title": "float value to apply on this schedule"
         }
       },
-      "title": "When does this schedule definition apply?"
+      "description": "When does this schedule definition apply?."
     },
     "SigmaParameters": {
       "type": "object",

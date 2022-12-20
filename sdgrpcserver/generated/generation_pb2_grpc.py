@@ -27,6 +27,21 @@ class GenerationServiceStub(object):
                 request_serializer=generation__pb2.ChainRequest.SerializeToString,
                 response_deserializer=generation__pb2.Answer.FromString,
                 )
+        self.AsyncGenerate = channel.unary_unary(
+                '/gooseai.GenerationService/AsyncGenerate',
+                request_serializer=generation__pb2.Request.SerializeToString,
+                response_deserializer=generation__pb2.AsyncHandle.FromString,
+                )
+        self.AsyncResult = channel.unary_unary(
+                '/gooseai.GenerationService/AsyncResult',
+                request_serializer=generation__pb2.AsyncHandle.SerializeToString,
+                response_deserializer=generation__pb2.AsyncAnswer.FromString,
+                )
+        self.AsyncCancel = channel.unary_unary(
+                '/gooseai.GenerationService/AsyncCancel',
+                request_serializer=generation__pb2.AsyncHandle.SerializeToString,
+                response_deserializer=generation__pb2.Nothing.FromString,
+                )
 
 
 class GenerationServiceServicer(object):
@@ -47,6 +62,24 @@ class GenerationServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def AsyncGenerate(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def AsyncResult(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def AsyncCancel(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_GenerationServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -59,6 +92,21 @@ def add_GenerationServiceServicer_to_server(servicer, server):
                     servicer.ChainGenerate,
                     request_deserializer=generation__pb2.ChainRequest.FromString,
                     response_serializer=generation__pb2.Answer.SerializeToString,
+            ),
+            'AsyncGenerate': grpc.unary_unary_rpc_method_handler(
+                    servicer.AsyncGenerate,
+                    request_deserializer=generation__pb2.Request.FromString,
+                    response_serializer=generation__pb2.AsyncHandle.SerializeToString,
+            ),
+            'AsyncResult': grpc.unary_unary_rpc_method_handler(
+                    servicer.AsyncResult,
+                    request_deserializer=generation__pb2.AsyncHandle.FromString,
+                    response_serializer=generation__pb2.AsyncAnswer.SerializeToString,
+            ),
+            'AsyncCancel': grpc.unary_unary_rpc_method_handler(
+                    servicer.AsyncCancel,
+                    request_deserializer=generation__pb2.AsyncHandle.FromString,
+                    response_serializer=generation__pb2.Nothing.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -104,5 +152,56 @@ class GenerationService(object):
         return grpc.experimental.unary_stream(request, target, '/gooseai.GenerationService/ChainGenerate',
             generation__pb2.ChainRequest.SerializeToString,
             generation__pb2.Answer.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def AsyncGenerate(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/gooseai.GenerationService/AsyncGenerate',
+            generation__pb2.Request.SerializeToString,
+            generation__pb2.AsyncHandle.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def AsyncResult(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/gooseai.GenerationService/AsyncResult',
+            generation__pb2.AsyncHandle.SerializeToString,
+            generation__pb2.AsyncAnswer.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def AsyncCancel(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/gooseai.GenerationService/AsyncCancel',
+            generation__pb2.AsyncHandle.SerializeToString,
+            generation__pb2.Nothing.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

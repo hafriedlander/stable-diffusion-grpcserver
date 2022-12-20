@@ -2,9 +2,11 @@ import json
 import random
 import threading
 import traceback
+import uuid
 from math import sqrt
+from queue import Empty, Queue
 from types import SimpleNamespace as SN
-from typing import Iterable
+from typing import Callable, Iterable
 
 import generation_pb2
 import generation_pb2_grpc
@@ -36,6 +38,27 @@ def buildDefaultMaskPostAdjustments():
 DEFAULT_POST_ADJUSTMENTS = buildDefaultMaskPostAdjustments()
 
 debugCtr = 0
+
+
+class AsyncContext:
+    def __init__(self):
+        self.code = 200
+        self.message = b""
+        self.cancel_callback: Callable | None = None
+        self.thread: threading.Thread | None = None
+
+    def cancel(self):
+        if self.cancel_callback:
+            self.cancel_callback()
+
+    def add_callback(self, callback):
+        self.cancel_callback = callback
+
+    def set_code(self, code):
+        self.code = code
+
+    def set_details(self, message):
+        self.message = message
 
 
 class ParameterExtractor:
@@ -358,6 +381,10 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
         self._debug_recorder = debug_recorder
         self._ram_monitor = ram_monitor
 
+        # For async support
+        self._handle_context: dict[str, AsyncContext] = {}
+        self._answer_queues: dict[str, Queue] = {}
+
     def unimp(self, what):
         raise NotImplementedError(f"{what} not implemented")
 
@@ -510,3 +537,69 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                 traceback.print_exc()
                 context.set_code(grpc.StatusCode.INTERNAL)
                 context.set_details("Something went wrong")
+
+    def AsyncGenerate(self, request: generation_pb2.Request, context):
+        answer_queue = Queue()
+        check_queue = None
+        handle = None
+
+        # Find an unusued handle.
+        while check_queue is not answer_queue:
+            handle = str(uuid.uuid4())
+            print(handle)
+            # Done a slightly weird way to ensure dict access is atomic
+            check_queue = self._answer_queues.setdefault(handle, answer_queue)
+
+        print("Found", handle)
+
+        # Start the request in a thread.
+        # TODO: Ideally this would be in a queue too rather than spawning threads
+
+        async_context = AsyncContext()
+
+        def thread_function():
+            for answer in self.Generate(request, async_context):
+                answer_queue.put(answer)
+            answer_queue.put("DONE")
+
+        async_context.thread = threading.Thread(target=thread_function)
+        async_context.thread.start()
+
+        assert handle
+        self._handle_context[handle] = async_context
+
+        print("Returning")
+        return generation_pb2.AsyncHandle(
+            request_id=request.request_id, async_handle=handle
+        )
+
+    def AsyncResult(self, request, context):
+        queue = self._answer_queues[request.async_handle]
+
+        async_answer = generation_pb2.AsyncAnswer(complete=False)
+
+        try:
+            while True:
+                answer = queue.get(timeout=2)
+                if answer == "DONE":
+                    async_answer.complete = True
+                    break
+                else:
+                    async_answer.answer.append(answer)
+        except Empty:
+            pass
+
+        if async_answer.complete:
+            del self._handle_context[request.async_handle]
+            del self._answer_queues[request.async_handle]
+
+        return async_answer
+
+    def AsyncCancel(self, request, context):
+        context = self._handle_context[request.async_handle]
+        context.cancel()
+
+        del self._handle_context[request.async_handle]
+        del self._answer_queues[request.async_handle]
+
+        return generation_pb2.Nothing()

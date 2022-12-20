@@ -18,7 +18,7 @@ import sys
 import time
 import uuid
 from argparse import ArgumentParser, BooleanOptionalAction, Namespace
-from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Generator, List, Literal, Optional, Sequence, Tuple, Union
 
 import grpc
 import torch
@@ -223,6 +223,7 @@ class StabilityInference:
         self,
         host: str = "grpc.stability.ai:443",
         key: str = "",
+        proto: Literal["grpc", "grpc-web"] = "grpc",
         engine: str = "stable-diffusion-v1-5",
         verbose: bool = False,
         wait_for_ready: bool = True,
@@ -255,7 +256,11 @@ class StabilityInference:
 
         call_credentials = []
 
-        if key:
+        if proto == "grpc-web":
+            from sdgrpcserver.sonora import client as sonora_client
+
+            channel = sonora_client.insecure_web_channel(host)
+        elif key:
             call_credentials.append(grpc.access_token_call_credentials(f"{key}"))
 
             if host.endswith("443"):
@@ -321,6 +326,7 @@ class StabilityInference:
         tiling: bool = False,
         lora: list[tuple[str, float]] | None = None,
         lora_text: list[tuple[str, float]] | None = None,
+        as_async=False,
     ) -> Generator[generation.Answer, None, None]:
         """
         Generate images from a prompt.
@@ -379,7 +385,7 @@ class StabilityInference:
                 )
             ]
 
-        sampler_parameters = dict(cfg_scale=cfg_scale)
+        sampler_parameters: dict[str, Any] = dict(cfg_scale=cfg_scale)
 
         if eta:
             sampler_parameters["eta"] = eta
@@ -495,7 +501,12 @@ class StabilityInference:
             tiling=tiling,
         )
 
-        return self.emit_request(prompt=prompts, image_parameters=image_parameters)
+        if as_async:
+            return self.emit_async_request(
+                prompt=prompts, image_parameters=image_parameters
+            )
+        else:
+            return self.emit_request(prompt=prompts, image_parameters=image_parameters)
 
     # The motivation here is to facilitate constructing requests by passing protobuf objects directly.
     def emit_request(
@@ -549,6 +560,51 @@ class StabilityInference:
 
             yield answer
             start = time.time()
+
+    # The motivation here is to facilitate constructing requests by passing protobuf objects directly.
+    def emit_async_request(
+        self,
+        prompt: generation.Prompt,
+        image_parameters: generation.ImageParameters,
+        engine_id: str = None,
+        request_id: str = None,
+    ):
+        if not request_id:
+            request_id = str(uuid.uuid4())
+        if not engine_id:
+            engine_id = self.engine
+
+        rq = generation.Request(
+            engine_id=engine_id,
+            request_id=request_id,
+            prompt=prompt,
+            image=image_parameters,
+        )
+
+        if self.verbose:
+            logger.info("Sending request.")
+
+        start = time.time()
+        handle = self.stub.AsyncGenerate(rq, **self.grpc_args)
+
+        print(handle)
+
+        def cancel_request(unused_signum, unused_frame):
+            print("Cancelling")
+            self.stub.AsyncCancel(handle)
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT, cancel_request)
+
+        while True:
+            answers = self.stub.AsyncResult(handle)
+            for answer in answers.answer:
+                yield answer
+
+            if answers.complete:
+                print("Done")
+
+            time.sleep(5)
 
 
 if __name__ == "__main__":
@@ -735,11 +791,24 @@ if __name__ == "__main__":
         action="store_true",
         help="Print a list of the engines available on the server",
     )
+    parser.add_argument(
+        "--grpc_web",
+        action="store_true",
+        help="Use GRPC-WEB to connect to the server (instead of GRPC)",
+    )
+    parser.add_argument("--as_async", action="store_true", help="Run asyncronously")
     parser.add_argument("prompt", nargs="*")
     args = parser.parse_args()
 
+    stability_api = StabilityInference(
+        STABILITY_HOST,
+        STABILITY_KEY,
+        proto="grpc-web" if args.grpc_web else "grpc",
+        engine=args.engine,
+        verbose=True,
+    )
+
     if args.list_engines:
-        stability_api = StabilityInference(STABILITY_HOST, STABILITY_KEY, verbose=True)
         stability_api.list_engines()
         sys.exit(0)
 
@@ -798,11 +867,8 @@ if __name__ == "__main__":
         "tiling": args.tiling,
         "lora": lora,
         "lora_text": lora_text,
+        "as_async": args.as_async,
     }
-
-    stability_api = StabilityInference(
-        STABILITY_HOST, STABILITY_KEY, engine=args.engine, verbose=True
-    )
 
     answers = stability_api.generate(args.prompt, **request)
     artifacts = process_artifacts_from_answers(

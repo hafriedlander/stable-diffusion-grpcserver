@@ -307,6 +307,8 @@ class _ClassifierModeEnumTypeWrapper(google.protobuf.internal.enum_type_wrapper.
 class ClassifierMode(_ClassifierMode, metaclass=_ClassifierModeEnumTypeWrapper):
     """
     Artifact classification parameters.
+
+    Classifier Mode.
     """
 
 CLSFR_MODE_ZEROSHOT: ClassifierMode.ValueType  # 0
@@ -755,6 +757,7 @@ class Prompt(google.protobuf.message.Message):
       - Text (singular)
       - Init Image (singular, optional, type ARTIFACT_IMAGE, with init=true)
       - Mask (singular, optional, Artifact type ARTIFACT_MASK)
+    .
     """
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
@@ -928,7 +931,7 @@ global___ConditionerParameters = ConditionerParameters
 
 @typing_extensions.final
 class ScheduleParameters(google.protobuf.message.Message):
-    """When does this schedule definition apply?"""
+    """When does this schedule definition apply?."""
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
@@ -1228,7 +1231,7 @@ global___ExtendedParameters = ExtendedParameters
 
 @typing_extensions.final
 class HiresFixParameters(google.protobuf.message.Message):
-    """Parameters that control the hires fix feature"""
+    """Parameters that control the hires fix feature."""
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
@@ -1608,3 +1611,50 @@ class ChainRequest(google.protobuf.message.Message):
     def ClearField(self, field_name: typing_extensions.Literal["request_id", b"request_id", "stage", b"stage"]) -> None: ...
 
 global___ChainRequest = ChainRequest
+
+@typing_extensions.final
+class AsyncAnswer(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    ANSWER_FIELD_NUMBER: builtins.int
+    COMPLETE_FIELD_NUMBER: builtins.int
+    @property
+    def answer(self) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[global___Answer]: ...
+    complete: builtins.bool
+    def __init__(
+        self,
+        *,
+        answer: collections.abc.Iterable[global___Answer] | None = ...,
+        complete: builtins.bool = ...,
+    ) -> None: ...
+    def ClearField(self, field_name: typing_extensions.Literal["answer", b"answer", "complete", b"complete"]) -> None: ...
+
+global___AsyncAnswer = AsyncAnswer
+
+@typing_extensions.final
+class AsyncHandle(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    REQUEST_ID_FIELD_NUMBER: builtins.int
+    ASYNC_HANDLE_FIELD_NUMBER: builtins.int
+    request_id: builtins.str
+    async_handle: builtins.str
+    def __init__(
+        self,
+        *,
+        request_id: builtins.str = ...,
+        async_handle: builtins.str = ...,
+    ) -> None: ...
+    def ClearField(self, field_name: typing_extensions.Literal["async_handle", b"async_handle", "request_id", b"request_id"]) -> None: ...
+
+global___AsyncHandle = AsyncHandle
+
+@typing_extensions.final
+class Nothing(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    def __init__(
+        self,
+    ) -> None: ...
+
+global___Nothing = Nothing
