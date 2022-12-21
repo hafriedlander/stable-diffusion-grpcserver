@@ -588,13 +588,6 @@ class EngineManager(object):
         subfolder = spec.get("subfolder", None)
         use_auth_token = self._token if spec.get("use_auth_token", False) else False
 
-        ignore_patterns = spec.get("ignore_patterns", [])
-        if isinstance(ignore_patterns, str):
-            ignore_patterns = [ignore_patterns]
-        extra_kwargs["ignore_patterns"] = ignore_patterns + ["*.ckpt", "*.pt"]
-
-        if subfolder:
-            extra_kwargs["allow_patterns"] = [f"{subfolder}*"]
         if use_auth_token:
             extra_kwargs["use_auth_token"] = use_auth_token
         if fp16:
@@ -606,7 +599,7 @@ class EngineManager(object):
             # the .safetensors version of .ckpt files )
             if not local_only:
                 # Get a list of files, split into path and extension
-                repo_info = huggingface_hub.model_info(model_path)
+                repo_info = huggingface_hub.model_info(model_path, **extra_kwargs)
                 repo_files = [os.path.splitext(f.rfilename) for f in repo_info.siblings]
                 # Sort by extension (grouping fails if not correctly sorted)
                 repo_files.sort(key=lambda x: x[1])
@@ -616,6 +609,10 @@ class EngineManager(object):
                     for k, v in itertools.groupby(repo_files, lambda x: x[1])
                 }
 
+                ignore_patterns = spec.get("ignore_patterns", [])
+                if isinstance(ignore_patterns, str):
+                    ignore_patterns = [ignore_patterns]
+
                 has_ckpt = ".ckpt" in grouped
                 has_bin = ".bin" in grouped
                 has_safe = ".safetensors" in grouped
@@ -624,11 +621,10 @@ class EngineManager(object):
                     has_safe = bool(grouped[".safetensors"] - grouped[".ckpt"])
 
                     # Exclude safetensors that match ckpt files
-                    exclude_safetensors = [
+                    ignore_patterns += [
                         f"{f}.safetensors"
                         for f in grouped[".safetensors"] & grouped[".ckpt"]
                     ]
-                    extra_kwargs["ignore_patterns"] += exclude_safetensors
 
                 if not has_bin and not has_safe:
                     if has_ckpt:
@@ -640,12 +636,21 @@ class EngineManager(object):
                             "Repo {model_path} doesn't appear to contain any model files."
                         )
 
+                # Only use safetensors if either we have safetensor equivalents for every bin
                 safe_only = has_bin and is_safetensors_compatible(repo_info)
+                # Or if the spec explicitly says to
                 safe_only = safe_only or spec.get("safe_only", False)
 
                 if safe_only:
-                    # Only use safetensors
-                    extra_kwargs["ignore_patterns"] += ["*.bin"]
+                    ignore_patterns += ["*.bin"]
+
+                # Always exclude .ckpt and .pt files
+                ignore_patterns += ["*.ckpt", "*.pt"]
+
+                if ignore_patterns:
+                    extra_kwargs["ignore_patterns"] = ignore_patterns
+                if subfolder:
+                    extra_kwargs["allow_patterns"] = [f"{subfolder}*"]
 
             return huggingface_hub.snapshot_download(
                 model_path,
