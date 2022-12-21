@@ -147,6 +147,38 @@ LORA_UNET: LoraTarget.ValueType  # 0
 LORA_TEXT_ENCODER: LoraTarget.ValueType  # 1
 global___LoraTarget = LoraTarget
 
+class _MaskedAreaInit:
+    ValueType = typing.NewType("ValueType", builtins.int)
+    V: typing_extensions.TypeAlias = ValueType
+
+class _MaskedAreaInitEnumTypeWrapper(google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[_MaskedAreaInit.ValueType], builtins.type):
+    DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
+    MASKED_AREA_INIT_ZERO: _MaskedAreaInit.ValueType  # 0
+    MASKED_AREA_INIT_RANDOM: _MaskedAreaInit.ValueType  # 1
+    MASKED_AREA_INIT_ORIGINAL: _MaskedAreaInit.ValueType  # 2
+
+class MaskedAreaInit(_MaskedAreaInit, metaclass=_MaskedAreaInitEnumTypeWrapper): ...
+
+MASKED_AREA_INIT_ZERO: MaskedAreaInit.ValueType  # 0
+MASKED_AREA_INIT_RANDOM: MaskedAreaInit.ValueType  # 1
+MASKED_AREA_INIT_ORIGINAL: MaskedAreaInit.ValueType  # 2
+global___MaskedAreaInit = MaskedAreaInit
+
+class _WeightMethod:
+    ValueType = typing.NewType("ValueType", builtins.int)
+    V: typing_extensions.TypeAlias = ValueType
+
+class _WeightMethodEnumTypeWrapper(google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[_WeightMethod.ValueType], builtins.type):
+    DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
+    TEXT_ENCODER: _WeightMethod.ValueType  # 0
+    CROSS_ATTENTION: _WeightMethod.ValueType  # 1
+
+class WeightMethod(_WeightMethod, metaclass=_WeightMethodEnumTypeWrapper): ...
+
+TEXT_ENCODER: WeightMethod.ValueType  # 0
+CROSS_ATTENTION: WeightMethod.ValueType  # 1
+global___WeightMethod = WeightMethod
+
 class _DiffusionSampler:
     ValueType = typing.NewType("ValueType", builtins.int)
     V: typing_extensions.TypeAlias = ValueType
@@ -161,14 +193,20 @@ class _DiffusionSamplerEnumTypeWrapper(google.protobuf.internal.enum_type_wrappe
     SAMPLER_K_DPM_2: _DiffusionSampler.ValueType  # 5
     SAMPLER_K_DPM_2_ANCESTRAL: _DiffusionSampler.ValueType  # 6
     SAMPLER_K_LMS: _DiffusionSampler.ValueType  # 7
+    SAMPLER_K_DPMPP_2S_ANCESTRAL: _DiffusionSampler.ValueType  # 8
+    SAMPLER_K_DPMPP_2M: _DiffusionSampler.ValueType  # 9
+    SAMPLER_K_DPMPP_SDE: _DiffusionSampler.ValueType  # 10
     SAMPLER_DPMSOLVERPP_1ORDER: _DiffusionSampler.ValueType  # 500
     SAMPLER_DPMSOLVERPP_2ORDER: _DiffusionSampler.ValueType  # 501
     SAMPLER_DPMSOLVERPP_3ORDER: _DiffusionSampler.ValueType  # 502
     SAMPLER_DPM_FAST: _DiffusionSampler.ValueType  # 550
     SAMPLER_DPM_ADAPTIVE: _DiffusionSampler.ValueType  # 551
     SAMPLER_DPMSOLVERPP_2S_ANCESTRAL: _DiffusionSampler.ValueType  # 552
+    """Deprecated - use the official value above"""
     SAMPLER_DPMSOLVERPP_SDE: _DiffusionSampler.ValueType  # 553
+    """Deprecated - use the official value above"""
     SAMPLER_DPMSOLVERPP_2M: _DiffusionSampler.ValueType  # 554
+    """Deprecated - use the official value above"""
 
 class DiffusionSampler(_DiffusionSampler, metaclass=_DiffusionSamplerEnumTypeWrapper):
     """DiffusionSampler identifies which sampler to use for Diffusion, and represents
@@ -183,14 +221,20 @@ SAMPLER_K_HEUN: DiffusionSampler.ValueType  # 4
 SAMPLER_K_DPM_2: DiffusionSampler.ValueType  # 5
 SAMPLER_K_DPM_2_ANCESTRAL: DiffusionSampler.ValueType  # 6
 SAMPLER_K_LMS: DiffusionSampler.ValueType  # 7
+SAMPLER_K_DPMPP_2S_ANCESTRAL: DiffusionSampler.ValueType  # 8
+SAMPLER_K_DPMPP_2M: DiffusionSampler.ValueType  # 9
+SAMPLER_K_DPMPP_SDE: DiffusionSampler.ValueType  # 10
 SAMPLER_DPMSOLVERPP_1ORDER: DiffusionSampler.ValueType  # 500
 SAMPLER_DPMSOLVERPP_2ORDER: DiffusionSampler.ValueType  # 501
 SAMPLER_DPMSOLVERPP_3ORDER: DiffusionSampler.ValueType  # 502
 SAMPLER_DPM_FAST: DiffusionSampler.ValueType  # 550
 SAMPLER_DPM_ADAPTIVE: DiffusionSampler.ValueType  # 551
 SAMPLER_DPMSOLVERPP_2S_ANCESTRAL: DiffusionSampler.ValueType  # 552
+"""Deprecated - use the official value above"""
 SAMPLER_DPMSOLVERPP_SDE: DiffusionSampler.ValueType  # 553
+"""Deprecated - use the official value above"""
 SAMPLER_DPMSOLVERPP_2M: DiffusionSampler.ValueType  # 554
+"""Deprecated - use the official value above"""
 global___DiffusionSampler = DiffusionSampler
 
 class _SamplerNoiseType:
@@ -855,6 +899,8 @@ class SamplerParameters(google.protobuf.message.Message):
     LATENT_CHANNELS_FIELD_NUMBER: builtins.int
     DOWNSAMPLING_FACTOR_FIELD_NUMBER: builtins.int
     CFG_SCALE_FIELD_NUMBER: builtins.int
+    INIT_NOISE_SCALE_FIELD_NUMBER: builtins.int
+    STEP_NOISE_SCALE_FIELD_NUMBER: builtins.int
     CHURN_FIELD_NUMBER: builtins.int
     SIGMA_FIELD_NUMBER: builtins.int
     NOISE_TYPE_FIELD_NUMBER: builtins.int
@@ -863,6 +909,10 @@ class SamplerParameters(google.protobuf.message.Message):
     latent_channels: builtins.int
     downsampling_factor: builtins.int
     cfg_scale: builtins.float
+    init_noise_scale: builtins.float
+    """defaults to 0.99"""
+    step_noise_scale: builtins.float
+    """defaults to 0.99"""
     @property
     def churn(self) -> global___ChurnSettings: ...
     @property
@@ -876,12 +926,14 @@ class SamplerParameters(google.protobuf.message.Message):
         latent_channels: builtins.int | None = ...,
         downsampling_factor: builtins.int | None = ...,
         cfg_scale: builtins.float | None = ...,
+        init_noise_scale: builtins.float | None = ...,
+        step_noise_scale: builtins.float | None = ...,
         churn: global___ChurnSettings | None = ...,
         sigma: global___SigmaParameters | None = ...,
         noise_type: global___SamplerNoiseType.ValueType | None = ...,
     ) -> None: ...
-    def HasField(self, field_name: typing_extensions.Literal["_cfg_scale", b"_cfg_scale", "_churn", b"_churn", "_downsampling_factor", b"_downsampling_factor", "_eta", b"_eta", "_latent_channels", b"_latent_channels", "_noise_type", b"_noise_type", "_sampling_steps", b"_sampling_steps", "_sigma", b"_sigma", "cfg_scale", b"cfg_scale", "churn", b"churn", "downsampling_factor", b"downsampling_factor", "eta", b"eta", "latent_channels", b"latent_channels", "noise_type", b"noise_type", "sampling_steps", b"sampling_steps", "sigma", b"sigma"]) -> builtins.bool: ...
-    def ClearField(self, field_name: typing_extensions.Literal["_cfg_scale", b"_cfg_scale", "_churn", b"_churn", "_downsampling_factor", b"_downsampling_factor", "_eta", b"_eta", "_latent_channels", b"_latent_channels", "_noise_type", b"_noise_type", "_sampling_steps", b"_sampling_steps", "_sigma", b"_sigma", "cfg_scale", b"cfg_scale", "churn", b"churn", "downsampling_factor", b"downsampling_factor", "eta", b"eta", "latent_channels", b"latent_channels", "noise_type", b"noise_type", "sampling_steps", b"sampling_steps", "sigma", b"sigma"]) -> None: ...
+    def HasField(self, field_name: typing_extensions.Literal["_cfg_scale", b"_cfg_scale", "_churn", b"_churn", "_downsampling_factor", b"_downsampling_factor", "_eta", b"_eta", "_init_noise_scale", b"_init_noise_scale", "_latent_channels", b"_latent_channels", "_noise_type", b"_noise_type", "_sampling_steps", b"_sampling_steps", "_sigma", b"_sigma", "_step_noise_scale", b"_step_noise_scale", "cfg_scale", b"cfg_scale", "churn", b"churn", "downsampling_factor", b"downsampling_factor", "eta", b"eta", "init_noise_scale", b"init_noise_scale", "latent_channels", b"latent_channels", "noise_type", b"noise_type", "sampling_steps", b"sampling_steps", "sigma", b"sigma", "step_noise_scale", b"step_noise_scale"]) -> builtins.bool: ...
+    def ClearField(self, field_name: typing_extensions.Literal["_cfg_scale", b"_cfg_scale", "_churn", b"_churn", "_downsampling_factor", b"_downsampling_factor", "_eta", b"_eta", "_init_noise_scale", b"_init_noise_scale", "_latent_channels", b"_latent_channels", "_noise_type", b"_noise_type", "_sampling_steps", b"_sampling_steps", "_sigma", b"_sigma", "_step_noise_scale", b"_step_noise_scale", "cfg_scale", b"cfg_scale", "churn", b"churn", "downsampling_factor", b"downsampling_factor", "eta", b"eta", "init_noise_scale", b"init_noise_scale", "latent_channels", b"latent_channels", "noise_type", b"noise_type", "sampling_steps", b"sampling_steps", "sigma", b"sigma", "step_noise_scale", b"step_noise_scale"]) -> None: ...
     @typing.overload
     def WhichOneof(self, oneof_group: typing_extensions.Literal["_cfg_scale", b"_cfg_scale"]) -> typing_extensions.Literal["cfg_scale"] | None: ...
     @typing.overload
@@ -891,6 +943,8 @@ class SamplerParameters(google.protobuf.message.Message):
     @typing.overload
     def WhichOneof(self, oneof_group: typing_extensions.Literal["_eta", b"_eta"]) -> typing_extensions.Literal["eta"] | None: ...
     @typing.overload
+    def WhichOneof(self, oneof_group: typing_extensions.Literal["_init_noise_scale", b"_init_noise_scale"]) -> typing_extensions.Literal["init_noise_scale"] | None: ...
+    @typing.overload
     def WhichOneof(self, oneof_group: typing_extensions.Literal["_latent_channels", b"_latent_channels"]) -> typing_extensions.Literal["latent_channels"] | None: ...
     @typing.overload
     def WhichOneof(self, oneof_group: typing_extensions.Literal["_noise_type", b"_noise_type"]) -> typing_extensions.Literal["noise_type"] | None: ...
@@ -898,6 +952,8 @@ class SamplerParameters(google.protobuf.message.Message):
     def WhichOneof(self, oneof_group: typing_extensions.Literal["_sampling_steps", b"_sampling_steps"]) -> typing_extensions.Literal["sampling_steps"] | None: ...
     @typing.overload
     def WhichOneof(self, oneof_group: typing_extensions.Literal["_sigma", b"_sigma"]) -> typing_extensions.Literal["sigma"] | None: ...
+    @typing.overload
+    def WhichOneof(self, oneof_group: typing_extensions.Literal["_step_noise_scale", b"_step_noise_scale"]) -> typing_extensions.Literal["step_noise_scale"] | None: ...
 
 global___SamplerParameters = SamplerParameters
 
@@ -1264,6 +1320,9 @@ class ImageParameters(google.protobuf.message.Message):
     STEPS_FIELD_NUMBER: builtins.int
     TRANSFORM_FIELD_NUMBER: builtins.int
     PARAMETERS_FIELD_NUMBER: builtins.int
+    MASKED_AREA_INIT_FIELD_NUMBER: builtins.int
+    WEIGHT_METHOD_FIELD_NUMBER: builtins.int
+    QUANTIZE_FIELD_NUMBER: builtins.int
     EXTENSION_FIELD_NUMBER: builtins.int
     HIRES_FIELD_NUMBER: builtins.int
     TILING_FIELD_NUMBER: builtins.int
@@ -1277,6 +1336,12 @@ class ImageParameters(google.protobuf.message.Message):
     def transform(self) -> global___TransformType: ...
     @property
     def parameters(self) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[global___StepParameter]: ...
+    masked_area_init: global___MaskedAreaInit.ValueType
+    """defaults to MASKED_AREA_INIT_ZERO"""
+    weight_method: global___WeightMethod.ValueType
+    """defaults to TEXT_ENCODER"""
+    quantize: builtins.bool
+    """defaults to true"""
     @property
     def extension(self) -> global___ExtendedParameters: ...
     @property
@@ -1292,18 +1357,25 @@ class ImageParameters(google.protobuf.message.Message):
         steps: builtins.int | None = ...,
         transform: global___TransformType | None = ...,
         parameters: collections.abc.Iterable[global___StepParameter] | None = ...,
+        masked_area_init: global___MaskedAreaInit.ValueType | None = ...,
+        weight_method: global___WeightMethod.ValueType | None = ...,
+        quantize: builtins.bool | None = ...,
         extension: global___ExtendedParameters | None = ...,
         hires: global___HiresFixParameters | None = ...,
         tiling: builtins.bool | None = ...,
     ) -> None: ...
-    def HasField(self, field_name: typing_extensions.Literal["_extension", b"_extension", "_height", b"_height", "_hires", b"_hires", "_samples", b"_samples", "_steps", b"_steps", "_tiling", b"_tiling", "_transform", b"_transform", "_width", b"_width", "extension", b"extension", "height", b"height", "hires", b"hires", "samples", b"samples", "steps", b"steps", "tiling", b"tiling", "transform", b"transform", "width", b"width"]) -> builtins.bool: ...
-    def ClearField(self, field_name: typing_extensions.Literal["_extension", b"_extension", "_height", b"_height", "_hires", b"_hires", "_samples", b"_samples", "_steps", b"_steps", "_tiling", b"_tiling", "_transform", b"_transform", "_width", b"_width", "extension", b"extension", "height", b"height", "hires", b"hires", "parameters", b"parameters", "samples", b"samples", "seed", b"seed", "steps", b"steps", "tiling", b"tiling", "transform", b"transform", "width", b"width"]) -> None: ...
+    def HasField(self, field_name: typing_extensions.Literal["_extension", b"_extension", "_height", b"_height", "_hires", b"_hires", "_masked_area_init", b"_masked_area_init", "_quantize", b"_quantize", "_samples", b"_samples", "_steps", b"_steps", "_tiling", b"_tiling", "_transform", b"_transform", "_weight_method", b"_weight_method", "_width", b"_width", "extension", b"extension", "height", b"height", "hires", b"hires", "masked_area_init", b"masked_area_init", "quantize", b"quantize", "samples", b"samples", "steps", b"steps", "tiling", b"tiling", "transform", b"transform", "weight_method", b"weight_method", "width", b"width"]) -> builtins.bool: ...
+    def ClearField(self, field_name: typing_extensions.Literal["_extension", b"_extension", "_height", b"_height", "_hires", b"_hires", "_masked_area_init", b"_masked_area_init", "_quantize", b"_quantize", "_samples", b"_samples", "_steps", b"_steps", "_tiling", b"_tiling", "_transform", b"_transform", "_weight_method", b"_weight_method", "_width", b"_width", "extension", b"extension", "height", b"height", "hires", b"hires", "masked_area_init", b"masked_area_init", "parameters", b"parameters", "quantize", b"quantize", "samples", b"samples", "seed", b"seed", "steps", b"steps", "tiling", b"tiling", "transform", b"transform", "weight_method", b"weight_method", "width", b"width"]) -> None: ...
     @typing.overload
     def WhichOneof(self, oneof_group: typing_extensions.Literal["_extension", b"_extension"]) -> typing_extensions.Literal["extension"] | None: ...
     @typing.overload
     def WhichOneof(self, oneof_group: typing_extensions.Literal["_height", b"_height"]) -> typing_extensions.Literal["height"] | None: ...
     @typing.overload
     def WhichOneof(self, oneof_group: typing_extensions.Literal["_hires", b"_hires"]) -> typing_extensions.Literal["hires"] | None: ...
+    @typing.overload
+    def WhichOneof(self, oneof_group: typing_extensions.Literal["_masked_area_init", b"_masked_area_init"]) -> typing_extensions.Literal["masked_area_init"] | None: ...
+    @typing.overload
+    def WhichOneof(self, oneof_group: typing_extensions.Literal["_quantize", b"_quantize"]) -> typing_extensions.Literal["quantize"] | None: ...
     @typing.overload
     def WhichOneof(self, oneof_group: typing_extensions.Literal["_samples", b"_samples"]) -> typing_extensions.Literal["samples"] | None: ...
     @typing.overload
@@ -1312,6 +1384,8 @@ class ImageParameters(google.protobuf.message.Message):
     def WhichOneof(self, oneof_group: typing_extensions.Literal["_tiling", b"_tiling"]) -> typing_extensions.Literal["tiling"] | None: ...
     @typing.overload
     def WhichOneof(self, oneof_group: typing_extensions.Literal["_transform", b"_transform"]) -> typing_extensions.Literal["transform"] | None: ...
+    @typing.overload
+    def WhichOneof(self, oneof_group: typing_extensions.Literal["_weight_method", b"_weight_method"]) -> typing_extensions.Literal["weight_method"] | None: ...
     @typing.overload
     def WhichOneof(self, oneof_group: typing_extensions.Literal["_width", b"_width"]) -> typing_extensions.Literal["width"] | None: ...
 
@@ -1613,32 +1687,72 @@ class ChainRequest(google.protobuf.message.Message):
 global___ChainRequest = ChainRequest
 
 @typing_extensions.final
+class AsyncStatus(google.protobuf.message.Message):
+    """The status of an async job. 
+    Mirrors google.rpc.Status but avoids needing to include that file in the repo.
+    """
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    CODE_FIELD_NUMBER: builtins.int
+    MESSAGE_FIELD_NUMBER: builtins.int
+    code: builtins.int
+    """The status code, which should be an enum value of google.rpc.Code"""
+    message: builtins.str
+    """Any message"""
+    def __init__(
+        self,
+        *,
+        code: builtins.int = ...,
+        message: builtins.str = ...,
+    ) -> None: ...
+    def ClearField(self, field_name: typing_extensions.Literal["code", b"code", "message", b"message"]) -> None: ...
+
+global___AsyncStatus = AsyncStatus
+
+@typing_extensions.final
 class AsyncAnswer(google.protobuf.message.Message):
+    """A potentially partial answer to an AsyncGenerate request, returned by AsyncResult."""
+
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     ANSWER_FIELD_NUMBER: builtins.int
     COMPLETE_FIELD_NUMBER: builtins.int
+    STATUS_FIELD_NUMBER: builtins.int
     @property
-    def answer(self) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[global___Answer]: ...
+    def answer(self) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[global___Answer]:
+        """Any completed Answers that have not been returned by a previous call to AsyncResult."""
     complete: builtins.bool
+    """Is this AsyncGenerate request complete? 
+    (Once true, any further requests will give an error).
+    """
+    @property
+    def status(self) -> global___AsyncStatus:
+        """Final status. Only set when complete == True."""
     def __init__(
         self,
         *,
         answer: collections.abc.Iterable[global___Answer] | None = ...,
         complete: builtins.bool = ...,
+        status: global___AsyncStatus | None = ...,
     ) -> None: ...
-    def ClearField(self, field_name: typing_extensions.Literal["answer", b"answer", "complete", b"complete"]) -> None: ...
+    def HasField(self, field_name: typing_extensions.Literal["status", b"status"]) -> builtins.bool: ...
+    def ClearField(self, field_name: typing_extensions.Literal["answer", b"answer", "complete", b"complete", "status", b"status"]) -> None: ...
 
 global___AsyncAnswer = AsyncAnswer
 
 @typing_extensions.final
 class AsyncHandle(google.protobuf.message.Message):
+    """A handle to refer to a AsyncGenerate request."""
+
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     REQUEST_ID_FIELD_NUMBER: builtins.int
     ASYNC_HANDLE_FIELD_NUMBER: builtins.int
     request_id: builtins.str
+    """The request_id for the original Request."""
     async_handle: builtins.str
+    """The opaque handle needed to refer to the same AsyncGenerate request."""
     def __init__(
         self,
         *,
@@ -1650,11 +1764,11 @@ class AsyncHandle(google.protobuf.message.Message):
 global___AsyncHandle = AsyncHandle
 
 @typing_extensions.final
-class Nothing(google.protobuf.message.Message):
+class AsyncCancelAnswer(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     def __init__(
         self,
     ) -> None: ...
 
-global___Nothing = Nothing
+global___AsyncCancelAnswer = AsyncCancelAnswer

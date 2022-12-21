@@ -47,6 +47,12 @@ KDIFFUSION_SAMPLERS = {
     generation_pb2.SAMPLER_K_HEUN: k_sampling.sample_heun,
     generation_pb2.SAMPLER_DPM_FAST: k_sampling.sample_dpm_fast,
     generation_pb2.SAMPLER_DPM_ADAPTIVE: k_sampling.sample_dpm_adaptive,
+    generation_pb2.SAMPLER_K_DPMPP_2S_ANCESTRAL: k_sampling.sample_dpmpp_2s_ancestral,
+    generation_pb2.SAMPLER_K_DPMPP_SDE: k_sampling.sample_dpmpp_sde,
+    generation_pb2.SAMPLER_K_DPMPP_2M: functools.partial(
+        sample_dpmpp_2m, warmup_lms=True, ddim_cutoff=0.1
+    ),
+    # These are deprecated, as there are now official enums above from the Stability-AI API
     generation_pb2.SAMPLER_DPMSOLVERPP_2S_ANCESTRAL: k_sampling.sample_dpmpp_2s_ancestral,
     generation_pb2.SAMPLER_DPMSOLVERPP_SDE: k_sampling.sample_dpmpp_sde,
     generation_pb2.SAMPLER_DPMSOLVERPP_2M: functools.partial(

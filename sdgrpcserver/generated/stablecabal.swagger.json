@@ -19,8 +19,49 @@
     "application/json"
   ],
   "paths": {
+    "/grpcgateway/asyncCancel": {
+      "post": {
+        "summary": "AsyncCancel cancels a generation that is currently in progress\nand discards any results that have not yet been returned by a call to AsyncResult.",
+        "operationId": "AsyncCancel",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/AsyncCancelAnswer"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "requestId",
+            "description": "The request_id for the original Request.",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "asyncHandle",
+            "description": "The opaque handle needed to refer to the same AsyncGenerate request.",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "GenerationService"
+        ]
+      }
+    },
     "/grpcgateway/asyncGenerate": {
       "post": {
+        "summary": "AsyncGenerate starts an asynchronous generation",
+        "description": "The passed Request is the same as to Generate. However this method\nwill return immediately, returning a handle that can be used to get\nany results of the generation created so far or cancel it.",
         "operationId": "AsyncGenerate",
         "responses": {
           "200": {
@@ -110,6 +151,7 @@
           },
           {
             "name": "image.transform.diffusion",
+            "description": " - SAMPLER_DPMSOLVERPP_2S_ANCESTRAL: Deprecated - use the official value above\n - SAMPLER_DPMSOLVERPP_SDE: Deprecated - use the official value above\n - SAMPLER_DPMSOLVERPP_2M: Deprecated - use the official value above",
             "in": "query",
             "required": false,
             "type": "string",
@@ -122,6 +164,9 @@
               "SAMPLER_K_DPM_2",
               "SAMPLER_K_DPM_2_ANCESTRAL",
               "SAMPLER_K_LMS",
+              "SAMPLER_K_DPMPP_2S_ANCESTRAL",
+              "SAMPLER_K_DPMPP_2M",
+              "SAMPLER_K_DPMPP_SDE",
               "SAMPLER_DPMSOLVERPP_1ORDER",
               "SAMPLER_DPMSOLVERPP_2ORDER",
               "SAMPLER_DPMSOLVERPP_3ORDER",
@@ -144,6 +189,38 @@
               "UPSCALER_ESRGAN"
             ],
             "default": "UPSCALER_RGB"
+          },
+          {
+            "name": "image.maskedAreaInit",
+            "description": "defaults to MASKED_AREA_INIT_ZERO",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "MASKED_AREA_INIT_ZERO",
+              "MASKED_AREA_INIT_RANDOM",
+              "MASKED_AREA_INIT_ORIGINAL"
+            ],
+            "default": "MASKED_AREA_INIT_ZERO"
+          },
+          {
+            "name": "image.weightMethod",
+            "description": "defaults to TEXT_ENCODER",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "TEXT_ENCODER",
+              "CROSS_ATTENTION"
+            ],
+            "default": "TEXT_ENCODER"
+          },
+          {
+            "name": "image.quantize",
+            "description": "defaults to true",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
           },
           {
             "name": "image.hires.enable",
@@ -260,6 +337,46 @@
           },
           {
             "name": "conditioner.conditioner.alias",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "GenerationService"
+        ]
+      }
+    },
+    "/grpcgateway/asyncResult": {
+      "post": {
+        "summary": "AsyncResult gets and results so far for an asynchronous generation",
+        "description": "You can call this multiple times. Each time you call it, you will get\nany results that are ready that have not been returned before.\n(Note that this \"consumes\" the ready results - they will not be returned again).\n\nAny generated results will eventually (default: after 10 minutes) be discarded\nif they are not taken by a call to this method.",
+        "operationId": "AsyncResult",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/AsyncAnswer"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/Status"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "requestId",
+            "description": "The request_id for the original Request.",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "asyncHandle",
+            "description": "The opaque handle needed to refer to the same AsyncGenerate request.",
             "in": "query",
             "required": false,
             "type": "string"
@@ -392,6 +509,7 @@
           },
           {
             "name": "image.transform.diffusion",
+            "description": " - SAMPLER_DPMSOLVERPP_2S_ANCESTRAL: Deprecated - use the official value above\n - SAMPLER_DPMSOLVERPP_SDE: Deprecated - use the official value above\n - SAMPLER_DPMSOLVERPP_2M: Deprecated - use the official value above",
             "in": "query",
             "required": false,
             "type": "string",
@@ -404,6 +522,9 @@
               "SAMPLER_K_DPM_2",
               "SAMPLER_K_DPM_2_ANCESTRAL",
               "SAMPLER_K_LMS",
+              "SAMPLER_K_DPMPP_2S_ANCESTRAL",
+              "SAMPLER_K_DPMPP_2M",
+              "SAMPLER_K_DPMPP_SDE",
               "SAMPLER_DPMSOLVERPP_1ORDER",
               "SAMPLER_DPMSOLVERPP_2ORDER",
               "SAMPLER_DPMSOLVERPP_3ORDER",
@@ -426,6 +547,38 @@
               "UPSCALER_ESRGAN"
             ],
             "default": "UPSCALER_RGB"
+          },
+          {
+            "name": "image.maskedAreaInit",
+            "description": "defaults to MASKED_AREA_INIT_ZERO",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "MASKED_AREA_INIT_ZERO",
+              "MASKED_AREA_INIT_RANDOM",
+              "MASKED_AREA_INIT_ORIGINAL"
+            ],
+            "default": "MASKED_AREA_INIT_ZERO"
+          },
+          {
+            "name": "image.weightMethod",
+            "description": "defaults to TEXT_ENCODER",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "enum": [
+              "TEXT_ENCODER",
+              "CROSS_ATTENTION"
+            ],
+            "default": "TEXT_ENCODER"
+          },
+          {
+            "name": "image.quantize",
+            "description": "defaults to true",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
           },
           {
             "name": "image.hires.enable",
@@ -764,23 +917,51 @@
           "type": "array",
           "items": {
             "$ref": "#/definitions/Answer"
-          }
+          },
+          "description": "Any completed Answers that have not been returned by a previous call to AsyncResult."
         },
         "complete": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Is this AsyncGenerate request complete? \n(Once true, any further requests will give an error)."
+        },
+        "status": {
+          "$ref": "#/definitions/AsyncStatus",
+          "description": "Final status. Only set when complete == True."
         }
-      }
+      },
+      "description": "A potentially partial answer to an AsyncGenerate request, returned by AsyncResult."
+    },
+    "AsyncCancelAnswer": {
+      "type": "object"
     },
     "AsyncHandle": {
       "type": "object",
       "properties": {
         "requestId": {
-          "type": "string"
+          "type": "string",
+          "description": "The request_id for the original Request."
         },
         "asyncHandle": {
-          "type": "string"
+          "type": "string",
+          "description": "The opaque handle needed to refer to the same AsyncGenerate request."
         }
-      }
+      },
+      "description": "A handle to refer to a AsyncGenerate request."
+    },
+    "AsyncStatus": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "integer",
+          "format": "int32",
+          "title": "The status code, which should be an enum value of google.rpc.Code"
+        },
+        "message": {
+          "type": "string",
+          "title": "Any message"
+        }
+      },
+      "description": "The status of an async job. \nMirrors google.rpc.Status but avoids needing to include that file in the repo."
     },
     "AttributeType": {
       "type": "string",
@@ -940,6 +1121,9 @@
         "SAMPLER_K_DPM_2",
         "SAMPLER_K_DPM_2_ANCESTRAL",
         "SAMPLER_K_LMS",
+        "SAMPLER_K_DPMPP_2S_ANCESTRAL",
+        "SAMPLER_K_DPMPP_2M",
+        "SAMPLER_K_DPMPP_SDE",
         "SAMPLER_DPMSOLVERPP_1ORDER",
         "SAMPLER_DPMSOLVERPP_2ORDER",
         "SAMPLER_DPMSOLVERPP_3ORDER",
@@ -950,7 +1134,7 @@
         "SAMPLER_DPMSOLVERPP_2M"
       ],
       "default": "SAMPLER_DDIM",
-      "description": "DiffusionSampler identifies which sampler to use for Diffusion, and represents\nthe internal set of supported samplers."
+      "description": "DiffusionSampler identifies which sampler to use for Diffusion, and represents\nthe internal set of supported samplers.\n\n - SAMPLER_DPMSOLVERPP_2S_ANCESTRAL: Deprecated - use the official value above\n - SAMPLER_DPMSOLVERPP_SDE: Deprecated - use the official value above\n - SAMPLER_DPMSOLVERPP_2M: Deprecated - use the official value above"
     },
     "Dtype": {
       "type": "string",
@@ -1365,6 +1549,18 @@
             "$ref": "#/definitions/StepParameter"
           }
         },
+        "maskedAreaInit": {
+          "$ref": "#/definitions/MaskedAreaInit",
+          "title": "defaults to MASKED_AREA_INIT_ZERO"
+        },
+        "weightMethod": {
+          "$ref": "#/definitions/WeightMethod",
+          "title": "defaults to TEXT_ENCODER"
+        },
+        "quantize": {
+          "type": "boolean",
+          "title": "defaults to true"
+        },
         "extension": {
           "$ref": "#/definitions/ExtendedParameters"
         },
@@ -1397,6 +1593,15 @@
         "LORA_TEXT_ENCODER"
       ],
       "default": "LORA_UNET"
+    },
+    "MaskedAreaInit": {
+      "type": "string",
+      "enum": [
+        "MASKED_AREA_INIT_ZERO",
+        "MASKED_AREA_INIT_RANDOM",
+        "MASKED_AREA_INIT_ORIGINAL"
+      ],
+      "default": "MASKED_AREA_INIT_ZERO"
     },
     "Model": {
       "type": "object",
@@ -1431,9 +1636,6 @@
         "MODEL_ARCHITECTURE_LDM"
       ],
       "default": "MODEL_ARCHITECTURE_NONE"
-    },
-    "Nothing": {
-      "type": "object"
     },
     "OnStatus": {
       "type": "object",
@@ -1558,6 +1760,16 @@
         "cfgScale": {
           "type": "number",
           "format": "float"
+        },
+        "initNoiseScale": {
+          "type": "number",
+          "format": "float",
+          "title": "defaults to 0.99"
+        },
+        "stepNoiseScale": {
+          "type": "number",
+          "format": "float",
+          "title": "defaults to 0.99"
         },
         "churn": {
           "$ref": "#/definitions/ChurnSettings"
@@ -1742,6 +1954,14 @@
       ],
       "default": "UPSCALER_RGB",
       "description": "Future, unimplemented."
+    },
+    "WeightMethod": {
+      "type": "string",
+      "enum": [
+        "TEXT_ENCODER",
+        "CROSS_ATTENTION"
+      ],
+      "default": "TEXT_ENCODER"
     }
   }
 }

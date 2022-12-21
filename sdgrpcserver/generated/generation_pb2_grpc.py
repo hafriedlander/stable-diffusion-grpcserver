@@ -40,7 +40,7 @@ class GenerationServiceStub(object):
         self.AsyncCancel = channel.unary_unary(
                 '/gooseai.GenerationService/AsyncCancel',
                 request_serializer=generation__pb2.AsyncHandle.SerializeToString,
-                response_deserializer=generation__pb2.Nothing.FromString,
+                response_deserializer=generation__pb2.AsyncCancelAnswer.FromString,
                 )
 
 
@@ -63,19 +63,34 @@ class GenerationServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def AsyncGenerate(self, request, context):
-        """Missing associated documentation comment in .proto file."""
+        """AsyncGenerate starts an asynchronous generation
+
+        The passed Request is the same as to Generate. However this method
+        will return immediately, returning a handle that can be used to get
+        any results of the generation created so far or cancel it.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def AsyncResult(self, request, context):
-        """Missing associated documentation comment in .proto file."""
+        """AsyncResult gets and results so far for an asynchronous generation
+
+        You can call this multiple times. Each time you call it, you will get
+        any results that are ready that have not been returned before.
+        (Note that this "consumes" the ready results - they will not be returned again).
+
+        Any generated results will eventually (default: after 10 minutes) be discarded
+        if they are not taken by a call to this method.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def AsyncCancel(self, request, context):
-        """Missing associated documentation comment in .proto file."""
+        """AsyncCancel cancels a generation that is currently in progress
+        and discards any results that have not yet been returned by a call to AsyncResult.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -106,7 +121,7 @@ def add_GenerationServiceServicer_to_server(servicer, server):
             'AsyncCancel': grpc.unary_unary_rpc_method_handler(
                     servicer.AsyncCancel,
                     request_deserializer=generation__pb2.AsyncHandle.FromString,
-                    response_serializer=generation__pb2.Nothing.SerializeToString,
+                    response_serializer=generation__pb2.AsyncCancelAnswer.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -202,6 +217,6 @@ class GenerationService(object):
             metadata=None):
         return grpc.experimental.unary_unary(request, target, '/gooseai.GenerationService/AsyncCancel',
             generation__pb2.AsyncHandle.SerializeToString,
-            generation__pb2.Nothing.FromString,
+            generation__pb2.AsyncCancelAnswer.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

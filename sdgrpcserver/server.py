@@ -46,7 +46,7 @@ import engines_pb2_grpc
 import generation_pb2_grpc
 
 from sdgrpcserver.debug_recorder import DebugNullRecorder, DebugRecorder
-from sdgrpcserver.http.grpc_gateway import GrpcGatewayController
+from sdgrpcserver.http.grpc_gateway import GrpcGatewayRouter
 from sdgrpcserver.manager import BatchMode, EngineManager, EngineMode
 from sdgrpcserver.services.dashboard import DashboardServiceServicer
 from sdgrpcserver.services.engines import EnginesServiceServicer
@@ -266,7 +266,7 @@ class RoutingController(resource.Resource, CheckAuthHeaderMixin):
         self.details = ServerDetails()
         self.fileroot = fileroot
         self.files = static.File(fileroot) if fileroot else None
-        self.grpc_gateway = GrpcGatewayController()
+        self.grpc_gateway = GrpcGatewayRouter()
         self.wsgi = wsgiapp
 
         self.access_token = access_token

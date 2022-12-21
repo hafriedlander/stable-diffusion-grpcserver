@@ -1,8 +1,7 @@
 import json
 
-import grpc
-from google.protobuf import json_format as pb_json_format
 from twisted.web import resource
+from twisted.web.error import Error as WebError
 from twisted.web.resource import ErrorPage, NoResource
 from twisted.web.server import NOT_DONE_YET
 
@@ -21,34 +20,8 @@ class UnsupportedMediaTypeResource(ErrorPage):
         super().__init__(415, "Unsupported Media Type", message)
 
 
-GRPC_HTTP_CODES = {
-    grpc.StatusCode.OK: 200,
-    grpc.StatusCode.NOT_FOUND: 404,
-    grpc.StatusCode.UNIMPLEMENTED: 405,
-    grpc.StatusCode.INTERNAL: 500,
-}
-
-
-class GRPCGatewayContext:
-    def __init__(self, request):
-        self.request = request
-        self.code = 200
-        self.message = b""
-
-    def add_callback(self, callback):
-        self.request.notifyFinish().addErrback(lambda *_: callback())
-
-    def set_code(self, code):
-        self.code = GRPC_HTTP_CODES[code]
-        self.request.setResponseCode(self.code, self.message)
-
-    def set_details(self, message):
-        self.message = message.encode("utf-8") if isinstance(message, str) else message
-        self.request.setResponseCode(self.code, self.message)
-
-
 class JSONAPIController(resource.Resource):
-    def _render_common(self, request, handler, *args, **kwargs):
+    def _render_common(self, request, handler, input):
         if not handler:
             return NoResource().render(request)
 
@@ -56,7 +29,12 @@ class JSONAPIController(resource.Resource):
         if not accept_header or accept_header != "application/json":
             return NotAcceptableResource().render(request)
 
-        response = handler(request, *args, **kwargs)
+        try:
+            response = handler(request, input)
+        except WebError as e:
+            return ErrorPage(int(e.status), e.message, b"").render(request)
+        except BaseException:
+            return ErrorPage(500, b"Internal Error", b"").render(request)
 
         # Handle when a controller returns NOT_DONE_YET because it's
         # still working in the background
@@ -66,8 +44,6 @@ class JSONAPIController(resource.Resource):
         # Convert dict or object instances into json strings
         if isinstance(response, dict):
             response = json.dumps(response)
-        elif not isinstance(response, str | bytes):
-            response = pb_json_format.MessageToJson(response)
 
         # JSON is always encoded as utf-8
         if isinstance(response, str):
@@ -79,7 +55,7 @@ class JSONAPIController(resource.Resource):
 
     def render_GET(self, request):
         handler = getattr(self, "handle_GET", None)
-        return self._render_common(request, handler)
+        return self._render_common(request, handler, None)
 
     def render_POST(self, request):
         handler = getattr(self, "handle_POST", None)

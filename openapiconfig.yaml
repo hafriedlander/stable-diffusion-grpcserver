@@ -8,5 +8,7 @@ http:
       post: "/grpcgateway/generate"
     - selector: gooseai.GenerationService.AsyncGenerate
       post: "/grpcgateway/asyncGenerate"
-    - selector: gooseai.GenerationService.AsyncQueryResult
-      post: "/grpcgateway/asyncQueryResult"
+    - selector: gooseai.GenerationService.AsyncResult
+      post: "/grpcgateway/asyncResult"
+    - selector: gooseai.GenerationService.AsyncCancel
+      post: "/grpcgateway/asyncCancel"

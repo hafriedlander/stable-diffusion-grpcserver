@@ -1,6 +1,7 @@
 import json
 import random
 import threading
+import time
 import traceback
 import uuid
 from math import sqrt
@@ -41,15 +42,41 @@ debugCtr = 0
 
 
 class AsyncContext:
-    def __init__(self):
-        self.code = 200
-        self.message = b""
+    def __init__(self, deadline=None):
+        self.queue = Queue()
+        self.code = grpc.StatusCode.OK
+        self.message = ""
         self.cancel_callback: Callable | None = None
         self.thread: threading.Thread | None = None
+        self.deadline: float | None = None
+
+        if deadline:
+            self.deadline = time.monotonic() + deadline
+
+    # These are methods for the async handlers
 
     def cancel(self):
         if self.cancel_callback:
             self.cancel_callback()
+
+        self.code = grpc.StatusCode.CANCELLED
+        self.message = "Cancelled"
+
+    def set_deadline(self, deadline):
+        new_deadline = time.monotonic() + deadline
+
+        if self.deadline:
+            self.deadline = min(new_deadline, self.deadline)
+        else:
+            self.deadline = new_deadline
+
+    def clear_deadline(self):
+        self.deadline = None
+
+    def past_deadline(self):
+        return self.deadline and time.monotonic() > self.deadline
+
+    # These mirror methods from GRPC Context
 
     def add_callback(self, callback):
         self.cancel_callback = callback
@@ -59,6 +86,15 @@ class AsyncContext:
 
     def set_details(self, message):
         self.message = message
+
+    def abort(self, code, details):
+        if code == grpc.StatusCode.OK:
+            raise ValueError("Abort called with OK as status code")
+
+        self.set_code(code)
+        self.set_details(details)
+
+        raise grpc.RpcError()
 
 
 class ParameterExtractor:
@@ -382,8 +418,8 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
         self._ram_monitor = ram_monitor
 
         # For async support
-        self._handle_context: dict[str, AsyncContext] = {}
-        self._answer_queues: dict[str, Queue] = {}
+        self._async_contexts_lock = threading.Lock()
+        self._async_contexts: dict[str, AsyncContext] = {}
 
     def unimp(self, what):
         raise NotImplementedError(f"{what} not implemented")
@@ -466,10 +502,10 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                         "lora",
                         "lora_text",
                     ]:
-                        if field in logargs:
+                        if field in logargs and logargs[field]:
                             value = logargs[field]
                             logargs[field] = (
-                                f"len{len(value)}" if isinstance(value, list) else "yes"
+                                f"[{len(value)}]" if isinstance(value, list) else "yes"
                             )
 
                     print()
@@ -538,51 +574,78 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                 context.set_code(grpc.StatusCode.INTERNAL)
                 context.set_details("Something went wrong")
 
+    def _try_deleting_context(self, key):
+        """
+        Since multiple threads might be deleting contexts, we need to wrap
+        it in a try block to avoid failing if we attempt to double-delete.
+        """
+        try:
+            del self._async_contexts[key]
+        except KeyError:
+            pass
+
+    def _check_deadlines(self):
+        deadline_expired = [
+            key for key, value in self._async_contexts.items() if value.past_deadline()
+        ]
+
+        for key in deadline_expired:
+            self._try_deleting_context(key)
+
     def AsyncGenerate(self, request: generation_pb2.Request, context):
-        answer_queue = Queue()
-        check_queue = None
+        self._check_deadlines()
+
+        async_context = AsyncContext()
+        check_context = None
         handle = None
 
         # Find an unusued handle.
-        while check_queue is not answer_queue:
+        while check_context is not async_context:
             handle = str(uuid.uuid4())
-            print(handle)
             # Done a slightly weird way to ensure dict access is atomic
-            check_queue = self._answer_queues.setdefault(handle, answer_queue)
-
-        print("Found", handle)
+            check_context = self._async_contexts.setdefault(handle, async_context)
 
         # Start the request in a thread.
         # TODO: Ideally this would be in a queue too rather than spawning threads
 
-        async_context = AsyncContext()
-
         def thread_function():
-            for answer in self.Generate(request, async_context):
-                answer_queue.put(answer)
-            answer_queue.put("DONE")
+            try:
+                for answer in self.Generate(request, async_context):
+                    async_context.queue.put(answer)
+            except grpc.RpcError:
+                # RpcError will have set code and details already in context#abort
+                pass
+            finally:
+                async_context.queue.put("DONE")
+                # Remove queue after 10 minutes, to avoid queues that never get
+                # emptied by clients from consuming memory
+                async_context.set_deadline(60 * 10)
 
         async_context.thread = threading.Thread(target=thread_function)
         async_context.thread.start()
 
-        assert handle
-        self._handle_context[handle] = async_context
-
-        print("Returning")
         return generation_pb2.AsyncHandle(
             request_id=request.request_id, async_handle=handle
         )
 
     def AsyncResult(self, request, context):
-        queue = self._answer_queues[request.async_handle]
+        self._check_deadlines()
+
+        async_context = self._async_contexts.get(request.async_handle)
+
+        if not async_context:
+            context.abort(grpc.StatusCode.NOT_FOUND, "No such async handle")
+        assert async_context  # context.abort will raise an exception
 
         async_answer = generation_pb2.AsyncAnswer(complete=False)
 
         try:
             while True:
-                answer = queue.get(timeout=2)
+                answer = async_context.queue.get(timeout=2)
                 if answer == "DONE":
                     async_answer.complete = True
+                    async_answer.status.code = async_context.code
+                    async_answer.status.message = async_context.message
                     break
                 else:
                     async_answer.answer.append(answer)
@@ -590,16 +653,21 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
             pass
 
         if async_answer.complete:
-            del self._handle_context[request.async_handle]
-            del self._answer_queues[request.async_handle]
+            self._try_deleting_context(request.async_handle)
 
         return async_answer
 
     def AsyncCancel(self, request, context):
-        context = self._handle_context[request.async_handle]
-        context.cancel()
+        self._check_deadlines()
 
-        del self._handle_context[request.async_handle]
-        del self._answer_queues[request.async_handle]
+        async_context = self._async_contexts.get(request.async_handle)
 
-        return generation_pb2.Nothing()
+        if not async_context:
+            context.abort(grpc.StatusCode.NOT_FOUND, "No such async handle")
+        assert async_context  # context.abort will raise an exception
+
+        async_context.cancel()
+
+        self._try_deleting_context(request.async_handle)
+
+        return generation_pb2.AsyncCancelAnswer()

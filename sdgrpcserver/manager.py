@@ -1299,10 +1299,11 @@ class EngineManager(object):
                 print(f"{'Existing' if existing else 'New'} pipeline {id} activated")
                 self._ram_monitor.print()
 
-        # Do the work
-        yield slot.pipeline
-
-        # Release device handle
-        self._device_queue.put(slot)
+        try:
+            # Do the work
+            yield slot.pipeline
+        finally:
+            # Release device handle
+            self._device_queue.put(slot)
 
         # All done
