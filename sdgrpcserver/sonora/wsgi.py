@@ -1,12 +1,11 @@
 import base64
-from collections import namedtuple
 import time
+from collections import namedtuple
 from urllib.parse import quote
 
 import grpc
 
 from sdgrpcserver.sonora import protocol
-
 
 _HandlerCallDetails = namedtuple(
     "_HandlerCallDetails", ("method", "invocation_metadata")
@@ -132,8 +131,12 @@ class grpcWSGI(grpc.Server):
     def _do_streaming_response(
         self, rpc_method, start_response, wrap_message, context, headers, resp
     ):
+        first_message = None
+
         try:
             first_message = next(resp)
+        except StopIteration:
+            pass
         except grpc.RpcError:
             pass
 
@@ -142,15 +145,18 @@ class grpcWSGI(grpc.Server):
 
         start_response("200 OK", headers)
 
-        yield wrap_message(False, False, rpc_method.response_serializer(first_message))
+        if first_message:
+            yield wrap_message(
+                False, False, rpc_method.response_serializer(first_message)
+            )
 
-        try:
-            for message in resp:
-                yield wrap_message(
-                    False, False, rpc_method.response_serializer(message)
-                )
-        except grpc.RpcError:
-            pass
+            try:
+                for message in resp:
+                    yield wrap_message(
+                        False, False, rpc_method.response_serializer(message)
+                    )
+            except grpc.RpcError:
+                pass
 
         trailers = [("grpc-status", str(context.code.value[0]))]
 
@@ -361,7 +367,7 @@ class ServicerContext(grpc.ServicerContext):
 
     def add_callback(self, callback):
         print("Warning - cancellation not currrently supported over GRPC-WEB")
-        #raise NotImplementedError()
+        # raise NotImplementedError()
 
     def cancel(self):
         raise NotImplementedError()

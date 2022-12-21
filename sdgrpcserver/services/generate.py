@@ -19,6 +19,7 @@ from sdgrpcserver import constants, images
 from sdgrpcserver.debug_recorder import DebugNullRecorder
 from sdgrpcserver.manager import EngineNotFoundError
 from sdgrpcserver.protobuf_tensors import deserialize_tensor
+from sdgrpcserver.services.exception_to_grpc import exception_to_grpc
 from sdgrpcserver.utils import artifact_to_image, image_to_artifact
 
 
@@ -457,122 +458,112 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
             batchseeds, seeds = seeds[:batch], seeds[batch:]
             yield batchseeds
 
+    @exception_to_grpc(
+        {
+            EngineNotFoundError: grpc.StatusCode.NOT_FOUND,
+            NotImplementedError: grpc.StatusCode.UNIMPLEMENTED,
+        }
+    )
     def Generate(self, request, context):
         with self._debug_recorder.record(request.request_id) as recorder:
             recorder.store("generate request", request)
 
-            try:
-                # Assume that "None" actually means "Image" (stability-sdk/client.py doesn't set it)
-                if (
-                    request.requested_type != generation_pb2.ARTIFACT_NONE
-                    and request.requested_type != generation_pb2.ARTIFACT_IMAGE
-                ):
-                    self.unimp("Generation of anything except images")
+            # Assume that "None" actually means "Image" (stability-sdk/client.py doesn't set it)
+            if (
+                request.requested_type != generation_pb2.ARTIFACT_NONE
+                and request.requested_type != generation_pb2.ARTIFACT_IMAGE
+            ):
+                self.unimp("Generation of anything except images")
 
-                extractor = ParameterExtractor(self._manager, request)
-                kwargs = {}
+            extractor = ParameterExtractor(self._manager, request)
+            kwargs = {}
 
-                for field in extractor.fields():
-                    val = extractor.get(field)
-                    if val is not None:
-                        kwargs[field] = val
+            for field in extractor.fields():
+                val = extractor.get(field)
+                if val is not None:
+                    kwargs[field] = val
 
-                stop_event = threading.Event()
-                context.add_callback(lambda: stop_event.set())
+            stop_event = threading.Event()
+            context.add_callback(lambda: stop_event.set())
 
-                ctr = 0
-                samples = kwargs.get("num_images_per_prompt", 1)
-                seeds = kwargs.get("seed", None)
-                batchmax = self._manager.batchMode.batchmax(
-                    kwargs["width"] * kwargs["height"]
-                )
+            ctr = 0
+            samples = kwargs.get("num_images_per_prompt", 1)
+            seeds = kwargs.get("seed", None)
+            batchmax = self._manager.batchMode.batchmax(
+                kwargs["width"] * kwargs["height"]
+            )
 
-                for seeds in self.batched_seeds(samples, seeds, batchmax):
-                    batchargs = {
-                        **kwargs,
-                        "seed": seeds,
-                        "num_images_per_prompt": len(seeds),
-                    }
+            for seeds in self.batched_seeds(samples, seeds, batchmax):
+                batchargs = {
+                    **kwargs,
+                    "seed": seeds,
+                    "num_images_per_prompt": len(seeds),
+                }
 
-                    logargs = {**batchargs}
-                    for field in [
-                        "init_image",
-                        "mask_image",
-                        "outmask_image",
-                        "lora",
-                        "lora_text",
-                    ]:
-                        if field in logargs and logargs[field]:
-                            value = logargs[field]
-                            logargs[field] = (
-                                f"[{len(value)}]" if isinstance(value, list) else "yes"
-                            )
-
-                    print()
-                    print(f"Generating {repr(logargs)}")
-
-                    recorder.store("pipe.generate calls", kwargs)
-
-                    with self._manager.with_engine(request.engine_id) as engine:
-                        results = engine.generate(**batchargs, stop_event=stop_event)
-
-                    meta = pb_json_format.MessageToDict(request)
-                    for prompt in meta["prompt"]:
-                        if "artifact" in prompt:
-                            if "binary" in prompt["artifact"]:
-                                del prompt["artifact"]["binary"]
-                            if "lora" in prompt["artifact"]:
-                                del prompt["artifact"]["lora"]["tensors"]
-
-                    for i, (result_image, nsfw) in enumerate(
-                        zip(results[0], results[1])
-                    ):
-                        answer = generation_pb2.Answer()
-                        answer.request_id = request.request_id
-                        answer.answer_id = f"{request.request_id}-{ctr}"
-
-                        img_seed = seeds[i] if i < len(seeds) else 0
-
-                        if self._supress_metadata:
-                            artifact = image_to_artifact(result_image)
-                        else:
-                            meta["image"]["samples"] = 1
-                            meta["image"]["seed"] = [img_seed]
-                            artifact = image_to_artifact(
-                                result_image,
-                                meta={"generation_parameters": json.dumps(meta)},
-                            )
-
-                        artifact.finish_reason = (
-                            generation_pb2.FILTER if nsfw else generation_pb2.NULL
+                logargs = {**batchargs}
+                for field in [
+                    "init_image",
+                    "mask_image",
+                    "outmask_image",
+                    "lora",
+                    "lora_text",
+                ]:
+                    if field in logargs and logargs[field]:
+                        value = logargs[field]
+                        logargs[field] = (
+                            f"[{len(value)}]" if isinstance(value, list) else "yes"
                         )
-                        artifact.index = ctr
-                        artifact.seed = img_seed
-                        answer.artifacts.append(artifact)
 
-                        recorder.store("pipe.generate result", artifact)
+                print()
+                print(f"Generating {repr(logargs)}")
 
-                        yield answer
-                        ctr += 1
+                recorder.store("pipe.generate calls", kwargs)
 
-                    if stop_event.is_set():
-                        break
+                with self._manager.with_engine(request.engine_id) as engine:
+                    results = engine.generate(**batchargs, stop_event=stop_event)
 
-                if self._ram_monitor:
-                    self._ram_monitor.print()
+                meta = pb_json_format.MessageToDict(request)
+                for prompt in meta["prompt"]:
+                    if "artifact" in prompt:
+                        if "binary" in prompt["artifact"]:
+                            del prompt["artifact"]["binary"]
+                        if "lora" in prompt["artifact"]:
+                            del prompt["artifact"]["lora"]["tensors"]
 
-            except EngineNotFoundError as e:
-                context.set_code(grpc.StatusCode.NOT_FOUND)
-                context.set_details(str(e))
-                print(f"Engine not found: {e}")
-            except NotImplementedError as e:
-                context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-                context.set_details(str(e))
-                print(f"Unsupported request parameters: {e}")
-            except Exception as e:
-                traceback.print_exc()
-                context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details("Something went wrong")
+                for i, (result_image, nsfw) in enumerate(zip(results[0], results[1])):
+                    answer = generation_pb2.Answer()
+                    answer.request_id = request.request_id
+                    answer.answer_id = f"{request.request_id}-{ctr}"
+
+                    img_seed = seeds[i] if i < len(seeds) else 0
+
+                    if self._supress_metadata:
+                        artifact = image_to_artifact(result_image)
+                    else:
+                        meta["image"]["samples"] = 1
+                        meta["image"]["seed"] = [img_seed]
+                        artifact = image_to_artifact(
+                            result_image,
+                            meta={"generation_parameters": json.dumps(meta)},
+                        )
+
+                    artifact.finish_reason = (
+                        generation_pb2.FILTER if nsfw else generation_pb2.NULL
+                    )
+                    artifact.index = ctr
+                    artifact.seed = img_seed
+                    answer.artifacts.append(artifact)
+
+                    recorder.store("pipe.generate result", artifact)
+
+                    yield answer
+                    ctr += 1
+
+                if stop_event.is_set():
+                    break
+
+            if self._ram_monitor:
+                self._ram_monitor.print()
 
     def _try_deleting_context(self, key):
         """
@@ -592,6 +583,7 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
         for key in deadline_expired:
             self._try_deleting_context(key)
 
+    @exception_to_grpc
     def AsyncGenerate(self, request: generation_pb2.Request, context):
         self._check_deadlines()
 
@@ -628,6 +620,7 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
             request_id=request.request_id, async_handle=handle
         )
 
+    @exception_to_grpc
     def AsyncResult(self, request, context):
         self._check_deadlines()
 
@@ -657,6 +650,7 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
 
         return async_answer
 
+    @exception_to_grpc
     def AsyncCancel(self, request, context):
         self._check_deadlines()
 

@@ -1,10 +1,15 @@
-import dashboard_pb2, dashboard_pb2_grpc
+import dashboard_pb2
+import dashboard_pb2_grpc
+
+from sdgrpcserver.services.exception_to_grpc import exception_to_grpc
+
 
 class DashboardServiceServicer(dashboard_pb2_grpc.DashboardServiceServicer):
     def __init__(self):
         pass
 
+    @exception_to_grpc
     def GetMe(self, request, context):
         user = dashboard_pb2.User()
-        user.id="0000-0000-0000-0001"
+        user.id = "0000-0000-0000-0001"
         return user

@@ -241,7 +241,9 @@ class StabilityInference:
         self.verbose = verbose
         self.engine = engine
 
-        self.grpc_args = {"wait_for_ready": wait_for_ready}
+        self.grpc_args = {}
+        if proto == "grpc":
+            self.grpc_args["wait_for_ready"] = wait_for_ready
 
         if verbose:
             logger.info(f"Opening channel to {host}")

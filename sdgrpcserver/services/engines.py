@@ -5,12 +5,14 @@ import engines_pb2_grpc
 import generation_pb2
 
 from sdgrpcserver.pipeline.samplers import sampler_properties
+from sdgrpcserver.services.exception_to_grpc import exception_to_grpc
 
 
 class EnginesServiceServicer(engines_pb2_grpc.EnginesServiceServicer):
     def __init__(self, manager):
         self._manager = manager
 
+    @exception_to_grpc
     def ListEngines(self, request, context):
         engines = engines_pb2.Engines()
 
