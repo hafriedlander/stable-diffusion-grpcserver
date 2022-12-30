@@ -369,7 +369,6 @@ class PipelineWrapper(object):
         strength: float = None,
         # Lora
         lora=None,
-        lora_text=None,
         # Hires control
         hires_fix=None,
         hires_oos_fraction=None,
@@ -432,7 +431,6 @@ class PipelineWrapper(object):
             outmask_image=outmask_image,
             strength=strength,
             lora=lora,
-            lora_text=lora_text,
             hires_fix=hires_fix,
             hires_oos_fraction=hires_oos_fraction,
             tiling=tiling,

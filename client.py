@@ -24,6 +24,7 @@ import grpc
 import torch
 from google.protobuf.json_format import MessageToJson
 from PIL import Image, ImageOps
+from safetensors.torch import safe_open
 
 try:
     from dotenv import load_dotenv
@@ -43,6 +44,7 @@ import generation_pb2 as generation
 import generation_pb2_grpc as generation_grpc
 import tensors_pb2 as tensors
 
+from sdgrpcserver.protobuf_safetensors import serialize_safetensor
 from sdgrpcserver.protobuf_tensors import serialize_tensor
 
 logger = logging.getLogger(__name__)
@@ -153,19 +155,25 @@ def image_to_prompt(
     )
 
 
-def lora_to_prompt(path, weight, target=generation.LORA_UNET):
+def lora_to_prompt(path, weights):
+    safetensors = safe_open(path, framework="pt", device="cpu")
 
-    lora_tensors: list[tensors.Tensor] = []
+    lora = generation.Lora(lora=serialize_safetensor(safetensors))
 
-    lora = torch.load(path)
-    for param in lora:
-        lora_tensors += [serialize_tensor(param, tensors.AT_PARAMETER)]
+    if weights:
+        lora.weights.append(
+            generation.LoraWeight(model_name="unet", weight=weights.pop(0))
+        )
+
+    if weights:
+        lora.weights.append(
+            generation.LoraWeight(model_name="text_encoder", weight=weights.pop(0))
+        )
 
     return generation.Prompt(
-        parameters=generation.PromptParameters(weight=weight),
         artifact=generation.Artifact(
             type=generation.ARTIFACT_LORA,
-            lora=generation.Lora(target=target, tensors=lora_tensors),
+            lora=lora,
         ),
     )
 
@@ -248,7 +256,7 @@ class StabilityInference:
         if verbose:
             logger.info(f"Opening channel to {host}")
 
-        maxMsgLength = 20 * 1024 * 1024  # 20 MB
+        maxMsgLength = 30 * 1024 * 1024  # 30 MB
 
         channel_options = [
             ("grpc.max_message_length", maxMsgLength),
@@ -326,8 +334,7 @@ class StabilityInference:
         hires_fix: bool | None = None,
         hires_oos_fraction: float | None = None,
         tiling: bool = False,
-        lora: list[tuple[str, float]] | None = None,
-        lora_text: list[tuple[str, float]] | None = None,
+        lora: list[tuple[str, list[float]]] | None = None,
         as_async=False,
     ) -> Generator[generation.Answer, None, None]:
         """
@@ -434,12 +441,8 @@ class StabilityInference:
                 prompts += [image_to_prompt(init_image, mask=True, use_alpha=True)]
 
         if lora:
-            for path, weight in lora:
-                prompts += [lora_to_prompt(path, weight, generation.LORA_UNET)]
-
-        if lora_text:
-            for path, weight in lora_text:
-                prompts += [lora_to_prompt(path, weight, generation.LORA_TEXT_ENCODER)]
+            for path, weights in lora:
+                prompts += [lora_to_prompt(path, weights)]
 
         if guidance_prompt:
             if isinstance(guidance_prompt, str):
@@ -780,12 +783,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lora",
         action="append",
-        help="Add a unet Lora. Either a path, or path:weight (i.e. ./lora_weight.pt:0.5)",
-    )
-    parser.add_argument(
-        "--lora_text",
-        action="append",
-        help="Add a text encoder Lora. Either a path, or path:weight (i.e. ./lora_weight.text_encoder.pt:0.5)",
+        help="Add a (safetensor format) Lora. Either a path, or path:unet_weight or path:unet_weight:text_encode_weight (i.e. ./lora_weight.safetensors:0.5:0.5)",
     )
     parser.add_argument(
         "--list_engines",
@@ -830,16 +828,9 @@ if __name__ == "__main__":
     lora = []
     if args.lora:
         for path in args.lora:
-            path, *weight = path.rsplit(":", 1)
-            weight = float(weight[0]) if weight else 1.0
-            lora.append((path, weight))
-
-    lora_text = []
-    if args.lora_text:
-        for path in args.lora_text:
-            path, *weight = path.rsplit(":", 1)
-            weight = float(weight[0]) if weight else 1.0
-            lora_text.append((path, weight))
+            path, *weights = path.split(":")
+            weights = [float(weight) for weight in weights]
+            lora.append((path, weights))
 
     request = {
         "negative_prompt": args.negative_prompt,
@@ -868,7 +859,6 @@ if __name__ == "__main__":
         "hires_oos_fraction": args.hires_oos_fraction,
         "tiling": args.tiling,
         "lora": lora,
-        "lora_text": lora_text,
         "as_async": args.as_async,
     }
 

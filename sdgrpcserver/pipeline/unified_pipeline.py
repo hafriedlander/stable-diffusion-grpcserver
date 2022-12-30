@@ -52,7 +52,13 @@ from sdgrpcserver.pipeline.common_scheduler import (
 )
 from sdgrpcserver.pipeline.kschedulers.scheduling_utils import KSchedulerMixin
 from sdgrpcserver.pipeline.latent_debugger import LatentDebugger
-from sdgrpcserver.pipeline.lora import addorreplace_lora, remove_lora, tune_lora_scale
+from sdgrpcserver.pipeline.lora import (
+    apply_learned_embed_in_clip,
+    monkeypatch_or_replace_safeloras,
+    monkeypatch_remove_lora,
+    parse_safeloras_embeds,
+    tune_lora_scale,
+)
 from sdgrpcserver.pipeline.models.structured_cross_attention import (
     StructuredCrossAttention,
 )
@@ -1309,8 +1315,7 @@ class UnifiedPipeline(DiffusionPipeline):
         approx_cutouts: Optional[int] = None,
         no_cutouts: CLIP_NO_CUTOUTS_TYPE = False,
         scheduler: DiffusersSchedulerProtocol | Callable | None = None,
-        lora: list[tuple[list[torch.Tensor], float]] | None = None,
-        lora_text: list[tuple[list[torch.Tensor], float]] | None = None,
+        lora=None,
         hires_fix=None,
         hires_oos_fraction=None,
         tiling=False,
@@ -1391,20 +1396,23 @@ class UnifiedPipeline(DiffusionPipeline):
         self.set_tiling_mode(tiling)
 
         if lora:
-            addorreplace_lora(self.unet, [*lora[0][0]])
-            tune_lora_scale(self.unet, lora[0][1])
-        else:
-            remove_lora(self.unet)
+            # TODO: Handle more than one lora
+            lora = lora[0]
+            safeloras, weights = lora
 
-        if lora_text:
-            addorreplace_lora(
-                self.text_encoder,
-                [*lora_text[0][0]],
-                target_replace_module=["CLIPAttention"],
-            )
-            tune_lora_scale(self.text_encoder, lora_text[0][1])
+            monkeypatch_or_replace_safeloras(self, safeloras)
+
+            embeds = parse_safeloras_embeds(safeloras)
+            if embeds:
+                apply_learned_embed_in_clip(
+                    embeds, self.text_encoder, self.tokenizer, idempotent=True
+                )
+
+            for key, weight in weights.items():
+                tune_lora_scale(getattr(self, key), weight)
         else:
-            remove_lora(self.text_encoder, target_replace_module=["CLIPAttention"])
+            monkeypatch_remove_lora(self.unet)
+            monkeypatch_remove_lora(self.text_encoder)
 
         latent_debugger = LatentDebugger(
             vae=self.vae,

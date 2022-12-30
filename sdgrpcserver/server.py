@@ -115,7 +115,7 @@ class GrpcServer(object):
         if args.access_token:
             interceptors.append(GrpcServerTokenChecker(args.access_token))
 
-        maxMsgLength = 20 * 1024 * 1024  # 20 MB
+        maxMsgLength = 30 * 1024 * 1024  # 30 MB
 
         self._server = grpc.server(
             futures.ThreadPoolExecutor(max_workers=4),

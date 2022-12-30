@@ -1575,24 +1575,28 @@
     "Lora": {
       "type": "object",
       "properties": {
-        "target": {
-          "$ref": "#/definitions/LoraTarget"
+        "lora": {
+          "$ref": "#/definitions/Safetensors"
         },
-        "tensors": {
+        "weights": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/Tensor"
+            "$ref": "#/definitions/LoraWeight"
           }
         }
       }
     },
-    "LoraTarget": {
-      "type": "string",
-      "enum": [
-        "LORA_UNET",
-        "LORA_TEXT_ENCODER"
-      ],
-      "default": "LORA_UNET"
+    "LoraWeight": {
+      "type": "object",
+      "properties": {
+        "modelName": {
+          "type": "string"
+        },
+        "weight": {
+          "type": "number",
+          "format": "float"
+        }
+      }
     },
     "MaskedAreaInit": {
       "type": "string",
@@ -1729,6 +1733,45 @@
         "RESCALE_FIT"
       ],
       "default": "RESCALE_STRICT"
+    },
+    "Safetensors": {
+      "type": "object",
+      "properties": {
+        "metadata": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SafetensorsMeta"
+          }
+        },
+        "tensors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SafetensorsTensor"
+          }
+        }
+      }
+    },
+    "SafetensorsMeta": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      }
+    },
+    "SafetensorsTensor": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "tensor": {
+          "$ref": "#/definitions/Tensor"
+        }
+      }
     },
     "SamplerNoiseType": {
       "type": "string",

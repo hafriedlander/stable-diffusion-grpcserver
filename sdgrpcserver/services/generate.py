@@ -18,6 +18,7 @@ from google.protobuf import json_format as pb_json_format
 from sdgrpcserver import constants, images
 from sdgrpcserver.debug_recorder import DebugNullRecorder
 from sdgrpcserver.manager import EngineNotFoundError
+from sdgrpcserver.protobuf_safetensors import deserialize_safetensors
 from sdgrpcserver.protobuf_tensors import deserialize_tensor
 from sdgrpcserver.services.exception_to_grpc import exception_to_grpc
 from sdgrpcserver.utils import artifact_to_image, image_to_artifact
@@ -351,30 +352,18 @@ class ParameterExtractor:
                     post_adjustments if post_adjustments else DEFAULT_POST_ADJUSTMENTS,
                 )
 
-    def _lora_for_type(self, ltype):
-        lora = []
+    def lora(self):
+        loras = []
 
         for prompt in self._prompt_of_artifact_type(generation_pb2.ARTIFACT_LORA):
-            weight = 1.0
-            if prompt.HasField("parameters") and prompt.parameters.HasField("weight"):
-                weight = prompt.parameters.weight
+            safetensors = deserialize_safetensors(prompt.artifact.lora.lora)
+            weights = {}
+            for weight in prompt.artifact.lora.weights:
+                weights[weight.model_name] = weight.weight
 
-            if prompt.artifact.lora.target == ltype:
-                params = []
+            loras.append((safetensors, weights))
 
-                for t in prompt.artifact.lora.tensors:
-                    tensor, attr_type = deserialize_tensor(t)
-                    params.append(torch.nn.Parameter(tensor, False))
-
-                lora.append((params, weight))
-
-        return lora
-
-    def lora(self):
-        return self._lora_for_type(generation_pb2.LORA_UNET)
-
-    def lora_text(self):
-        return self._lora_for_type(generation_pb2.LORA_TEXT_ENCODER)
+        return loras if loras else None
 
     def strength(self):
         return self._image_stepparameter("schedule.start")
@@ -506,9 +495,8 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                     "mask_image",
                     "outmask_image",
                     "lora",
-                    "lora_text",
                 ]:
-                    if field in logargs and logargs[field]:
+                    if field in logargs:
                         value = logargs[field]
                         logargs[field] = (
                             f"[{len(value)}]" if isinstance(value, list) else "yes"
@@ -528,7 +516,7 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                         if "binary" in prompt["artifact"]:
                             del prompt["artifact"]["binary"]
                         if "lora" in prompt["artifact"]:
-                            del prompt["artifact"]["lora"]["tensors"]
+                            del prompt["artifact"]["lora"]
 
                 for i, (result_image, nsfw) in enumerate(zip(results[0], results[1])):
                     answer = generation_pb2.Answer()

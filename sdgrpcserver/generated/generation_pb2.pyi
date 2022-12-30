@@ -132,21 +132,6 @@ RESCALE_CROP: RescaleMode.ValueType  # 2
 RESCALE_FIT: RescaleMode.ValueType  # 3
 global___RescaleMode = RescaleMode
 
-class _LoraTarget:
-    ValueType = typing.NewType("ValueType", builtins.int)
-    V: typing_extensions.TypeAlias = ValueType
-
-class _LoraTargetEnumTypeWrapper(google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[_LoraTarget.ValueType], builtins.type):
-    DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
-    LORA_UNET: _LoraTarget.ValueType  # 0
-    LORA_TEXT_ENCODER: _LoraTarget.ValueType  # 1
-
-class LoraTarget(_LoraTarget, metaclass=_LoraTargetEnumTypeWrapper): ...
-
-LORA_UNET: LoraTarget.ValueType  # 0
-LORA_TEXT_ENCODER: LoraTarget.ValueType  # 1
-global___LoraTarget = LoraTarget
-
 class _MaskedAreaInit:
     ValueType = typing.NewType("ValueType", builtins.int)
     V: typing_extensions.TypeAlias = ValueType
@@ -655,21 +640,99 @@ class ImageAdjustment(google.protobuf.message.Message):
 global___ImageAdjustment = ImageAdjustment
 
 @typing_extensions.final
-class Lora(google.protobuf.message.Message):
+class SafetensorsMeta(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
-    TARGET_FIELD_NUMBER: builtins.int
-    TENSORS_FIELD_NUMBER: builtins.int
-    target: global___LoraTarget.ValueType
-    @property
-    def tensors(self) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[tensors_pb2.Tensor]: ...
+    KEY_FIELD_NUMBER: builtins.int
+    VALUE_FIELD_NUMBER: builtins.int
+    key: builtins.str
+    value: builtins.str
     def __init__(
         self,
         *,
-        target: global___LoraTarget.ValueType = ...,
-        tensors: collections.abc.Iterable[tensors_pb2.Tensor] | None = ...,
+        key: builtins.str = ...,
+        value: builtins.str = ...,
     ) -> None: ...
-    def ClearField(self, field_name: typing_extensions.Literal["target", b"target", "tensors", b"tensors"]) -> None: ...
+    def ClearField(self, field_name: typing_extensions.Literal["key", b"key", "value", b"value"]) -> None: ...
+
+global___SafetensorsMeta = SafetensorsMeta
+
+@typing_extensions.final
+class SafetensorsTensor(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    KEY_FIELD_NUMBER: builtins.int
+    TENSOR_FIELD_NUMBER: builtins.int
+    key: builtins.str
+    @property
+    def tensor(self) -> tensors_pb2.Tensor: ...
+    def __init__(
+        self,
+        *,
+        key: builtins.str = ...,
+        tensor: tensors_pb2.Tensor | None = ...,
+    ) -> None: ...
+    def HasField(self, field_name: typing_extensions.Literal["tensor", b"tensor"]) -> builtins.bool: ...
+    def ClearField(self, field_name: typing_extensions.Literal["key", b"key", "tensor", b"tensor"]) -> None: ...
+
+global___SafetensorsTensor = SafetensorsTensor
+
+@typing_extensions.final
+class Safetensors(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    METADATA_FIELD_NUMBER: builtins.int
+    TENSORS_FIELD_NUMBER: builtins.int
+    @property
+    def metadata(self) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[global___SafetensorsMeta]: ...
+    @property
+    def tensors(self) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[global___SafetensorsTensor]: ...
+    def __init__(
+        self,
+        *,
+        metadata: collections.abc.Iterable[global___SafetensorsMeta] | None = ...,
+        tensors: collections.abc.Iterable[global___SafetensorsTensor] | None = ...,
+    ) -> None: ...
+    def ClearField(self, field_name: typing_extensions.Literal["metadata", b"metadata", "tensors", b"tensors"]) -> None: ...
+
+global___Safetensors = Safetensors
+
+@typing_extensions.final
+class LoraWeight(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    MODEL_NAME_FIELD_NUMBER: builtins.int
+    WEIGHT_FIELD_NUMBER: builtins.int
+    model_name: builtins.str
+    weight: builtins.float
+    def __init__(
+        self,
+        *,
+        model_name: builtins.str = ...,
+        weight: builtins.float = ...,
+    ) -> None: ...
+    def ClearField(self, field_name: typing_extensions.Literal["model_name", b"model_name", "weight", b"weight"]) -> None: ...
+
+global___LoraWeight = LoraWeight
+
+@typing_extensions.final
+class Lora(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    LORA_FIELD_NUMBER: builtins.int
+    WEIGHTS_FIELD_NUMBER: builtins.int
+    @property
+    def lora(self) -> global___Safetensors: ...
+    @property
+    def weights(self) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[global___LoraWeight]: ...
+    def __init__(
+        self,
+        *,
+        lora: global___Safetensors | None = ...,
+        weights: collections.abc.Iterable[global___LoraWeight] | None = ...,
+    ) -> None: ...
+    def HasField(self, field_name: typing_extensions.Literal["lora", b"lora"]) -> builtins.bool: ...
+    def ClearField(self, field_name: typing_extensions.Literal["lora", b"lora", "weights", b"weights"]) -> None: ...
 
 global___Lora = Lora
 
