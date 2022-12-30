@@ -42,7 +42,7 @@ def _exception_to_grpc_generator(func, mappings):
         except grpc.RpcError as e:
             # Allow grpc / whatever-called-Servicer to receive RpcError
             raise e
-        except BaseException as e:
+        except Exception as e:
             _handle_exception(func, e, context, mappings)
 
     return wrapper
@@ -60,7 +60,7 @@ def _exception_to_grpc_unary(func, mappings):
         except grpc.RpcError as e:
             # Allow grpc / whatever-called-Servicer to receive RpcError
             raise e
-        except BaseException as e:
+        except Exception as e:
             _handle_exception(func, e, context, mappings)
 
     return wrapper

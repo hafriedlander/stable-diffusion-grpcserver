@@ -47,6 +47,7 @@ import generation_pb2_grpc
 
 from sdgrpcserver.debug_recorder import DebugNullRecorder, DebugRecorder
 from sdgrpcserver.http.grpc_gateway import GrpcGatewayRouter
+from sdgrpcserver.http.stability_rest_api import StabilityRESTAPIRouter
 from sdgrpcserver.manager import BatchMode, EngineManager, EngineMode
 from sdgrpcserver.services.dashboard import DashboardServiceServicer
 from sdgrpcserver.services.engines import EnginesServiceServicer
@@ -172,6 +173,10 @@ class HttpServer(object):
     def grpc_gateway(self):
         return self.controller.grpc_gateway
 
+    @property
+    def stability_rest_api(self):
+        return self.controller.stability_rest_api
+
     def start(self, block=False):
         # Run the Twisted reactor
         self._thread = threading.Thread(target=reactor.run, args=(False,))
@@ -266,6 +271,7 @@ class RoutingController(resource.Resource, CheckAuthHeaderMixin):
         self.details = ServerDetails()
         self.fileroot = fileroot
         self.files = static.File(fileroot) if fileroot else None
+        self.stability_rest_api = StabilityRESTAPIRouter()
         self.grpc_gateway = GrpcGatewayRouter()
         self.wsgi = wsgiapp
 
@@ -296,8 +302,7 @@ class RoutingController(resource.Resource, CheckAuthHeaderMixin):
 
         # Pass off stability REST API
         if child == b"v1alpha":
-            print("Stability REST API not implemented yet")
-            return NoResource()
+            return self.stability_rest_api
 
         if child == b"grpcgateway":
             return self.grpc_gateway
@@ -648,6 +653,7 @@ def main():
             generation_servicer, http.grpc_server
         )
         http.grpc_gateway.add_GenerationServiceServicer(generation_servicer)
+        http.stability_rest_api.add_GenerationServiceServicer(generation_servicer)
 
         # Create Engines Servicer and attach to all the servers
 
@@ -660,6 +666,7 @@ def main():
             engines_servicer, http.grpc_server
         )
         http.grpc_gateway.add_EnginesServiceServicer(engines_servicer)
+        http.stability_rest_api.add_EnginesServiceServicer(engines_servicer)
 
         # Create Dashobard Servicer and attach to all the servers
 

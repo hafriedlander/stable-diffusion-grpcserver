@@ -72,7 +72,7 @@ class GRPCGatewayContext:
 class GRPCGatewayController(JSONAPIController):
     input_class = None
 
-    def add_Servicer(self, servicer):
+    def add_servicer(self, servicer):
         self._servicer = servicer
 
     def _render_common(self, request, handler, input):

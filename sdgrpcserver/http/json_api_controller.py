@@ -33,7 +33,8 @@ class JSONAPIController(resource.Resource):
             response = handler(request, input)
         except WebError as e:
             return ErrorPage(int(e.status), e.message, b"").render(request)
-        except BaseException:
+        except BaseException as e:
+            print(f"Exception in JSON controller {self.__class__.__name__}. ", e)
             return ErrorPage(500, b"Internal Error", b"").render(request)
 
         # Handle when a controller returns NOT_DONE_YET because it's

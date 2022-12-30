@@ -98,10 +98,10 @@ class GrpcGatewayRouter(resource.Resource):
         return NoResource().render(request)
 
     def add_EnginesServiceServicer(self, engines_servicer):
-        self.engines_bridge.add_Servicer(engines_servicer)
+        self.engines_bridge.add_servicer(engines_servicer)
 
     def add_GenerationServiceServicer(self, generation_servicer):
-        self.generate_bridge.add_Servicer(generation_servicer)
-        self.async_generate_bridge.add_Servicer(generation_servicer)
-        self.async_result_bridge.add_Servicer(generation_servicer)
-        self.async_cancel_bridge.add_Servicer(generation_servicer)
+        self.generate_bridge.add_servicer(generation_servicer)
+        self.async_generate_bridge.add_servicer(generation_servicer)
+        self.async_result_bridge.add_servicer(generation_servicer)
+        self.async_cancel_bridge.add_servicer(generation_servicer)
