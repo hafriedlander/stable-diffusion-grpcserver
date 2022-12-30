@@ -86,7 +86,10 @@ from sdgrpcserver.pipeline.unet.types import (
     PX0Tensor,
     XtTensor,
 )
-from sdgrpcserver.pipeline.xformers_utils import xformers_mea_available
+from sdgrpcserver.pipeline.xformers_utils import (
+    xformers_mea_available,
+    xformers_mea_reversible_for_module,
+)
 
 try:
     from nonfree import tome_patcher
@@ -1074,6 +1077,7 @@ class UnifiedPipeline(DiffusionPipeline):
 
         self._xformers_available = False
         self._xformers = False
+        self._xformers_notice_given = False
 
         if xformers_mea_available():
             self._xformers_available = True
@@ -1085,11 +1089,24 @@ class UnifiedPipeline(DiffusionPipeline):
         if not self._xformers:
             return contextlib.nullcontext
 
-        modules = [
+        xformers_modules = [
             module
             for _, module in unet.named_modules()
             if hasattr(module, "_use_memory_efficient_attention_xformers")
         ]
+
+        modules = [
+            module
+            for module in xformers_modules
+            if not xformers_mea_reversible_for_module(module)
+        ]
+
+        if modules and not self._xformers_notice_given:
+            self._xformers_notice_given = True
+            print(
+                f"Disabling xformers from some ({len(modules)} out of {len(xformers_modules)}) "
+                "CrossAttention modules on this Pipeline"
+            )
 
         @contextlib.contextmanager
         def reversiblectx():

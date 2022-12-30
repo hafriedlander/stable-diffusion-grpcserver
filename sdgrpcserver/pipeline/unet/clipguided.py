@@ -182,20 +182,6 @@ class ClipGuidedMode:
         return self.wrapped_mode.wrap_unet(unet)
 
     def xformers_retry(self, callback, *args, **kwargs):
-        # Unless we've specifically found we need a reversible context
-        # try just running callback
-        if not getattr(self.pipeline, "_needs_reversible_ctx", False):
-            try:
-                return callback(*args, **kwargs)
-            # If we do get an error, try using a reversible ctx
-            except RuntimeError:
-                print(
-                    "XFormers will be disabled during CLIP guidance for this pipeline"
-                )
-                self.pipeline._needs_reversible_ctx = True
-
-        # If we get here, we need a reversible context (either _needs_reverible_ctx
-        # is True or the above unwrapped callback call failed) so wrap callable in one
         with self.reversible_ctx():
             return callback(*args, **kwargs)
 
