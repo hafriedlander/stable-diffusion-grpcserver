@@ -19,7 +19,7 @@ dependencies = [
   "scipy ~= 1.9.1",
   "ftfy ~= 6.1.1",
   "transformers ~= 4.25.1",
-  "diffusers ~= 0.10.2",
+  "diffusers ~= 0.11.1",
   "accelerate ~= 0.13.2",
   "easing-functions ~= 1.0.4",
   # For ToMe
