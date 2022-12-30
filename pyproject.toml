@@ -40,6 +40,7 @@ dependencies = [
   "python-dotenv ~= 0.21.0",
   "service_identity ~= 21.1.0",
   "safetensors ~= 0.2.6",
+  "multipart ~= 0.2.4",
   # For Tests
   "pynvml ~= 11.4.1",
 ]

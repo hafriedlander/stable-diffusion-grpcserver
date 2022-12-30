@@ -21,19 +21,23 @@ class UnsupportedMediaTypeResource(ErrorPage):
 
 
 class JSONAPIController(resource.Resource):
+    return_types = {"application/json"}
+
     def _render_common(self, request, handler, input):
         if not handler:
             return NoResource().render(request)
 
         accept_header = request.getHeader("accept")
-        if not accept_header or accept_header != "application/json":
+        if not accept_header or accept_header not in self.return_types:
             return NotAcceptableResource().render(request)
 
         try:
             response = handler(request, input)
+        except ValueError as e:
+            return ErrorPage(400, str(e), b"").render(request)
         except WebError as e:
             return ErrorPage(int(e.status), e.message, b"").render(request)
-        except BaseException as e:
+        except Exception as e:
             print(f"Exception in JSON controller {self.__class__.__name__}. ", e)
             return ErrorPage(500, b"Internal Error", b"").render(request)
 
@@ -51,7 +55,7 @@ class JSONAPIController(resource.Resource):
             response = response.encode("utf-8")
 
         # And return it
-        request.setHeader("content-type", "application/json")
+        request.setHeader("content-type", accept_header)
         return response
 
     def render_GET(self, request):

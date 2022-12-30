@@ -1,9 +1,9 @@
 import functools
 import inspect
 
+import generation_pb2
 from diffusers import DPMSolverMultistepScheduler, LMSDiscreteScheduler, PNDMScheduler
 
-from sdgrpcserver.generated import generation_pb2
 from sdgrpcserver.k_diffusion import sampling as k_sampling
 from sdgrpcserver.pipeline.kschedulers import (
     DPM2AncestralDiscreteScheduler,
