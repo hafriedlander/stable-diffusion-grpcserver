@@ -14,4 +14,7 @@
 [submodule "sdgrpcserver/src/lora"]
 	path = sdgrpcserver/src/lora
 	url = https://github.com/cloneofsimo/lora.git
-
+[submodule "sdgrpcserver/src/midas"]
+	path = sdgrpcserver/src/midas
+	url = https://github.com/hafriedlander/MiDaS.git
+	

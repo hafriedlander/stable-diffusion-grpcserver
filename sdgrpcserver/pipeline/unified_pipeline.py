@@ -314,6 +314,55 @@ class Img2imgMode(UnifiedMode):
         return init_latents
 
 
+class Depth2imgMode(Img2imgMode):
+    def __init__(self, do_classifier_free_guidance, depth_map, **kwargs):
+        super().__init__(
+            do_classifier_free_guidance=do_classifier_free_guidance, **kwargs
+        )
+
+        # Process depth map
+        if depth_map.ndim == 3:
+            depth_map = depth_map[None, ...]
+
+        depth_map = depth_map[:, [0]]
+        depth_map = 2.0 * depth_map - 1.0
+        depth_map = depth_map.to(self.device, self.latents_dtype)
+
+        depth_map = images.resize_right(
+            depth_map,
+            out_shape=[depth_map.shape[-2] // 8, depth_map.shape[-1] // 8],
+            interp_method=images.interp_methods.lanczos2,
+            antialiasing=True,
+        ).clamp(0, 1)
+
+        # Store regular and CFG versions
+        self.depth_map = depth_map
+
+        if do_classifier_free_guidance:
+            self.depth_map_cfg = torch.cat([self.depth_map] * 2)
+
+    def wrap_unet(self, unet: NoisePredictionUNet) -> NoisePredictionUNet:
+        def wrapped_unet(latents: XtTensor, t) -> EpsTensor:
+            if latents.shape[0] == self.depth_map.shape[0]:
+                depth_map = self.depth_map
+            else:
+                depth_map = self.depth_map_cfg
+
+            expanded_latents = torch.cat(
+                [
+                    latents,
+                    # Note: these specifically _do not_ get scaled by the
+                    # current timestep sigma like the latents above have been
+                    depth_map,
+                ],
+                dim=1,
+            )
+
+            return unet(expanded_latents, t)
+
+        return wrapped_unet
+
+
 class MaskProcessorMixin(object):
     def preprocess_mask_tensor(self, tensor, inputIs0K1R=True):
         """
@@ -990,7 +1039,9 @@ class UnifiedPipeline(DiffusionPipeline):
             unet._internal_dict = FrozenDict(new_config)
 
     def get_unet_sample_size(self, unet):
-        return getattr(unet.config, "sample_size", 64)
+        native = getattr(unet.config, "sample_size", 64)
+        # Force minimum of 64, to work around multiple public configs being wrong
+        return max(64, native)
 
     def get_unet_pixel_size(self, unet):
         return self.get_unet_sample_size(unet) * self.vae_scale_factor
@@ -1004,6 +1055,8 @@ class UnifiedPipeline(DiffusionPipeline):
     feature_extractor: CLIPFeatureExtractor
     clip_model: CLIPModel
     clip_tokenizer: CLIPTokenizer
+    depth_unet: UNet2DConditionModel | None
+    depth_text_encoder: CLIPTokenizer | None
     inpaint_unet: UNet2DConditionModel | None
     inpaint_text_encoder: CLIPTokenizer | None
 
@@ -1018,6 +1071,8 @@ class UnifiedPipeline(DiffusionPipeline):
         feature_extractor: CLIPFeatureExtractor,
         clip_model: CLIPModel | None = None,
         clip_tokenizer: CLIPTokenizer | None = None,
+        depth_unet: UNet2DConditionModel | None = None,
+        depth_text_encoder: CLIPTokenizer | None = None,
         inpaint_unet: UNet2DConditionModel | None = None,
         inpaint_text_encoder: CLIPTokenizer | None = None,
     ):
@@ -1055,6 +1110,8 @@ class UnifiedPipeline(DiffusionPipeline):
             feature_extractor=feature_extractor,
             clip_model=clip_model,
             clip_tokenizer=clip_tokenizer,
+            depth_unet=depth_unet,
+            depth_text_encoder=depth_text_encoder,
             inpaint_unet=inpaint_unet,
             inpaint_text_encoder=inpaint_text_encoder,
         )
@@ -1300,6 +1357,7 @@ class UnifiedPipeline(DiffusionPipeline):
         init_image: Optional[UnifiedPipelineImageType] = None,
         mask_image: Optional[UnifiedPipelineImageType] = None,
         outmask_image: Optional[UnifiedPipelineImageType] = None,
+        depth_map: Optional[UnifiedPipelineImageType] = None,
         strength: float | None = None,
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
@@ -1535,6 +1593,17 @@ class UnifiedPipeline(DiffusionPipeline):
         if outmask_image is not None and init_image is None:
             raise ValueError("Can't pass a outmask without an image")
 
+        if depth_map is not None and init_image is None:
+            raise ValueError("Can't pass a depth without an image")
+
+        if depth_map is not None and mask_image is not None:
+            raise ValueError("Can't pass a depth and a mask at the same time")
+
+        if depth_map is not None and self.depth_unet is None:
+            print(
+                "Depth passed to pipeline without a depth_unet. Falling back to img2img mode."
+            )
+
         if init_image is not None and isinstance(init_image, PILImage):
             init_image = images.fromPIL(init_image)
 
@@ -1543,6 +1612,9 @@ class UnifiedPipeline(DiffusionPipeline):
 
         if outmask_image is not None and isinstance(outmask_image, PILImage):
             outmask_image = images.fromPIL(outmask_image)
+
+        if depth_map is not None and isinstance(depth_map, PILImage):
+            depth_map = images.fromPIL(depth_map)
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
@@ -1564,6 +1636,8 @@ class UnifiedPipeline(DiffusionPipeline):
                 )
             else:
                 mode_tree.leaf({"mode_class": EnhancedInpaintMode, "unet": self.unet})
+        elif depth_map is not None and self.depth_unet is not None:
+            mode_tree.leaf({"mode_class": Depth2imgMode, "unet": self.depth_unet})
         elif init_image is not None:
             mode_tree.leaf({"mode_class": Img2imgMode, "unet": self.unet})
         else:
@@ -1597,30 +1671,31 @@ class UnifiedPipeline(DiffusionPipeline):
                         "Either use a K-Diffusion scheduler or disable Hires fix."
                     )
 
-                natural_init_image = None
-                natural_mask_image = None
+                natural = dict(
+                    init_image=init_image,
+                    mask_image=mask_image,
+                    depth_map=depth_map,
+                )
 
-                if init_image is not None:
-                    natural_init_image = HiresUnetWrapper.image_to_natural(
-                        unet_pixel_size,
-                        cast(torch.Tensor, init_image),
-                        oos_fraction=hires_oos_fraction,
-                    )
+                fills = dict(mask_image=torch.ones)
 
-                if mask_image is not None:
-                    natural_mask_image = HiresUnetWrapper.image_to_natural(
-                        unet_pixel_size,
-                        cast(torch.Tensor, mask_image),
-                        oos_fraction=hires_oos_fraction,
-                        fill=torch.ones,
-                    )
+                for name, image in natural.items():
+                    if image is not None:
+                        natural[name] = HiresUnetWrapper.image_to_natural(
+                            unet_pixel_size,
+                            cast(torch.Tensor, image),
+                            oos_fraction=hires_oos_fraction,
+                            fill=fills.get(name, torch.zeros),
+                        )
+
+                        self.latent_debugger.log(name, 0, pixels=image)
+                        self.latent_debugger.log("nat" + name, 0, pixels=natural[name])
 
                 return {
                     **child_opts,
                     "width": unet_pixel_size,
                     "height": unet_pixel_size,
-                    "init_image": natural_init_image,
-                    "mask_image": natural_mask_image,
+                    **natural,
                 }
 
             # TODO: This only works as long as all unets have same natural size
@@ -1642,6 +1717,8 @@ class UnifiedPipeline(DiffusionPipeline):
             unet = leaf.opts["unet"]
 
             text_encoder = self.text_encoder
+            if unet is self.depth_unet and self.depth_text_encoder is not None:
+                text_encoder = self.depth_text_encoder
             if unet is self.inpaint_unet and self.inpaint_text_encoder is not None:
                 text_encoder = self.inpaint_text_encoder
 
@@ -1714,6 +1791,7 @@ class UnifiedPipeline(DiffusionPipeline):
             height=height,
             init_image=init_image,
             mask_image=mask_image,
+            depth_map=depth_map,
             latents_dtype=latents_dtype,
             batch_total=batch_total,
             num_inference_steps=num_inference_steps,

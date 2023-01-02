@@ -3,13 +3,17 @@
 # All images in are in BCHW unless specified in the variable name, as floating point 0..1
 # All functions will handle RGB or RGBA images
 
-from math import ceil
+from math import ceil, sqrt
+from typing import Literal
 
 import cv2 as cv
 import numpy as np
 import PIL
 import torch
 import torchvision
+
+from .resize_right import interp_methods
+from .resize_right import resize as resize_right
 
 
 def fromPIL(image):
@@ -59,6 +63,8 @@ def fromPngBytes(bytes):
 
 # Images with alpha will be slow for now. TODO: Move to OpenCV (torchvision does not support encoding alpha images)
 def toPngBytes(tensor):
+    tensor = tensor.to("cpu")
+
     if tensor.ndim == 3:
         tensor = tensor[None, ...]
 
@@ -114,5 +120,59 @@ def gaussianblur(tensor, sigma):
     return torchvision.transforms.functional.gaussian_blur(tensor, kernel, sigma)
 
 
+def directionalblur(tensor, sigma, direction: Literal["up", "down"], repeat_count=256):
+    orig = tensor
+    sigma /= sqrt(repeat_count)
+
+    for _ in range(repeat_count):
+        tensor = gaussianblur(tensor, sigma)
+        if direction == "down":
+            tensor = torch.minimum(tensor, orig)
+        else:
+            tensor = torch.maximum(tensor, orig)
+
+    return tensor
+
+
 def crop(tensor, top, left, height, width):
     return tensor[:, :, top : top + height, left : left + width]
+
+
+def rescale(
+    tensor,
+    height,
+    width,
+    fit: Literal["strict", "cover", "contain"],
+    pad_mode="constant",
+):
+    # Get the original height and width
+    orig_h, orig_w = tensor.shape[-2], tensor.shape[-1]
+    # Calculate the scaling factors to hit the target height
+    scale_h, scale_w = orig_h / height, orig_w / width
+
+    if fit == "cover":
+        scale_h = scale_w = max(scale_h, scale_w)
+    elif fit == "contain":
+        scale_h = scale_w = min(scale_h, scale_w)
+
+    # Do the resize
+    tensor = resize_right(
+        tensor, [scale_h, scale_w], interp_method=interp_methods.lanczos2
+    ).clamp(0, 1)
+
+    # Get the result height and width
+    res_h, res_w = tensor.shape[-2], tensor.shape[-1]
+
+    # Calculate the "half error", negative is too much, positive is too little
+    err_h, err_w = (height - res_h) // 2, (width - res_w) // 2
+
+    # Crop any extra off
+    tensor = crop(
+        tensor, -err_h if err_h < 0 else 0, -err_w if err_w < 0 else 0, height, width
+    )
+
+    # Pad any missing
+    pad = [err_w, width - err_w] if err_w > 0 else [0, 0]
+    pad += [err_h, height - err_h] if err_h > 0 else [0, 0]
+
+    return torch.nn.functional.pad(tensor, pad, pad_mode)

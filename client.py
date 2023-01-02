@@ -126,7 +126,7 @@ def open_images(
 
 
 def image_to_prompt(
-    im, init: bool = False, mask: bool = False, use_alpha=False
+    im, init: bool = False, mask: bool = False, depth: bool = False, use_alpha=False
 ) -> generation.Prompt:
     if init and mask:
         raise ValueError("init and mask cannot both be True")
@@ -141,17 +141,37 @@ def image_to_prompt(
     buf = io.BytesIO()
     im.save(buf, format="PNG")
     buf.seek(0)
+
+    artifact_uuid = str(uuid.uuid4())
+
+    type = generation.ARTIFACT_IMAGE
     if mask:
-        return generation.Prompt(
-            artifact=generation.Artifact(
-                type=generation.ARTIFACT_MASK, binary=buf.getvalue()
-            )
-        )
+        type = generation.ARTIFACT_MASK
+    if depth:
+        type = generation.ARTIFACT_DEPTH
+
     return generation.Prompt(
         artifact=generation.Artifact(
-            type=generation.ARTIFACT_IMAGE, binary=buf.getvalue()
+            type=type, uuid=artifact_uuid, binary=buf.getvalue()
         ),
         parameters=generation.PromptParameters(init=init),
+    )
+
+
+def ref_to_prompt(ref_uuid, mask: bool = False, depth: bool = False):
+    type = generation.ARTIFACT_IMAGE
+    if mask:
+        type = generation.ARTIFACT_MASK
+    if depth:
+        type = generation.ARTIFACT_DEPTH
+
+    return generation.Prompt(
+        artifact=generation.Artifact(
+            type=type,
+            ref=generation.ArtifactReference(
+                uuid=ref_uuid, stage=generation.ARTIFACT_AFTER_ADJUSTMENTS
+            ),
+        )
     )
 
 
@@ -307,6 +327,8 @@ class StabilityInference:
         init_image: Optional[Image.Image] = None,
         mask_image: Optional[Image.Image] = None,
         mask_from_image_alpha: bool = False,
+        depth_image: Optional[Image.Image] = None,
+        depth_from_image: bool = False,
         height: int = 512,
         width: int = 512,
         start_schedule: float = 1.0,
@@ -432,13 +454,43 @@ class StabilityInference:
                 start=start_schedule,
                 end=end_schedule,
             )
-            prompts += [image_to_prompt(init_image, init=True)]
+            init_image_prompt = image_to_prompt(init_image, init=True)
+            prompts += [init_image_prompt]
 
             if mask_image is not None:
                 prompts += [image_to_prompt(mask_image, mask=True)]
 
             elif mask_from_image_alpha:
-                prompts += [image_to_prompt(init_image, mask=True, use_alpha=True)]
+                mask_prompt = ref_to_prompt(init_image_prompt.artifact.uuid, mask=True)
+                mask_prompt.artifact.adjustments.append(
+                    generation.ImageAdjustment(
+                        channels=generation.ImageAdjustment_Channels(
+                            r=generation.CHANNEL_A,
+                            g=generation.CHANNEL_A,
+                            b=generation.CHANNEL_A,
+                            a=generation.CHANNEL_DISCARD,
+                        )
+                    )
+                )
+                mask_prompt.artifact.adjustments.append(
+                    generation.ImageAdjustment(
+                        invert=generation.ImageAdjustment_Invert()
+                    )
+                )
+
+                prompts += [mask_prompt]
+
+            if depth_image is not None:
+                prompts += [image_to_prompt(depth_image, depth=True)]
+
+            if depth_from_image:
+                depth_prompt = ref_to_prompt(
+                    init_image_prompt.artifact.uuid, depth=True
+                )
+                depth_prompt.artifact.adjustments.append(
+                    generation.ImageAdjustment(depth=generation.ImageAdjustment_Depth())
+                )
+                prompts += [depth_prompt]
 
         if lora:
             for path, weights in lora:
@@ -760,6 +812,16 @@ if __name__ == "__main__":
         help="Get the mask from the image alpha channel, rather than a seperate image",
     )
     parser.add_argument(
+        "--depth_image",
+        type=str,
+        help="Depth image",
+    )
+    parser.add_argument(
+        "--depth_from_image",
+        action="store_true",
+        help="Inference the depth from the image",
+    )
+    parser.add_argument(
         "--negative_prompt",
         "-N",
         type=str,
@@ -825,6 +887,9 @@ if __name__ == "__main__":
     if args.mask_image:
         args.mask_image = Image.open(args.mask_image)
 
+    if args.depth_image:
+        args.depth_image = Image.open(args.depth_image)
+
     lora = []
     if args.lora:
         for path in args.lora:
@@ -855,6 +920,8 @@ if __name__ == "__main__":
         "init_image": args.init_image,
         "mask_image": args.mask_image,
         "mask_from_image_alpha": args.mask_from_image_alpha,
+        "depth_image": args.depth_image,
+        "depth_from_image": args.depth_from_image,
         "hires_fix": args.hires_fix,
         "hires_oos_fraction": args.hires_oos_fraction,
         "tiling": args.tiling,

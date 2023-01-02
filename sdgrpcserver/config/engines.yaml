@@ -101,6 +101,12 @@
 
 # Now we start specifying the Stable Diffusion 2 models. These follow 
 # the same structure as the 1.5 models above
+- model_id: "stable-diffusion-v2-depth"
+  whitelist: ["text_encoder", "unet"]
+  model: "stabilityai/stable-diffusion-2-depth"
+  local_model: "./stable-diffusion-v2-depth"
+  local_model_fp16: "./stable-diffusion-v2-depth-fp16"
+  
 - model_id: "stable-diffusion-v2-inpainting"
   model: "stabilityai/stable-diffusion-2-inpainting"
   whitelist: ["text_encoder", "unet"]
@@ -112,6 +118,8 @@
   local_model: "./stable-diffusion-v2-base"
   local_model_fp16: "./stable-diffusion-v2-base"
   overrides:
+    # Here you can see a new type of override, the depth_unet
+    depth_unet: "@stable-diffusion-v2-depth/unet"
     inpaint_unet: "@stable-diffusion-v2-inpainting/unet"
 
 # And the 2.1 base (using the 2.0 inpaint until 2.1 inpaint model comes out)
@@ -120,6 +128,8 @@
   local_model: "./stable-diffusion-v2-1-base"
   local_model_fp16: "./stable-diffusion-v2-1-base"
   overrides:
+    # Here you can see a new type of override, the depth_unet
+    depth_unet: "@stable-diffusion-v2-depth/unet"
     inpaint_unet: "@stable-diffusion-v2-inpainting/unet"
 
 # At the moment, the higher resolution 768x768 Stable Diffusion 2 model
@@ -148,6 +158,25 @@
     # so we need to override that too
     inpaint_text_encoder:
       model: "@stable-diffusion-v2-inpainting/text_encoder"
+
+# This is the model for MiDaS depth estimation
+- model_id: "midas-beit-large-512"
+  # If you specify a URL, it will be downloaded and cached
+  urls: "https://github.com/isl-org/MiDaS/releases/download/v3_1/dpt_beit_large_512.pt"
+  type: "midas_depth_estimator"
+
+- model_id: "midas-swin2-large-384"
+  urls: "https://github.com/isl-org/MiDaS/releases/download/v3_1/dpt_swin2_large_384.pt"
+  type: "midas_depth_estimator"
+
+- model_id: "midas-nextvit-large-384"
+  urls: "https://github.com/isl-org/MiDaS/releases/download/v3_1/dpt_next_vit_large_384.pt"
+  type: "midas_depth_estimator"
+
+- model_id: "midas-dpt-large-384"
+  urls: "https://github.com/isl-org/MiDaS/releases/download/v3/dpt_large_384.pt"
+  type: "midas_depth_estimator"
+
 
 # ---- Engine definitions ----
 
@@ -339,3 +368,18 @@
   local_model: "./stable-diffusion-v1-4"
   local_model_fp16: "./stable-diffusion-v1-4-fp16"
   use_auth_token: True
+
+# This is a bit different to the previous engines. It's a task: "depth" engine.
+# That means, instead of generating images based on prompts, it generates depth_maps
+# from images. Generally, we want to keep these engines for internal use only, which
+# is why it's not marked as visible
+- id: "depth-midas-beit"
+  task: "depth"
+  enabled: True
+  # Default is _per task_, so this sets this engine as the default for "depth" tasks
+  default: True
+  class: "MidasDepthPipeline"
+  # This says that there aren't any models except what is provided via overrides
+  model: "!empty"
+  overrides:
+    midas_depth_estimator: "@midas-beit-large-512"

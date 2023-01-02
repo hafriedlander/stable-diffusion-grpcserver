@@ -12,8 +12,16 @@ DEFAULT_ENABLED = set(
         # "blendin",
         # "blendout",
         # "small",
-        # "hires_lo",
-        # "hires_hi",
+        # "natinit_image",
+        # "init_image",
+        # "natmask_image",
+        # "mask_image",
+        # "natdepth_map",
+        # "depth_map",
+        # "hires_in",
+        # "hires_lopre",
+        # "hires_hipre",
+        # "hires",
     ]
 )
 
@@ -29,7 +37,7 @@ class LatentDebugger:
 
         self.counters = {}
 
-    def log(self, label, i, latents):
+    def log(self, label, i, latents=None, pixels=None):
         if label not in self.enabled:
             return
 
@@ -37,11 +45,12 @@ class LatentDebugger:
 
         self.counters[label] = i = self.counters.get(label, 0) + 1
 
-        stage_latents = 1 / 0.18215 * latents
-        stage_image = self.vae.decode(stage_latents).sample
-        stage_image = (stage_image / 2 + 0.5).clamp(0, 1).cpu()
+        if latents is not None:
+            stage_latents = 1 / 0.18215 * latents
+            stage_image = self.vae.decode(stage_latents).sample
+            pixels = (stage_image / 2 + 0.5).clamp(0, 1).cpu()
 
-        for j, pngBytes in enumerate(images.toPngBytes(stage_image)):
+        for j, pngBytes in enumerate(images.toPngBytes(pixels)):
             path = os.path.join(self.output_path, f"{prefix}-{label}-{j}-{i}.png")
             with open(path, "wb") as f:
                 f.write(pngBytes)

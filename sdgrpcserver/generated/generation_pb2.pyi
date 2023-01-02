@@ -57,6 +57,7 @@ class _ArtifactTypeEnumTypeWrapper(google.protobuf.internal.enum_type_wrapper._E
     ARTIFACT_LATENT: _ArtifactType.ValueType  # 8
     ARTIFACT_TENSOR: _ArtifactType.ValueType  # 9
     ARTIFACT_LORA: _ArtifactType.ValueType  # 500
+    ARTIFACT_DEPTH: _ArtifactType.ValueType  # 501
 
 class ArtifactType(_ArtifactType, metaclass=_ArtifactTypeEnumTypeWrapper): ...
 
@@ -71,6 +72,7 @@ ARTIFACT_MASK: ArtifactType.ValueType  # 7
 ARTIFACT_LATENT: ArtifactType.ValueType  # 8
 ARTIFACT_TENSOR: ArtifactType.ValueType  # 9
 ARTIFACT_LORA: ArtifactType.ValueType  # 500
+ARTIFACT_DEPTH: ArtifactType.ValueType  # 501
 global___ArtifactType = ArtifactType
 
 class _GaussianDirection:
@@ -122,15 +124,44 @@ class _RescaleMode:
 class _RescaleModeEnumTypeWrapper(google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[_RescaleMode.ValueType], builtins.type):
     DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
     RESCALE_STRICT: _RescaleMode.ValueType  # 0
-    RESCALE_CROP: _RescaleMode.ValueType  # 2
-    RESCALE_FIT: _RescaleMode.ValueType  # 3
+    RESCALE_COVER: _RescaleMode.ValueType  # 2
+    """Completely cover the rescale height and width, maintaining aspect ratio, cropping any extra"""
+    RESCALE_CONTAIN_ZERO: _RescaleMode.ValueType  # 3
+    """Fit the complete source image into the rescale height and width, maintaining aspect ratio, background to be filled with zeros"""
+    RESCALE_CONTAIN_REPLICATE: _RescaleMode.ValueType  # 4
+    """Fit the complete source image into the rescale height and width, maintaining aspect ratio, background to be filled with the edge of the image repeating"""
+    RESCALE_CONTAIN_REFLECT: _RescaleMode.ValueType  # 5
+    """Fit the complete source image into the rescale height and width, maintaining aspect ratio, background to be filled with the image mirrored"""
 
 class RescaleMode(_RescaleMode, metaclass=_RescaleModeEnumTypeWrapper): ...
 
 RESCALE_STRICT: RescaleMode.ValueType  # 0
-RESCALE_CROP: RescaleMode.ValueType  # 2
-RESCALE_FIT: RescaleMode.ValueType  # 3
+RESCALE_COVER: RescaleMode.ValueType  # 2
+"""Completely cover the rescale height and width, maintaining aspect ratio, cropping any extra"""
+RESCALE_CONTAIN_ZERO: RescaleMode.ValueType  # 3
+"""Fit the complete source image into the rescale height and width, maintaining aspect ratio, background to be filled with zeros"""
+RESCALE_CONTAIN_REPLICATE: RescaleMode.ValueType  # 4
+"""Fit the complete source image into the rescale height and width, maintaining aspect ratio, background to be filled with the edge of the image repeating"""
+RESCALE_CONTAIN_REFLECT: RescaleMode.ValueType  # 5
+"""Fit the complete source image into the rescale height and width, maintaining aspect ratio, background to be filled with the image mirrored"""
 global___RescaleMode = RescaleMode
+
+class _ArtifactStage:
+    ValueType = typing.NewType("ValueType", builtins.int)
+    V: typing_extensions.TypeAlias = ValueType
+
+class _ArtifactStageEnumTypeWrapper(google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[_ArtifactStage.ValueType], builtins.type):
+    DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
+    ARTIFACT_BEFORE_ADJUSTMENTS: _ArtifactStage.ValueType  # 0
+    ARTIFACT_AFTER_ADJUSTMENTS: _ArtifactStage.ValueType  # 1
+    ARTIFACT_AFTER_POSTADJUSTMENTS: _ArtifactStage.ValueType  # 2
+
+class ArtifactStage(_ArtifactStage, metaclass=_ArtifactStageEnumTypeWrapper): ...
+
+ARTIFACT_BEFORE_ADJUSTMENTS: ArtifactStage.ValueType  # 0
+ARTIFACT_AFTER_ADJUSTMENTS: ArtifactStage.ValueType  # 1
+ARTIFACT_AFTER_POSTADJUSTMENTS: ArtifactStage.ValueType  # 2
+global___ArtifactStage = ArtifactStage
 
 class _MaskedAreaInit:
     ValueType = typing.NewType("ValueType", builtins.int)
@@ -602,6 +633,25 @@ class ImageAdjustment_Crop(google.protobuf.message.Message):
 global___ImageAdjustment_Crop = ImageAdjustment_Crop
 
 @typing_extensions.final
+class ImageAdjustment_Depth(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    DEPTH_ENGINE_HINT_FIELD_NUMBER: builtins.int
+    @property
+    def depth_engine_hint(self) -> google.protobuf.internal.containers.RepeatedScalarFieldContainer[builtins.str]:
+        """You can provide a list of depth engine ID preferences, first match will be used,
+        or default engine if no match
+        """
+    def __init__(
+        self,
+        *,
+        depth_engine_hint: collections.abc.Iterable[builtins.str] | None = ...,
+    ) -> None: ...
+    def ClearField(self, field_name: typing_extensions.Literal["depth_engine_hint", b"depth_engine_hint"]) -> None: ...
+
+global___ImageAdjustment_Depth = ImageAdjustment_Depth
+
+@typing_extensions.final
 class ImageAdjustment(google.protobuf.message.Message):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
@@ -611,6 +661,7 @@ class ImageAdjustment(google.protobuf.message.Message):
     CHANNELS_FIELD_NUMBER: builtins.int
     RESCALE_FIELD_NUMBER: builtins.int
     CROP_FIELD_NUMBER: builtins.int
+    DEPTH_FIELD_NUMBER: builtins.int
     @property
     def blur(self) -> global___ImageAdjustment_Gaussian: ...
     @property
@@ -623,6 +674,8 @@ class ImageAdjustment(google.protobuf.message.Message):
     def rescale(self) -> global___ImageAdjustment_Rescale: ...
     @property
     def crop(self) -> global___ImageAdjustment_Crop: ...
+    @property
+    def depth(self) -> global___ImageAdjustment_Depth: ...
     def __init__(
         self,
         *,
@@ -632,10 +685,11 @@ class ImageAdjustment(google.protobuf.message.Message):
         channels: global___ImageAdjustment_Channels | None = ...,
         rescale: global___ImageAdjustment_Rescale | None = ...,
         crop: global___ImageAdjustment_Crop | None = ...,
+        depth: global___ImageAdjustment_Depth | None = ...,
     ) -> None: ...
-    def HasField(self, field_name: typing_extensions.Literal["adjustment", b"adjustment", "blur", b"blur", "channels", b"channels", "crop", b"crop", "invert", b"invert", "levels", b"levels", "rescale", b"rescale"]) -> builtins.bool: ...
-    def ClearField(self, field_name: typing_extensions.Literal["adjustment", b"adjustment", "blur", b"blur", "channels", b"channels", "crop", b"crop", "invert", b"invert", "levels", b"levels", "rescale", b"rescale"]) -> None: ...
-    def WhichOneof(self, oneof_group: typing_extensions.Literal["adjustment", b"adjustment"]) -> typing_extensions.Literal["blur", "invert", "levels", "channels", "rescale", "crop"] | None: ...
+    def HasField(self, field_name: typing_extensions.Literal["adjustment", b"adjustment", "blur", b"blur", "channels", b"channels", "crop", b"crop", "depth", b"depth", "invert", b"invert", "levels", b"levels", "rescale", b"rescale"]) -> builtins.bool: ...
+    def ClearField(self, field_name: typing_extensions.Literal["adjustment", b"adjustment", "blur", b"blur", "channels", b"channels", "crop", b"crop", "depth", b"depth", "invert", b"invert", "levels", b"levels", "rescale", b"rescale"]) -> None: ...
+    def WhichOneof(self, oneof_group: typing_extensions.Literal["adjustment", b"adjustment"]) -> typing_extensions.Literal["blur", "invert", "levels", "channels", "rescale", "crop", "depth"] | None: ...
 
 global___ImageAdjustment = ImageAdjustment
 
@@ -737,6 +791,29 @@ class Lora(google.protobuf.message.Message):
 global___Lora = Lora
 
 @typing_extensions.final
+class ArtifactReference(google.protobuf.message.Message):
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    ID_FIELD_NUMBER: builtins.int
+    UUID_FIELD_NUMBER: builtins.int
+    STAGE_FIELD_NUMBER: builtins.int
+    id: builtins.int
+    uuid: builtins.str
+    stage: global___ArtifactStage.ValueType
+    def __init__(
+        self,
+        *,
+        id: builtins.int = ...,
+        uuid: builtins.str = ...,
+        stage: global___ArtifactStage.ValueType = ...,
+    ) -> None: ...
+    def HasField(self, field_name: typing_extensions.Literal["id", b"id", "reference", b"reference", "uuid", b"uuid"]) -> builtins.bool: ...
+    def ClearField(self, field_name: typing_extensions.Literal["id", b"id", "reference", b"reference", "stage", b"stage", "uuid", b"uuid"]) -> None: ...
+    def WhichOneof(self, oneof_group: typing_extensions.Literal["reference", b"reference"]) -> typing_extensions.Literal["id", "uuid"] | None: ...
+
+global___ArtifactReference = ArtifactReference
+
+@typing_extensions.final
 class Artifact(google.protobuf.message.Message):
     """A tangible Artifact, such as an image, video, or text that is used for input
     or output.
@@ -754,6 +831,7 @@ class Artifact(google.protobuf.message.Message):
     CLASSIFIER_FIELD_NUMBER: builtins.int
     TENSOR_FIELD_NUMBER: builtins.int
     LORA_FIELD_NUMBER: builtins.int
+    REF_FIELD_NUMBER: builtins.int
     INDEX_FIELD_NUMBER: builtins.int
     FINISH_REASON_FIELD_NUMBER: builtins.int
     SEED_FIELD_NUMBER: builtins.int
@@ -785,6 +863,9 @@ class Artifact(google.protobuf.message.Message):
            VAE latent (C,H//8,W//8, assuming VAE-f8)
         A Lora embedding
         """
+    @property
+    def ref(self) -> global___ArtifactReference:
+        """A reference to a previous Artifact"""
     index: builtins.int
     """Index of this artifact in input/output list"""
     finish_reason: global___FinishReason.ValueType
@@ -814,6 +895,7 @@ class Artifact(google.protobuf.message.Message):
         classifier: global___ClassifierParameters | None = ...,
         tensor: tensors_pb2.Tensor | None = ...,
         lora: global___Lora | None = ...,
+        ref: global___ArtifactReference | None = ...,
         index: builtins.int = ...,
         finish_reason: global___FinishReason.ValueType = ...,
         seed: builtins.int = ...,
@@ -822,12 +904,12 @@ class Artifact(google.protobuf.message.Message):
         adjustments: collections.abc.Iterable[global___ImageAdjustment] | None = ...,
         postAdjustments: collections.abc.Iterable[global___ImageAdjustment] | None = ...,
     ) -> None: ...
-    def HasField(self, field_name: typing_extensions.Literal["_magic", b"_magic", "binary", b"binary", "classifier", b"classifier", "data", b"data", "lora", b"lora", "magic", b"magic", "tensor", b"tensor", "text", b"text", "tokens", b"tokens"]) -> builtins.bool: ...
-    def ClearField(self, field_name: typing_extensions.Literal["_magic", b"_magic", "adjustments", b"adjustments", "binary", b"binary", "classifier", b"classifier", "data", b"data", "finish_reason", b"finish_reason", "id", b"id", "index", b"index", "lora", b"lora", "magic", b"magic", "mime", b"mime", "postAdjustments", b"postAdjustments", "seed", b"seed", "size", b"size", "tensor", b"tensor", "text", b"text", "tokens", b"tokens", "type", b"type", "uuid", b"uuid"]) -> None: ...
+    def HasField(self, field_name: typing_extensions.Literal["_magic", b"_magic", "binary", b"binary", "classifier", b"classifier", "data", b"data", "lora", b"lora", "magic", b"magic", "ref", b"ref", "tensor", b"tensor", "text", b"text", "tokens", b"tokens"]) -> builtins.bool: ...
+    def ClearField(self, field_name: typing_extensions.Literal["_magic", b"_magic", "adjustments", b"adjustments", "binary", b"binary", "classifier", b"classifier", "data", b"data", "finish_reason", b"finish_reason", "id", b"id", "index", b"index", "lora", b"lora", "magic", b"magic", "mime", b"mime", "postAdjustments", b"postAdjustments", "ref", b"ref", "seed", b"seed", "size", b"size", "tensor", b"tensor", "text", b"text", "tokens", b"tokens", "type", b"type", "uuid", b"uuid"]) -> None: ...
     @typing.overload
     def WhichOneof(self, oneof_group: typing_extensions.Literal["_magic", b"_magic"]) -> typing_extensions.Literal["magic"] | None: ...
     @typing.overload
-    def WhichOneof(self, oneof_group: typing_extensions.Literal["data", b"data"]) -> typing_extensions.Literal["binary", "text", "tokens", "classifier", "tensor", "lora"] | None: ...
+    def WhichOneof(self, oneof_group: typing_extensions.Literal["data", b"data"]) -> typing_extensions.Literal["binary", "text", "tokens", "classifier", "tensor", "lora", "ref"] | None: ...
 
 global___Artifact = Artifact
 

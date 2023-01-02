@@ -1,3 +1,4 @@
+import functools
 import json
 import random
 import threading
@@ -113,7 +114,8 @@ class ParameterExtractor:
     def __init__(self, manager, request):
         self._manager = manager
         self._request = request
-        self._result = {}
+        # Add a cache to self.get to prevent multiple requests from recalculating
+        # self.get = functools.cache(self.get)
 
     def _save_debug_tensor(self, tensor):
         return
@@ -124,7 +126,10 @@ class ParameterExtractor:
         ) as f:
             f.write(images.toPngBytes(tensor)[0])
 
-    def _handleImageAdjustment(self, tensor, adjustments):
+    def _apply_image_adjustment(self, tensor, adjustments):
+        if not adjustments:
+            return tensor
+
         if type(tensor) is bytes:
             tensor = images.fromPngBytes(tensor)
 
@@ -137,22 +142,12 @@ class ParameterExtractor:
                 sigma = adjustment.blur.sigma
                 direction = adjustment.blur.direction
 
-                if (
-                    direction == generation_pb2.DIRECTION_DOWN
-                    or direction == generation_pb2.DIRECTION_UP
-                ):
-                    orig = tensor
-                    repeatCount = 256
-                    sigma /= sqrt(repeatCount)
-
-                    for _ in range(repeatCount):
-                        tensor = images.gaussianblur(tensor, sigma)
-                        if direction == generation_pb2.DIRECTION_DOWN:
-                            tensor = torch.minimum(tensor, orig)
-                        else:
-                            tensor = torch.maximum(tensor, orig)
+                if direction == generation_pb2.DIRECTION_DOWN:
+                    tensor = images.directionalblur(tensor, sigma, "down")
+                elif direction == generation_pb2.DIRECTION_UP:
+                    tensor = images.directionalblur(tensor, sigma, "up")
                 else:
-                    tensor = images.gaussianblur(tensor, adjustment.blur.sigma)
+                    tensor = images.gaussianblur(tensor, sigma)
             elif which == "invert":
                 tensor = images.invert(tensor)
             elif which == "levels":
@@ -174,7 +169,29 @@ class ParameterExtractor:
                     ],
                 )
             elif which == "rescale":
-                self.unimp("Rescale")
+                # Calculate fit mode
+                if adjustment.rescale.mode == generation_pb2.RESCALE_STRICT:
+                    fit = "strict"
+                elif adjustment.rescale.mode == generation_pb2.RESCALE_COVER:
+                    fit = "cover"
+                else:
+                    fit = "contain"
+
+                # Calculate pad mode (should only be used for CONTAIN modes)
+                pad_mode = "constant"
+                if adjustment.rescale.mode == generation_pb2.RESCALE_CONTAIN_REPLICATE:
+                    pad_mode = "replicate"
+                elif adjustment.rescale.mode == generation_pb2.RESCALE_CONTAIN_REFLECT:
+                    pad_mode = "reflect"
+
+                tensor = images.rescale(
+                    tensor,
+                    adjustment.rescale.height,
+                    adjustment.rescale.width,
+                    fit,
+                    pad_mode,
+                )
+
             elif which == "crop":
                 tensor = images.crop(
                     tensor,
@@ -184,9 +201,53 @@ class ParameterExtractor:
                     adjustment.crop.width,
                 )
 
+            elif which == "depth":
+                with self._manager.with_engine(task="depth") as estimator:
+                    tensor = estimator(tensor)
+
+            else:
+                raise ValueError(f"Unkown image adjustment {which}")
+
             self._save_debug_tensor(tensor)
 
         return tensor
+
+    def _image_from_artifact_binary(self, artifact):
+        return images.fromPngBytes(artifact.binary).to(self._manager.mode.device)
+
+    def _image_from_artifact_reference(self, artifact):
+        if artifact.ref.WhichOneof("reference") == "id":
+            test = lambda x: x.id == artifact.ref.id
+        else:
+            test = lambda x: x.uuid == artifact.ref.uuid
+
+        for prompt in self._prompt_of_type("artifact"):
+            if test(prompt.artifact):
+                return self._image_from_artifact(prompt.artifact, artifact.ref.stage)
+
+    def _image_from_artifact(
+        self,
+        artifact: generation_pb2.Artifact,
+        stage=generation_pb2.ARTIFACT_AFTER_ADJUSTMENTS,
+    ):
+        if artifact.WhichOneof("data") == "binary":
+            image = self._image_from_artifact_binary(artifact)
+        elif artifact.WhichOneof("data") == "ref":
+            image = self._image_from_artifact_reference(artifact)
+        else:
+            raise ValueError(
+                f"Can't convert Artifact of type {artifact.WhichOneof('data')} to an image"
+            )
+
+        if stage == generation_pb2.ARTIFACT_BEFORE_ADJUSTMENTS:
+            return image
+
+        image = self._apply_image_adjustment(image, artifact.adjustments)
+        if stage == generation_pb2.ARTIFACT_AFTER_ADJUSTMENTS:
+            return image
+
+        image = self._apply_image_adjustment(image, artifact.postAdjustments)
+        return image
 
     def _image_stepparameter(self, field):
         if self._request.WhichOneof("params") != "image":
@@ -328,29 +389,24 @@ class ParameterExtractor:
     def init_image(self):
         for prompt in self._prompt_of_type("artifact"):
             if prompt.artifact.type == generation_pb2.ARTIFACT_IMAGE:
-                image = images.fromPngBytes(prompt.artifact.binary).to(
-                    self._manager.mode.device
-                )
-                image = self._handleImageAdjustment(image, prompt.artifact.adjustments)
-                return image
+                return self._image_from_artifact(prompt.artifact)
 
     def mask_image(self):
         for prompt in self._prompt_of_type("artifact"):
             if prompt.artifact.type == generation_pb2.ARTIFACT_MASK:
-                mask = images.fromPngBytes(prompt.artifact.binary).to(
-                    self._manager.mode.device
-                )
-                return self._handleImageAdjustment(mask, prompt.artifact.adjustments)
+                return self._image_from_artifact(prompt.artifact)
 
     def outmask_image(self):
         for prompt in self._prompt_of_type("artifact"):
             if prompt.artifact.type == generation_pb2.ARTIFACT_MASK:
-                mask = self.get("mask_image")
-                post_adjustments = prompt.artifact.postAdjustments
-                return self._handleImageAdjustment(
-                    mask,
-                    post_adjustments if post_adjustments else DEFAULT_POST_ADJUSTMENTS,
+                return self._image_from_artifact(
+                    prompt.artifact, generation_pb2.ARTIFACT_AFTER_POSTADJUSTMENTS
                 )
+
+    def depth_map(self):
+        for prompt in self._prompt_of_type("artifact"):
+            if prompt.artifact.type == generation_pb2.ARTIFACT_DEPTH:
+                return self._image_from_artifact(prompt.artifact)
 
     def lora(self):
         loras = []
@@ -382,9 +438,7 @@ class ParameterExtractor:
         return self._image_parameter("tiling")
 
     def get(self, field):
-        if field not in self._result:
-            self._result[field] = getattr(self, field)()
-        return self._result[field]
+        return getattr(self, field)()
 
     def fields(self):
         return [
@@ -472,6 +526,10 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                 if val is not None:
                     kwargs[field] = val
 
+            if self._ram_monitor:
+                print("Arguments processed")
+                self._ram_monitor.print()
+
             stop_event = threading.Event()
             context.add_callback(lambda: stop_event.set())
 
@@ -494,6 +552,7 @@ class GenerationServiceServicer(generation_pb2_grpc.GenerationServiceServicer):
                     "init_image",
                     "mask_image",
                     "outmask_image",
+                    "depth_map",
                     "lora",
                 ]:
                     if field in logargs:

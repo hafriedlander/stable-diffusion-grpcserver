@@ -19,9 +19,10 @@ class EnginesServiceServicer(engines_pb2_grpc.EnginesServiceServicer):
         status = self._manager.getStatus()
         for engine in self._manager.engines:
             if not (
-                engine.get("id", False)
-                and engine.get("enabled", False)
-                and engine.get("visible", False)
+                engine.get("id")
+                and engine.get("enabled")
+                and engine.get("visible")
+                and engine.get("task", "generate") == "generate"
             ):
                 continue
 

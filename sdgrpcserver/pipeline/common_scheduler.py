@@ -287,10 +287,14 @@ class DiffusersSchedulerBase(CommonScheduler):
         if unet is None:
             raise ValueError("unet must be set before calling loop")
 
+        u_off = self.start_offset / len(self.scheduler.timesteps)
+        u_range = 1 - u_off
+
         timesteps_tensor = self.scheduler.timesteps[self.start_offset :].to(self.device)
 
         for i, t in enumerate(progress_wrapper(timesteps_tensor)):
-            u = i / len(timesteps_tensor)
+            u = u_off + u_range * i / len(timesteps_tensor)
+
             u = max(min(u, 0.999), 0)
             latents = unet(latents, t, u=u)
 
@@ -352,7 +356,9 @@ class KDiffusionVUNetWrapper(k_external.DiscreteVDDPMDenoiser):
 
 
 class KDiffusionPositionTracker:
-    def __init__(self, progress_wrapper, sigmas):
+    def __init__(self, progress_wrapper, u_off, sigmas):
+        self.u_off = u_off
+        self.u_range = 1 - self.u_off
         self.i = None
         self.i_max = len(sigmas) - 1
         self.progress_wrapper = progress_wrapper
@@ -370,7 +376,7 @@ class KDiffusionPositionTracker:
 
             i = len([s for s in self.sigmas if s >= sigma])
 
-        u = i / i_max
+        u = self.u_off + self.u_range * i / i_max
         return max(min(u, 0.999), 0)
 
     def trange(self, max, **kwargs):
@@ -556,7 +562,9 @@ class KDiffusionScheduler(CommonScheduler):
         sigma_min = sigmas[sigmas > 0].min()
         sigma_max = sigmas.max()
 
-        tracker = KDiffusionPositionTracker(progress_wrapper, sigmas)
+        tracker = KDiffusionPositionTracker(
+            progress_wrapper, self.start_offset / len(self.sigmas), sigmas
+        )
 
         # Unet wrapper that adds u (floating point progress, from 0..1)
         def wrapped(latents, sigma):

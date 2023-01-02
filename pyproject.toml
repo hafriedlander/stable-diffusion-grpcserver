@@ -30,6 +30,8 @@ dependencies = [
   # For K-Diffusion
   "torchdiffeq ~= 0.2.3",
   "torchsde ~= 0.2.5",
+  # For MiDaS
+  "imutils ~= 0.5.4",
   # For Server
   "protobuf ~= 3.20",
   "grpcio ~= 1.48.1",

@@ -1,6 +1,6 @@
-import functools
 import gc
 import glob
+import hashlib
 import importlib
 import inspect
 import itertools
@@ -10,26 +10,18 @@ import os
 import queue
 import shutil
 import tempfile
-import traceback
 from contextlib import contextmanager
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from queue import Queue
 from types import SimpleNamespace as SN
 from typing import Iterable, Optional, Union
+from urllib.parse import urlparse
 
-import accelerate
 import generation_pb2
 import huggingface_hub
 import torch
-from diffusers import (
-    DPMSolverMultistepScheduler,
-    LMSDiscreteScheduler,
-    ModelMixin,
-    PNDMScheduler,
-    UNet2DConditionModel,
-    pipelines,
-)
+from diffusers import ModelMixin, UNet2DConditionModel, pipelines
 from diffusers.configuration_utils import FrozenDict
 from diffusers.pipeline_utils import DiffusionPipeline, is_safetensors_compatible
 from diffusers.utils import deprecate
@@ -37,12 +29,9 @@ from huggingface_hub.file_download import http_get
 from tqdm.auto import tqdm
 from transformers import CLIPModel, PreTrainedModel
 
-from sdgrpcserver.k_diffusion import sampling as k_sampling
+from sdgrpcserver.constants import sd_cache_home
 from sdgrpcserver.pipeline.model_utils import GPUExclusionSet, clone_model
-from sdgrpcserver.pipeline.safety_checkers import FlagOnlySafetyChecker
 from sdgrpcserver.pipeline.samplers import build_sampler_set
-from sdgrpcserver.pipeline.schedulers.sample_dpmpp_2m import sample_dpmpp_2m
-from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
 from sdgrpcserver.pipeline.unified_pipeline import (
     SCHEDULER_NOISE_TYPE,
     UnifiedPipelineImageType,
@@ -53,6 +42,9 @@ DEFAULT_LIBRARIES = {
     "StableDiffusionPipeline": "stable_diffusion",
     "UnifiedPipeline": "sdgrpcserver.pipeline.unified_pipeline",
     "UpscalerPipeline": "sdgrpcserver.pipeline.upscaler_pipeline",
+    "DiffusersDepthPipeline": "sdgrpcserver.pipeline.depth.diffusers_depth_pipeline",
+    "MidasDepthPipeline": "sdgrpcserver.pipeline.depth.midas_depth_pipeline",
+    "MidasModelWrapper": "sdgrpcserver.pipeline.depth.midas_model_wrapper",
 }
 
 TYPE_CLASSES = {
@@ -66,6 +58,8 @@ TYPE_CLASSES = {
     "text_encoder": "transformers.CLIPTextModel",
     "inpaint_text_encoder": "transformers.CLIPTextModel",
     "upscaler": "sdgrpcserver.pipeline.upscaler_pipeline.NoiseLevelAndTextConditionedUpscaler",
+    "depth_estimator": "transformers.DPTForDepthEstimation",
+    "midas_depth_estimator": "MidasModelWrapper",
 }
 
 
@@ -224,13 +218,82 @@ class BatchMode:
         torch.cuda.set_per_process_memory_fraction(1.0)
 
 
-class PipelineWrapper(object):
+class PipelineWrapper:
     def __init__(self, id, mode, pipeline):
         self._id = id
         self._mode = mode
 
         self._pipeline = pipeline
         self._previous = None
+
+    @property
+    def id(self):
+        return self._id
+
+    @property
+    def mode(self):
+        return self._mode
+
+    def pipeline_modules(self):
+        pipeline_module_helper = getattr(self._pipeline, "pipeline_modules", None)
+
+        if pipeline_module_helper:
+            for name, module in pipeline_module_helper():
+                yield name, module
+
+        else:
+            module_names, *_ = self._pipeline.extract_init_dict(
+                dict(self._pipeline.config)
+            )
+            for name in module_names.keys():
+                module = getattr(self._pipeline, name)
+                if isinstance(module, torch.nn.Module):
+                    yield name, module
+
+    def _delay(self, name, module):
+        return False
+
+    def activate(self, device):
+        if self._previous is not None:
+            raise Exception("Activate called without previous deactivate")
+
+        self._previous = {}
+
+        exclusion_set = GPUExclusionSet(1)
+
+        for name, module in self.pipeline_modules():
+            self._previous[name] = module
+
+            # Clone from CPU to either CUDA or Meta with a hook to move to CUDA
+            cloned = clone_model(
+                module,
+                device,
+                exclusion_set=exclusion_set if self._delay(name, module) else None,
+            )
+
+            # And set it on the pipeline
+            setattr(self._pipeline, name, cloned)
+
+    def deactivate(self):
+        if self._previous is None:
+            raise Exception("Deactivate called without previous activate")
+
+        for name, module in self.pipeline_modules():
+            setattr(self._pipeline, name, self._previous.get(name))
+
+        self._previous = None
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def __call__(self, *args, **kwargs):
+        return self._pipeline(*args, **kwargs)
+
+
+class GeneratePipelineWrapper(PipelineWrapper):
+    def __init__(self, id, mode, pipeline):
+        super().__init__(id, mode, pipeline)
 
         if self.mode.attention_slice:
             self._pipeline.enable_attention_slicing("auto")
@@ -271,65 +334,18 @@ class PipelineWrapper(object):
 
         return scheduler
 
-    @property
-    def id(self):
-        return self._id
+    def _delay(self, name, module):
+        # Should we delay moving this to CUDA until forward is called?
+        if self.mode.all_exclusion:
+            return True
+        elif self.mode.allexceptclip_exclusion:
+            if not isinstance(module, CLIPModel):
+                return True
+        elif self.mode.unet_exclusion:
+            if isinstance(module, UNet2DConditionModel):
+                return True
 
-    @property
-    def mode(self):
-        return self._mode
-
-    def pipeline_modules(self):
-        module_names, *_ = self._pipeline.extract_init_dict(dict(self._pipeline.config))
-        for name in module_names.keys():
-            module = getattr(self._pipeline, name)
-            if isinstance(module, torch.nn.Module):
-                yield name, module
-
-    def activate(self, device):
-        if self._previous is not None:
-            raise Exception("Activate called without previous deactivate")
-
-        self._previous = {}
-
-        exclusion_set = GPUExclusionSet(1)
-
-        for name, module in self.pipeline_modules():
-            self._previous[name] = module
-
-            # Should we delay moving this to CUDA until forward is called?
-            delayed = False
-            if self.mode.all_exclusion:
-                delayed = True
-            elif self.mode.allexceptclip_exclusion:
-                if not isinstance(module, CLIPModel):
-                    delayed = True
-            elif self.mode.unet_exclusion:
-                if isinstance(module, UNet2DConditionModel):
-                    delayed = True
-
-            # Clone from CPU to either CUDA or Meta with a hook to move to CUDA
-            cloned = clone_model(
-                module,
-                device,
-                exclusion_set=exclusion_set if delayed else None,
-            )
-
-            # And set it on the pipeline
-            setattr(self._pipeline, name, cloned)
-
-    def deactivate(self):
-        if self._previous is None:
-            raise Exception("Deactivate called without previous activate")
-
-        for name, module in self.pipeline_modules():
-            setattr(self._pipeline, name, self._previous.get(name))
-
-        self._previous = None
-
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        return False
 
     def get_samplers(self):
         return self._samplers
@@ -365,6 +381,7 @@ class PipelineWrapper(object):
         init_image: Optional[UnifiedPipelineImageType] = None,
         mask_image: Optional[UnifiedPipelineImageType] = None,
         outmask_image: Optional[UnifiedPipelineImageType] = None,
+        depth_map: Optional[UnifiedPipelineImageType] = None,
         # The strength of the img2img or inpaint process, if init_image is provided
         strength: float = None,
         # Lora
@@ -429,6 +446,7 @@ class PipelineWrapper(object):
             init_image=init_image,
             mask_image=mask_image,
             outmask_image=outmask_image,
+            depth_map=depth_map,
             strength=strength,
             lora=lora,
             hires_fix=hires_fix,
@@ -453,16 +471,6 @@ class PipelineWrapper(object):
         images = self._pipeline(**pipeline_args)
 
         return images
-
-
-# TODO: Not here
-default_home = os.path.join(os.path.expanduser("~"), ".cache")
-sd_cache_home = os.path.expanduser(
-    os.getenv(
-        "SD_HOME",
-        os.path.join(os.getenv("XDG_CACHE_HOME", default_home), "sdgrpcserver"),
-    )
-)
 
 
 class ModelSet(SN):
@@ -521,7 +529,7 @@ class EngineManager(object):
         ram_monitor=None,
     ):
         self.engines = engines
-        self._default = None
+        self._defaults = {}
 
         # Models that are explictly loaded with a model_id and can be referenced
         self._models = {}
@@ -684,29 +692,50 @@ class EngineManager(object):
 
         return self._get_hf_path(spec, local_only=False)
 
-    def _get_url_path(self, spec):
-        id = urls["id"]
+    def _get_url_path(self, spec, local_only=True):
+        urls = spec.get("urls")
+
+        if not urls:
+            raise ValueError("No URL was provided")
+
+        if isinstance(urls, str):
+            id = hashlib.sha1(urls.encode("utf-8")).hexdigest()
+            _, filename = os.path.split(urlparse(urls).path)
+            urls = {filename: urls}
+        else:
+            id = urls["id"]
+            urls = {k: v for k, v in urls.items() if k != "id"}
+
         cache_path = os.path.join(sd_cache_home, id)
+
+        if os.path.isdir(cache_path):
+            exists = {
+                name: os.path.isfile(os.path.join(cache_path, name))
+                for name in urls.keys()
+            }
+            if all(exists.values()):
+                return cache_path
+            elif local_only:
+                raise ValueError(
+                    f"Items missing from cache: {[name for name, exist in exists.items() if not exist]}"
+                )
+        elif local_only:
+            raise ValueError("No local cache for URL")
+
         os.makedirs(cache_path, exist_ok=True)
 
-        try:
-            for name, url in urls.items():
-                if name == "id":
-                    continue
-                full_name = os.path.join(cache_path, name)
-                if os.path.exists(full_name):
-                    continue
+        for name, url in urls.items():
+            full_name = os.path.join(cache_path, name)
+            if os.path.exists(full_name):
+                continue
 
-                with tempfile.NamedTemporaryFile(
-                    mode="wb", dir=cache_path, delete=False
-                ) as temp_file:
-                    http_get(url, temp_file)
-                    os.replace(temp_file.name, full_name)
-        except:
-            failures.append("    - Download failed. Error was:")
-            failures.append(traceback.format_exc())
-        else:
-            return cache_path
+            with tempfile.NamedTemporaryFile(
+                mode="wb", dir=cache_path, delete=False
+            ) as temp_file:
+                http_get(url, temp_file)
+                os.replace(temp_file.name, full_name)
+
+        return cache_path
 
     def _get_weight_path_candidates(self, spec: dict):
         candidates = []
@@ -727,9 +756,12 @@ class EngineManager(object):
             )
         )
 
-        # 1st: If this model should explicitly be refreshed, try refreshing from HuggingFace
+        # 1st: If this model should explicitly be refreshed, try refreshing from...
         if matches_refresh:
+            # HuggingFace
             add_candidate(self._get_hf_path, local_only=False)
+            # Or an explicit URL
+            add_candidate(self._get_url_path, local_only=False)
         # 2nd: If we're in fp16 mode, try loading the fp16-specific local model
         if self.mode.fp16:
             add_candidate(self._get_local_path, fp16=True)
@@ -737,10 +769,13 @@ class EngineManager(object):
         add_candidate(self._get_local_path, fp16=False)
         # 4th: Try loading from the existing HuggingFace cache
         add_candidate(self._get_hf_path, local_only=True)
-        # 5th: If this model wasn't explicitly flagged to be refreshed, try anyway
+        # 5th: Try loading from an already-downloaded explicit URL
+        add_candidate(self._get_url_path, local_only=True)
+        # 6th: If this model wasn't explicitly flagged to be refreshed, try anyway
         if not matches_refresh:
             add_candidate(self._get_hf_path, local_only=False)
-        # 6th: If configured so, try a forced empty-cache-and-reload from HuggingFace
+            add_candidate(self._get_url_path, local_only=False)
+        # 7th: If configured so, try a forced empty-cache-and-reload from HuggingFace
         if self._refresh_on_error:
             add_candidate(self._get_hf_forced_path)
 
@@ -974,6 +1009,8 @@ class EngineManager(object):
         # Call the correct subroutine based on source to build the model
         if isinstance(model, str) and model.startswith("@"):
             model = self._load_from_reference(model[1:])
+        elif isinstance(model, str) and model.startswith("!empty"):
+            model = ModelSet()
         else:
             model, _ = self._load_from_weight_candidates(spec)
 
@@ -1047,7 +1084,13 @@ class EngineManager(object):
                     f"Engine {spec['id']} has options, but created pipeline rejected them"
                 )
 
-        return PipelineWrapper(id=spec["id"], mode=self._mode, pipeline=pipeline)
+        task = spec.get("task", "generate")
+        if task == "generate":
+            wrap_class = GeneratePipelineWrapper
+        else:
+            wrap_class = PipelineWrapper
+
+        return wrap_class(id=spec["id"], mode=self._mode, pipeline=pipeline)
 
     def loadPipelines(self):
 
@@ -1057,14 +1100,13 @@ class EngineManager(object):
             if not engine.get("enabled", True):
                 continue
 
-            # Models are loaded on demand (so we don't load models that aren't referenced)
-            modelid = engine.get("model_id", None)
-            if modelid is not None:
+            # If this isn't an engine (but a model, or a depth extractor, skip)
+            if "id" not in engine:
                 continue
 
             engineid = engine["id"]
             if engine.get("default", False):
-                self._default = engineid
+                self._defaults[engine.get("task", "generate")] = engineid
 
             print(f"  - Engine {engineid}...")
             self._engine_models[engineid] = self._load_model(engine)
@@ -1250,14 +1292,14 @@ class EngineManager(object):
         return pipeline
 
     @contextmanager
-    def with_engine(self, id=None):
+    def with_engine(self, id=None, task=None):
         """
         Get and activate a pipeline
         TODO: Better activate / deactivate logic. Right now we just keep a max of one pipeline active.
         """
 
         if id is None:
-            id = self._default
+            id = self._defaults[task if task else "generate"]
 
         if id is None:
             raise EngineNotFoundError("No engine ID provided and no default is set.")
@@ -1266,6 +1308,11 @@ class EngineManager(object):
         spec = self._find_spec(id=id)
         if not spec or not spec.get("enabled", False):
             raise EngineNotFoundError(f"Engine ID {id} doesn't exist or isn't enabled.")
+
+        if task is not None and task != spec.get("task", "generate"):
+            raise ValueError(
+                f"Engine ID {id} is for task '{spec.get('task', 'generate')}' not '{task}'"
+            )
 
         # Get device queue slot
         slot = self._device_queue.get()

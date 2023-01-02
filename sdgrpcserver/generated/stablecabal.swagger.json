@@ -106,7 +106,8 @@
               "ARTIFACT_MASK",
               "ARTIFACT_LATENT",
               "ARTIFACT_TENSOR",
-              "ARTIFACT_LORA"
+              "ARTIFACT_LORA",
+              "ARTIFACT_DEPTH"
             ],
             "default": "ARTIFACT_NONE"
           },
@@ -464,7 +465,8 @@
               "ARTIFACT_MASK",
               "ARTIFACT_LATENT",
               "ARTIFACT_TENSOR",
-              "ARTIFACT_LORA"
+              "ARTIFACT_LORA",
+              "ARTIFACT_DEPTH"
             ],
             "default": "ARTIFACT_NONE"
           },
@@ -818,6 +820,10 @@
           "description": "A Lora embedding",
           "title": "RGB tensor (C,H,W)\n   VAE latent (C,H//8,W//8, assuming VAE-f8)"
         },
+        "ref": {
+          "$ref": "#/definitions/ArtifactReference",
+          "title": "A reference to a previous Artifact"
+        },
         "index": {
           "type": "integer",
           "format": "int64",
@@ -858,6 +864,30 @@
       },
       "description": "A tangible Artifact, such as an image, video, or text that is used for input\nor output."
     },
+    "ArtifactReference": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "uuid": {
+          "type": "string"
+        },
+        "stage": {
+          "$ref": "#/definitions/ArtifactStage"
+        }
+      }
+    },
+    "ArtifactStage": {
+      "type": "string",
+      "enum": [
+        "ARTIFACT_BEFORE_ADJUSTMENTS",
+        "ARTIFACT_AFTER_ADJUSTMENTS",
+        "ARTIFACT_AFTER_POSTADJUSTMENTS"
+      ],
+      "default": "ARTIFACT_BEFORE_ADJUSTMENTS"
+    },
     "ArtifactType": {
       "type": "string",
       "enum": [
@@ -871,7 +901,8 @@
         "ARTIFACT_MASK",
         "ARTIFACT_LATENT",
         "ARTIFACT_TENSOR",
-        "ARTIFACT_LORA"
+        "ARTIFACT_LORA",
+        "ARTIFACT_DEPTH"
       ],
       "default": "ARTIFACT_NONE"
     },
@@ -1415,6 +1446,9 @@
         },
         "crop": {
           "$ref": "#/definitions/ImageAdjustment_Crop"
+        },
+        "depth": {
+          "$ref": "#/definitions/ImageAdjustment_Depth"
         }
       }
     },
@@ -1453,6 +1487,18 @@
         "height": {
           "type": "string",
           "format": "uint64"
+        }
+      }
+    },
+    "ImageAdjustment_Depth": {
+      "type": "object",
+      "properties": {
+        "depthEngineHint": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "title": "You can provide a list of depth engine ID preferences, first match will be used,\nor default engine if no match"
         }
       }
     },
@@ -1729,10 +1775,13 @@
       "type": "string",
       "enum": [
         "RESCALE_STRICT",
-        "RESCALE_CROP",
-        "RESCALE_FIT"
+        "RESCALE_COVER",
+        "RESCALE_CONTAIN_ZERO",
+        "RESCALE_CONTAIN_REPLICATE",
+        "RESCALE_CONTAIN_REFLECT"
       ],
-      "default": "RESCALE_STRICT"
+      "default": "RESCALE_STRICT",
+      "title": "- RESCALE_COVER: Completely cover the rescale height and width, maintaining aspect ratio, cropping any extra\n - RESCALE_CONTAIN_ZERO: Fit the complete source image into the rescale height and width, maintaining aspect ratio, background to be filled with zeros\n - RESCALE_CONTAIN_REPLICATE: Fit the complete source image into the rescale height and width, maintaining aspect ratio, background to be filled with the edge of the image repeating\n - RESCALE_CONTAIN_REFLECT: Fit the complete source image into the rescale height and width, maintaining aspect ratio, background to be filled with the image mirrored"
     },
     "Safetensors": {
       "type": "object",
