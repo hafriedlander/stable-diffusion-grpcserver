@@ -1081,6 +1081,9 @@ class UnifiedPipeline(DiffusionPipeline):
         self._check_scheduler_config(scheduler)
         self._check_unet_config(unet)
 
+        # Grafted depth uses a depth_unet from a different model than the primary model
+        # as guidance to get some of the benefits from depth2img without having depth model trained
+        self._grafted_depth = False
         # Grafted inpaint uses an inpaint_unet from a different model than the primary model
         # as guidance to produce a nicer inpaint that EnhancedInpaintMode otherwise can
         self._grafted_inpaint = False
@@ -1190,7 +1193,9 @@ class UnifiedPipeline(DiffusionPipeline):
 
     def set_options(self, options):
         for key, value in options.items():
-            if key == "grafted_inpaint":
+            if key == "grafted_depth":
+                self._grafted_depth = bool(value)
+            elif key == "grafted_inpaint":
                 self._grafted_inpaint = bool(value)
             elif key == "hires_fix":
                 self._hires_fix = bool(value)
@@ -1621,11 +1626,21 @@ class UnifiedPipeline(DiffusionPipeline):
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance: bool = guidance_scale > 1.0
 
-        do_grafted_inpaint = (
+        grafted_mode_class = None
+
+        if (
+            depth_map is not None
+            and self.depth_unet is not None
+            and self._grafted_depth
+        ):
+            grafted_mode_class = Img2imgMode
+
+        if (
             mask_image is not None
             and self.inpaint_unet is not None
             and self._grafted_inpaint
-        )
+        ):
+            grafted_mode_class = EnhancedInpaintMode
 
         mode_tree = ModeTreeRoot()
 
@@ -1643,12 +1658,12 @@ class UnifiedPipeline(DiffusionPipeline):
         else:
             mode_tree.leaf({"mode_class": Txt2imgMode, "unet": self.unet})
 
-        if do_grafted_inpaint:
+        if grafted_mode_class:
             mode_tree.wrap(
                 None,
                 lambda child_opts: {
                     **child_opts,
-                    "mode_class": EnhancedInpaintMode,
+                    "mode_class": grafted_mode_class,
                     "unet": self.unet,
                 },
                 GraftUnets,
