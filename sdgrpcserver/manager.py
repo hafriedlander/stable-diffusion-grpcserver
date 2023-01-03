@@ -707,6 +707,7 @@ class EngineManager(object):
             urls = {k: v for k, v in urls.items() if k != "id"}
 
         cache_path = os.path.join(sd_cache_home, id)
+        temp_path = os.path.join(sd_cache_home, "temp")
 
         if os.path.isdir(cache_path):
             exists = {
@@ -723,17 +724,22 @@ class EngineManager(object):
             raise ValueError("No local cache for URL")
 
         os.makedirs(cache_path, exist_ok=True)
+        os.makedirs(temp_path, exist_ok=True)
 
         for name, url in urls.items():
             full_name = os.path.join(cache_path, name)
             if os.path.exists(full_name):
                 continue
 
+            temp_name = None
             with tempfile.NamedTemporaryFile(
-                mode="wb", dir=cache_path, delete=False
+                mode="wb", dir=temp_path, delete=False
             ) as temp_file:
                 http_get(url, temp_file)
-                os.replace(temp_file.name, full_name)
+                temp_name = temp_file.name
+
+            if temp_name:
+                os.replace(temp_name, full_name)
 
         return cache_path
 
