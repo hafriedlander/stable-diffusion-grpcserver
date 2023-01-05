@@ -325,15 +325,17 @@ class Depth2imgMode(Img2imgMode):
             depth_map = depth_map[None, ...]
 
         depth_map = depth_map[:, [0]]
-        depth_map = 2.0 * depth_map - 1.0
         depth_map = depth_map.to(self.device, self.latents_dtype)
 
         depth_map = images.resize_right(
             depth_map,
             out_shape=[depth_map.shape[-2] // 8, depth_map.shape[-1] // 8],
             interp_method=images.interp_methods.lanczos2,
-            antialiasing=True,
+            pad_mode="replicate",
+            antialiasing=False,
         ).clamp(0, 1)
+
+        depth_map = 2.0 * depth_map - 1.0
 
         # Store regular and CFG versions
         self.depth_map = depth_map

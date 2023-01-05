@@ -34,15 +34,15 @@ class MidasDepthPipeline:
         sample = sample.to(device, dtype)
         depth_map = self.midas_depth_estimator(sample)
 
-        # _model output is a single monochrome 1HW. Convert to B1HW format
-        depth_map = depth_map.unsqueeze(1)
+        # _model output is a single monochrome 1HW. Convert to B1HW format and
+        # resize back to original size
 
-        # Resize back to original size
         depth_map = images.resize_right(
-            depth_map,
+            depth_map.unsqueeze(1),
             out_shape=tensor.shape[-2:],
             interp_method=images.interp_methods.lanczos2,
             pad_mode="replicate",
+            antialiasing=False,
         )
 
         # Normalise
