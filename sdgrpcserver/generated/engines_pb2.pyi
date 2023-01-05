@@ -103,6 +103,7 @@ class EngineInfo(google.protobuf.message.Message):
     NAME_FIELD_NUMBER: builtins.int
     DESCRIPTION_FIELD_NUMBER: builtins.int
     SUPPORTED_SAMPLERS_FIELD_NUMBER: builtins.int
+    ACCEPTED_PROMPT_ARTIFACTS_FIELD_NUMBER: builtins.int
     id: builtins.str
     owner: builtins.str
     ready: builtins.bool
@@ -112,6 +113,8 @@ class EngineInfo(google.protobuf.message.Message):
     description: builtins.str
     @property
     def supported_samplers(self) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[global___EngineSampler]: ...
+    @property
+    def accepted_prompt_artifacts(self) -> google.protobuf.internal.containers.RepeatedScalarFieldContainer[generation_pb2.ArtifactType.ValueType]: ...
     def __init__(
         self,
         *,
@@ -123,8 +126,9 @@ class EngineInfo(google.protobuf.message.Message):
         name: builtins.str = ...,
         description: builtins.str = ...,
         supported_samplers: collections.abc.Iterable[global___EngineSampler] | None = ...,
+        accepted_prompt_artifacts: collections.abc.Iterable[generation_pb2.ArtifactType.ValueType] | None = ...,
     ) -> None: ...
-    def ClearField(self, field_name: typing_extensions.Literal["description", b"description", "id", b"id", "name", b"name", "owner", b"owner", "ready", b"ready", "supported_samplers", b"supported_samplers", "tokenizer", b"tokenizer", "type", b"type"]) -> None: ...
+    def ClearField(self, field_name: typing_extensions.Literal["accepted_prompt_artifacts", b"accepted_prompt_artifacts", "description", b"description", "id", b"id", "name", b"name", "owner", b"owner", "ready", b"ready", "supported_samplers", b"supported_samplers", "tokenizer", b"tokenizer", "type", b"type"]) -> None: ...
 
 global___EngineInfo = EngineInfo
 

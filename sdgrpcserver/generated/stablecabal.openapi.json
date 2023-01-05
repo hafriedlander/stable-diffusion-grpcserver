@@ -1364,6 +1364,12 @@
                         "items": {
                             "$ref": "#/components/schemas/EngineSampler"
                         }
+                    },
+                    "acceptedPromptArtifacts": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/ArtifactType"
+                        }
                     }
                 },
                 "title": "Engine info struct"

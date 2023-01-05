@@ -4,11 +4,14 @@ import engines_pb2
 import engines_pb2_grpc
 import generation_pb2
 
+from sdgrpcserver.manager import EngineManager, ModelSet
 from sdgrpcserver.pipeline.samplers import sampler_properties
 from sdgrpcserver.services.exception_to_grpc import exception_to_grpc
 
 
 class EnginesServiceServicer(engines_pb2_grpc.EnginesServiceServicer):
+    _manager: EngineManager
+
     def __init__(self, manager):
         self._manager = manager
 
@@ -37,11 +40,33 @@ class EnginesServiceServicer(engines_pb2_grpc.EnginesServiceServicer):
             fqclass_name = engine.get("class", "UnifiedPipeline")
             class_obj = self._manager._import_class(fqclass_name)
 
+            # Calculate samplers
+
             for sampler in sampler_properties(
                 include_diffusers=getattr(class_obj, "_diffusers_capable", True),
                 include_kdiffusion=getattr(class_obj, "_kdiffusion_capable", False),
             ):
                 info.supported_samplers.append(engines_pb2.EngineSampler(**sampler))
+
+            # Calculate supported inputs
+
+            init_args = inspect.signature(class_obj.__init__).parameters.keys()
+            call_args = inspect.signature(class_obj.__call__).parameters.keys()
+            model: ModelSet = self._manager._engine_models.get(engine["id"])
+
+            if "prompt" in call_args:
+                info.accepted_prompt_artifacts.append(generation_pb2.ARTIFACT_TEXT)
+            if "init_image" in call_args:
+                info.accepted_prompt_artifacts.append(generation_pb2.ARTIFACT_IMAGE)
+            if "mask_image" in call_args:
+                info.accepted_prompt_artifacts.append(generation_pb2.ARTIFACT_MASK)
+            if "depth_map" in call_args:
+                if "depth_unet" in model or "depth_unet" not in init_args:
+                    info.accepted_prompt_artifacts.append(generation_pb2.ARTIFACT_DEPTH)
+            if "lora" in call_args:
+                info.accepted_prompt_artifacts.append(generation_pb2.ARTIFACT_LORA)
+
+            # Add to list of engines
 
             engines.engine.append(info)
 

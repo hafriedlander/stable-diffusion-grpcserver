@@ -1220,6 +1220,12 @@
           "items": {
             "$ref": "#/definitions/EngineSampler"
           }
+        },
+        "acceptedPromptArtifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ArtifactType"
+          }
         }
       },
       "title": "Engine info struct"
