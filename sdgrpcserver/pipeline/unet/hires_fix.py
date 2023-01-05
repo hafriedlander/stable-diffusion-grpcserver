@@ -46,8 +46,9 @@ def scale_into(latents, scale, target=None, target_shape=None):
     latents = resize_right.resize(
         latents,
         scale_factors=scale,
-        pad_mode="replicate",
         interp_method=resize_right.interp_methods.lanczos2,
+        pad_mode="replicate",
+        antialiasing=False,
     )
     # latents = resize_nearest(latents, scale)
 
