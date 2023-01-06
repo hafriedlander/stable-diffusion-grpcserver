@@ -5,16 +5,16 @@
 	path = nonfree/ToMe
 	url = https://github.com/facebookresearch/ToMe.git
 [submodule "sdgrpcserver/src/k-diffusion"]
-	path = sdgrpcserver/src/k-diffusion
+	path = gyre/src/k-diffusion
 	url = https://github.com/crowsonkb/k-diffusion.git
 [submodule "sdgrpcserver/src/ResizeRight"]
-	path = sdgrpcserver/src/ResizeRight
+	path = gyre/src/ResizeRight
 	url = https://github.com/assafshocher/ResizeRight.git
 	ignore = dirty
 [submodule "sdgrpcserver/src/lora"]
-	path = sdgrpcserver/src/lora
+	path = gyre/src/lora
 	url = https://github.com/cloneofsimo/lora.git
 [submodule "sdgrpcserver/src/midas"]
-	path = sdgrpcserver/src/midas
+	path = gyre/src/midas
 	url = https://github.com/hafriedlander/MiDaS.git
 	
