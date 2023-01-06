@@ -1,6 +1,6 @@
 import os
 
-from sdgrpcserver import images
+from gyre import images
 
 DEFAULT_ENABLED = set(
     [

@@ -2,9 +2,9 @@ from typing import cast
 
 import torch
 
-from sdgrpcserver.pipeline.easing import Easing
-from sdgrpcserver.pipeline.randtools import batched_rand
-from sdgrpcserver.pipeline.unet.types import (
+from gyre.pipeline.easing import Easing
+from gyre.pipeline.randtools import batched_rand
+from gyre.pipeline.unet.types import (
     DiffusersSchedulerUNet,
     GenericSchedulerUNet,
     KDiffusionSchedulerUNet,

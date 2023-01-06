@@ -7,13 +7,13 @@ import torch
 from diffusers.schedulers.scheduling_utils import SchedulerMixin
 from torch import FloatTensor, IntTensor, Tensor
 
-from sdgrpcserver.k_diffusion import external as k_external
-from sdgrpcserver.k_diffusion import sampling as k_sampling
-from sdgrpcserver.k_diffusion import utils as k_utils
-from sdgrpcserver.patching import patch_module_references
-from sdgrpcserver.pipeline.kschedulers.scheduling_utils import KSchedulerMixin
-from sdgrpcserver.pipeline.randtools import batched_randn
-from sdgrpcserver.pipeline.unet.types import (
+from gyre.k_diffusion import external as k_external
+from gyre.k_diffusion import sampling as k_sampling
+from gyre.k_diffusion import utils as k_utils
+from gyre.patching import patch_module_references
+from gyre.pipeline.kschedulers.scheduling_utils import KSchedulerMixin
+from gyre.pipeline.randtools import batched_randn
+from gyre.pipeline.unet.types import (
     DiffusersSchedulerUNet,
     EpsTensor,
     KDiffusionSchedulerUNet,

@@ -12,8 +12,8 @@ from concurrent import futures
 
 import yaml
 
-from sdgrpcserver.pipeline.xformers_utils import xformers_mea_available
-from sdgrpcserver.ram_monitor import RamMonitor
+from gyre.pipeline.xformers_utils import xformers_mea_available
+from gyre.ram_monitor import RamMonitor
 
 try:
     from yaml import CLoader as Loader
@@ -29,7 +29,7 @@ from twisted.web.resource import ForbiddenResource, NoResource
 from twisted.web.wsgi import WSGIResource
 from wsgicors import CORS
 
-from sdgrpcserver.sonora.wsgi import grpcWSGI
+from gyre.sonora.wsgi import grpcWSGI
 
 # Google protoc compiler is dumb about imports (https://github.com/protocolbuffers/protobuf/issues/1491)
 # TODO: Move to https://github.com/danielgtaylor/python-betterproto
@@ -45,13 +45,13 @@ import dashboard_pb2_grpc
 import engines_pb2_grpc
 import generation_pb2_grpc
 
-from sdgrpcserver.debug_recorder import DebugNullRecorder, DebugRecorder
-from sdgrpcserver.http.grpc_gateway import GrpcGatewayRouter
-from sdgrpcserver.http.stability_rest_api import StabilityRESTAPIRouter
-from sdgrpcserver.manager import BatchMode, EngineManager, EngineMode
-from sdgrpcserver.services.dashboard import DashboardServiceServicer
-from sdgrpcserver.services.engines import EnginesServiceServicer
-from sdgrpcserver.services.generate import GenerationServiceServicer
+from gyre.debug_recorder import DebugNullRecorder, DebugRecorder
+from gyre.http.grpc_gateway import GrpcGatewayRouter
+from gyre.http.stability_rest_api import StabilityRESTAPIRouter
+from gyre.manager import BatchMode, EngineManager, EngineMode
+from gyre.services.dashboard import DashboardServiceServicer
+from gyre.services.engines import EnginesServiceServicer
+from gyre.services.generate import GenerationServiceServicer
 
 
 class DartGRPCCompatibility(object):
@@ -524,7 +524,7 @@ def main():
 
     if args.reload:
         # start_reloader will only return in a monitored subprocess
-        reloader = hupper.start_reloader("sdgrpcserver.server.main", reload_interval=10)
+        reloader = hupper.start_reloader("gyre.server.main", reload_interval=10)
 
     debug_recorder = DebugNullRecorder()
 

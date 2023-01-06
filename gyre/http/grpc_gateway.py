@@ -6,7 +6,7 @@ from twisted.web import resource
 from twisted.web.resource import NoResource
 from twisted.web.server import NOT_DONE_YET
 
-from sdgrpcserver.http.grpc_gateway_controller import GRPCGatewayController
+from gyre.http.grpc_gateway_controller import GRPCGatewayController
 
 
 class GrpcGateway_EnginesController(GRPCGatewayController):

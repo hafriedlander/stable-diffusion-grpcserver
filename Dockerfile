@@ -26,7 +26,7 @@ ENV FLIT_ROOT_INSTALL=1
 
 # We copy only the minimum for flit to run so avoid cache invalidation on code changes
 COPY pyproject.toml .
-COPY sdgrpcserver/__init__.py sdgrpcserver/
+COPY gyre/__init__.py gyre/
 RUN touch README.md
 RUN /bin/micromamba -r /env -n sd-grpc-server run flit install --pth-file
 RUN /bin/micromamba -r /env -n sd-grpc-server run pip cache purge
@@ -83,14 +83,14 @@ ENV PATH      $NVM_DIR/versions/node/v$NODE_VERSION/bin:$PATH
 RUN npm install -g localtunnel
 
 # Now we can copy everything we need
-COPY sdgrpcserver /sdgrpcserver/
+COPY gyre /gyre/
 COPY server.py .
 
 # Set up some config files
 RUN mkdir -p /huggingface
 RUN mkdir -p /weights
 RUN mkdir -p /config
-COPY sdgrpcserver/config/engines.yaml /config/engines.yaml
+COPY gyre/config/engines.yaml /config/engines.yaml
 
 # Set up some environment files
 

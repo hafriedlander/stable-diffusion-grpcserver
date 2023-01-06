@@ -1,11 +1,16 @@
-from test_harness import TestHarness, VRAMUsageMonitor, ALGORITHMS
-import os, sys, re, time
+import os
+import re
+import sys
+import time
 from types import SimpleNamespace as SN
 
+import generation_pb2
+import generation_pb2_grpc
 import torch
+from test_harness import ALGORITHMS, TestHarness, VRAMUsageMonitor
 
-from sdgrpcserver import images
-import generation_pb2, generation_pb2_grpc
+from gyre import images
+
 
 class TestRunner(TestHarness):
     """

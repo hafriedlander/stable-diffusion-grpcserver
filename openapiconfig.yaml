@@ -1,4 +1,4 @@
-name: sdgrpcserver
+name: gyre
 title: Stable Diffusion Image Generation API
 http:
   rules:

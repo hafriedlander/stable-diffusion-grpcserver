@@ -1,6 +1,7 @@
+from echo.echo import echo_pb2, echo_pb2_grpc
 from google.protobuf.duration_pb2 import Duration
-from sdgrpcserver.sonora import client
-from echo.echo import echo_pb2_grpc, echo_pb2
+
+from gyre.sonora import client
 
 c = client.insecure_web_channel("http://localhost:8888")
 x = echo_pb2_grpc.EchoServiceStub(c)

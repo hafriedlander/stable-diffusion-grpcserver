@@ -6,10 +6,10 @@ from typing import TypeVar, cast
 import numpy as np
 import torch
 
-from sdgrpcserver.src.ResizeRight import interp_methods
+from gyre.src.ResizeRight import interp_methods
 
 sys.modules["interp_methods"] = interp_methods
-from sdgrpcserver.src.ResizeRight import resize_right  # noqa: E402
+from gyre.src.ResizeRight import resize_right  # noqa: E402
 
 T = TypeVar("T", bound=torch.Tensor | np.ndarray)
 

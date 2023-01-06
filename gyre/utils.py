@@ -1,16 +1,17 @@
 
-from array import ArrayType
 import io
-import PIL
-from PIL import PngImagePlugin
-import numpy as np
+from array import ArrayType
+
 import cv2 as cv
-import torch
-
 import generation_pb2
+import numpy as np
+import PIL
+import torch
+from PIL import PngImagePlugin
 
-from sdgrpcserver import images
-from sdgrpcserver.pipeline.vae_approximator import VaeApproximator
+from gyre import images
+from gyre.pipeline.vae_approximator import VaeApproximator
+
 
 def artifact_to_image(artifact):
     if artifact.type == generation_pb2.ARTIFACT_IMAGE or artifact.type == generation_pb2.ARTIFACT_MASK:

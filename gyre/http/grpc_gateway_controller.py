@@ -5,7 +5,7 @@ from google.protobuf import json_format as pb_json_format
 from google.protobuf.message import Message
 from twisted.web.error import Error as WebError
 
-from sdgrpcserver.http.json_api_controller import JSONAPIController
+from gyre.http.json_api_controller import JSONAPIController
 
 GRPC_HTTP_CODES = {
     grpc.StatusCode.OK: 200,

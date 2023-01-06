@@ -2,7 +2,7 @@
 isort:skip_file
 """
 from test_harness import TestHarness, ALGORITHMS
-from sdgrpcserver import images
+from gyre import images
 from PIL import Image, ImageOps
 
 

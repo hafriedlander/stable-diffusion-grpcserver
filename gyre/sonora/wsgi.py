@@ -5,7 +5,7 @@ from urllib.parse import quote
 
 import grpc
 
-from sdgrpcserver.sonora import protocol
+from gyre.sonora import protocol
 
 _HandlerCallDetails = namedtuple(
     "_HandlerCallDetails", ("method", "invocation_metadata")

@@ -5,7 +5,7 @@ from collections import OrderedDict
 from PIL import Image, ImageOps
 from test_harness import ALGORITHMS, TestHarness, VRAMUsageMonitor, generation_pb2
 
-from sdgrpcserver import images
+from gyre import images
 
 
 def load_masked_image(path):

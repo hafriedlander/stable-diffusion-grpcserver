@@ -2,10 +2,10 @@ from typing import Literal, Sequence, cast
 
 import torch
 
-from sdgrpcserver import resize_right
-from sdgrpcserver.pipeline.easing import Easing
-from sdgrpcserver.pipeline.randtools import batched_rand
-from sdgrpcserver.pipeline.unet.types import (
+from gyre import resize_right
+from gyre.pipeline.easing import Easing
+from gyre.pipeline.randtools import batched_rand
+from gyre.pipeline.unet.types import (
     DiffusersSchedulerUNet,
     EpsTensor,
     GenericSchedulerUNet,
@@ -15,7 +15,7 @@ from sdgrpcserver.pipeline.unet.types import (
     XtTensor,
 )
 
-# from sdgrpcserver.pipeline.unet.types import *
+# from gyre.pipeline.unet.types import *
 
 
 def match_shape(latents: torch.Tensor, target: torch.Size):

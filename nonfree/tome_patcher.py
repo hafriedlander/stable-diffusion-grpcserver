@@ -1,10 +1,15 @@
 from diffusers import UNet2DConditionModel
-from diffusers.models.attention import SpatialTransformer, BasicTransformerBlock
+from diffusers.models.attention import BasicTransformerBlock, SpatialTransformer
 
-from nonfree.tome_unet import ToMeUNet, ToMeSpatialTransformer, ToMeCrossAttention
-from nonfree.tome_memory_efficient_cross_attention import has_xformers, ToMeMemoryEfficientCrossAttention
+from gyre.pipeline.models.memory_efficient_cross_attention import (
+    MemoryEfficientCrossAttention,
+)
+from nonfree.tome_memory_efficient_cross_attention import (
+    ToMeMemoryEfficientCrossAttention,
+    has_xformers,
+)
+from nonfree.tome_unet import ToMeCrossAttention, ToMeSpatialTransformer, ToMeUNet
 
-from sdgrpcserver.pipeline.models.memory_efficient_cross_attention import MemoryEfficientCrossAttention
 
 def apply_tome(
     model: UNet2DConditionModel, trace_source: bool = False, prop_attn: bool = True

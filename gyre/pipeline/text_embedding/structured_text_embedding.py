@@ -2,20 +2,19 @@
 # 
 # Changes:
 #   - Extracted out from the TFSDGPipeline into it's own class
-#   - Methods added to make it a sdgrpcserver.TextEmbedding compatible class
+#   - Methods added to make it a gyre.TextEmbedding compatible class
 
 import inspect
+import traceback
 from dataclasses import dataclass
-from typing import List, Optional, Union, Literal
+from typing import List, Literal, Optional, Union
 
 import numpy as np
 import stanza
-from stanza.pipeline.core import DownloadMethod
 import torch
 from nltk.tree import Tree
+from stanza.pipeline.core import DownloadMethod
 from transformers.tokenization_utils import BatchEncoding
-
-import traceback
 
 from .text_embedding import TextEmbedding
 

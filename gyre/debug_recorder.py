@@ -1,10 +1,16 @@
-import glob, os, tempfile, platform, time
+import glob
+import os
+import platform
+import tempfile
+import time
 
 import yaml
+
 try:
-    from yaml import CLoader as Loader, CDumper as Dumper
+    from yaml import CDumper as Dumper
+    from yaml import CLoader as Loader
 except ImportError:
-    from yaml import Loader, Dumper
+    from yaml import Dumper, Loader
 
 try:
     import gzip
@@ -55,7 +61,7 @@ class DebugContext:
 class DebugRecorder:
     def __init__(self, storage_time=10*60):
         self.storage_time = storage_time
-        self.storage_path = os.path.join(tempfile.gettempdir(), "sdgrpcserver_debug")
+        self.storage_path = os.path.join(tempfile.gettempdir(), "gyre_debug")
 
         if not os.path.exists(self.storage_path): os.mkdir(self.storage_path)
 

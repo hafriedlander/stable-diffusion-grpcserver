@@ -3,10 +3,10 @@ from typing import cast
 import torch
 import torchvision.transforms as T
 
-from sdgrpcserver import resize_right
-from sdgrpcserver.pipeline.easing import Easing
-from sdgrpcserver.pipeline.randtools import batched_rand
-from sdgrpcserver.pipeline.unet.types import (
+from gyre import resize_right
+from gyre.pipeline.easing import Easing
+from gyre.pipeline.randtools import batched_rand
+from gyre.pipeline.unet.types import (
     DiffusersSchedulerUNet,
     GenericSchedulerUNet,
     KDiffusionSchedulerUNet,

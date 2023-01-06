@@ -35,11 +35,11 @@ from transformers.models.clip import (
     CLIPTokenizer,
 )
 
-from sdgrpcserver import images, resize_right
-from sdgrpcserver.patching import patch_module_references
-from sdgrpcserver.pipeline import diffusers_types
-from sdgrpcserver.pipeline.attention_replacer import replace_cross_attention
-from sdgrpcserver.pipeline.common_scheduler import (
+from gyre import images, resize_right
+from gyre.patching import patch_module_references
+from gyre.pipeline import diffusers_types
+from gyre.pipeline.attention_replacer import replace_cross_attention
+from gyre.pipeline.common_scheduler import (
     SCHEDULER_NOISE_TYPE,
     SCHEDULER_PREDICTION_TYPE,
     CommonScheduler,
@@ -50,35 +50,31 @@ from sdgrpcserver.pipeline.common_scheduler import (
     SchedulerCallback,
     SchedulerConfig,
 )
-from sdgrpcserver.pipeline.kschedulers.scheduling_utils import KSchedulerMixin
-from sdgrpcserver.pipeline.latent_debugger import LatentDebugger
-from sdgrpcserver.pipeline.lora import (
+from gyre.pipeline.kschedulers.scheduling_utils import KSchedulerMixin
+from gyre.pipeline.latent_debugger import LatentDebugger
+from gyre.pipeline.lora import (
     apply_learned_embed_in_clip,
     monkeypatch_or_replace_safeloras,
     monkeypatch_remove_lora,
     parse_safeloras_embeds,
     tune_lora_scale,
 )
-from sdgrpcserver.pipeline.models.structured_cross_attention import (
-    StructuredCrossAttention,
-)
-from sdgrpcserver.pipeline.randtools import TorchRandOverride, batched_randn
-from sdgrpcserver.pipeline.text_embedding import BasicTextEmbedding
-from sdgrpcserver.pipeline.text_embedding.lpw_text_embedding import LPWTextEmbedding
-from sdgrpcserver.pipeline.text_embedding.text_encoder_alt_layer import (
-    TextEncoderAltLayer,
-)
-from sdgrpcserver.pipeline.unet.cfg import CFGChildUnets, CFGUnet
-from sdgrpcserver.pipeline.unet.clipguided import (
+from gyre.pipeline.models.structured_cross_attention import StructuredCrossAttention
+from gyre.pipeline.randtools import TorchRandOverride, batched_randn
+from gyre.pipeline.text_embedding import BasicTextEmbedding
+from gyre.pipeline.text_embedding.lpw_text_embedding import LPWTextEmbedding
+from gyre.pipeline.text_embedding.text_encoder_alt_layer import TextEncoderAltLayer
+from gyre.pipeline.unet.cfg import CFGChildUnets, CFGUnet
+from gyre.pipeline.unet.clipguided import (
     CLIP_GUIDANCE_BASE,
     CLIP_NO_CUTOUTS_TYPE,
     ClipGuidanceConfig,
     ClipGuidedMode,
 )
-from sdgrpcserver.pipeline.unet.core import UNetWithEmbeddings
-from sdgrpcserver.pipeline.unet.graft import GraftUnets
-from sdgrpcserver.pipeline.unet.hires_fix import HiresUnetWrapper
-from sdgrpcserver.pipeline.unet.types import (
+from gyre.pipeline.unet.core import UNetWithEmbeddings
+from gyre.pipeline.unet.graft import GraftUnets
+from gyre.pipeline.unet.hires_fix import HiresUnetWrapper
+from gyre.pipeline.unet.types import (
     DiffusersSchedulerUNet,
     EpsTensor,
     KDiffusionSchedulerUNet,
@@ -86,7 +82,7 @@ from sdgrpcserver.pipeline.unet.types import (
     PX0Tensor,
     XtTensor,
 )
-from sdgrpcserver.pipeline.xformers_utils import (
+from gyre.pipeline.xformers_utils import (
     xformers_mea_available,
     xformers_mea_reversible_for_module,
 )

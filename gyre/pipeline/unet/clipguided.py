@@ -5,14 +5,11 @@ import numpy as np
 import torch
 import torchvision.transforms as T
 
-from sdgrpcserver import resize_right
-from sdgrpcserver.k_diffusion import utils as k_utils
-from sdgrpcserver.pipeline.common_scheduler import (
-    DiffusersKScheduler,
-    DiffusersSchedulerBase,
-)
-from sdgrpcserver.pipeline.unet.cfg import CFGChildUnets
-from sdgrpcserver.pipeline.unet.types import (
+from gyre import resize_right
+from gyre.k_diffusion import utils as k_utils
+from gyre.pipeline.common_scheduler import DiffusersKScheduler, DiffusersSchedulerBase
+from gyre.pipeline.unet.cfg import CFGChildUnets
+from gyre.pipeline.unet.types import (
     DiffusersSchedulerUNet,
     EpsTensor,
     KDiffusionSchedulerUNet,
@@ -20,7 +17,7 @@ from sdgrpcserver.pipeline.unet.types import (
     ScheduleTimestep,
     XtTensor,
 )
-from sdgrpcserver.pipeline.vae_approximator import VaeApproximator
+from gyre.pipeline.vae_approximator import VaeApproximator
 
 CLIP_NO_CUTOUTS_TYPE = Literal[False, True, "vae", "approx"]
 CLIP_GUIDANCE_BASE = Literal["guided", "mixed"]

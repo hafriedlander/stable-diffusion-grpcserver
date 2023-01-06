@@ -1,4 +1,10 @@
-An implementation of a server for the Stability AI API
+# Gyre
+
+A server for AI image generation. Provides a backend service over multiple APIs
+(GRPC and REST) for use by one or more frontends.
+
+In particular, aims to be a local, open source implementation of the Stability AI APIs,
+but also includes a lot of useful extensions.
 
 # Features
 
@@ -62,7 +68,7 @@ mount it into the Docker image to run the very latest code (including
 any local edits you make)
 
   ```
-    -v `pwd`/sdgrpcserver:/sdgrpcserver \
+    -v `pwd`/gyre:/gyre \
   ```
 
 - Or override the engines.yaml config by making a config directory,
@@ -137,7 +143,7 @@ Create a directory and download https://raw.githubusercontent.com/hafriedlander/
 set PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu116 
 pip install stable-diffusion-grpcserver
 set HF_API_TOKEN={your huggingface token} 
-sdgrpcserver
+gyre
 ```
 
 

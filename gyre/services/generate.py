@@ -16,13 +16,13 @@ import grpc
 import torch
 from google.protobuf import json_format as pb_json_format
 
-from sdgrpcserver import constants, images
-from sdgrpcserver.debug_recorder import DebugNullRecorder
-from sdgrpcserver.manager import EngineNotFoundError
-from sdgrpcserver.protobuf_safetensors import deserialize_safetensors
-from sdgrpcserver.protobuf_tensors import deserialize_tensor
-from sdgrpcserver.services.exception_to_grpc import exception_to_grpc
-from sdgrpcserver.utils import artifact_to_image, image_to_artifact
+from gyre import constants, images
+from gyre.debug_recorder import DebugNullRecorder
+from gyre.manager import EngineNotFoundError
+from gyre.protobuf_safetensors import deserialize_safetensors
+from gyre.protobuf_tensors import deserialize_tensor
+from gyre.services.exception_to_grpc import exception_to_grpc
+from gyre.utils import artifact_to_image, image_to_artifact
 
 
 def buildDefaultMaskPostAdjustments():

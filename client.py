@@ -35,7 +35,7 @@ else:
 
 # this is necessary because of how the auto-generated code constructs its imports
 thisPath = pathlib.Path(__file__).parent.resolve()
-genPath = thisPath / "sdgrpcserver/generated"
+genPath = thisPath / "gyre/generated"
 sys.path.append(str(genPath))
 
 import engines_pb2 as engines
@@ -44,8 +44,8 @@ import generation_pb2 as generation
 import generation_pb2_grpc as generation_grpc
 import tensors_pb2 as tensors
 
-from sdgrpcserver.protobuf_safetensors import serialize_safetensor
-from sdgrpcserver.protobuf_tensors import serialize_tensor
+from gyre.protobuf_safetensors import serialize_safetensor
+from gyre.protobuf_tensors import serialize_tensor
 
 logger = logging.getLogger(__name__)
 logger.setLevel(level=logging.INFO)
@@ -287,7 +287,7 @@ class StabilityInference:
         call_credentials = []
 
         if proto == "grpc-web":
-            from sdgrpcserver.sonora import client as sonora_client
+            from gyre.sonora import client as sonora_client
 
             channel = sonora_client.insecure_web_channel(host)
         elif key:

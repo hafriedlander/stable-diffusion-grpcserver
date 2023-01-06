@@ -29,10 +29,10 @@ from huggingface_hub.file_download import http_get
 from tqdm.auto import tqdm
 from transformers import CLIPModel, PreTrainedModel
 
-from sdgrpcserver.constants import sd_cache_home
-from sdgrpcserver.pipeline.model_utils import GPUExclusionSet, clone_model
-from sdgrpcserver.pipeline.samplers import build_sampler_set
-from sdgrpcserver.pipeline.unified_pipeline import (
+from gyre.constants import sd_cache_home
+from gyre.pipeline.model_utils import GPUExclusionSet, clone_model
+from gyre.pipeline.samplers import build_sampler_set
+from gyre.pipeline.unified_pipeline import (
     SCHEDULER_NOISE_TYPE,
     UnifiedPipelineImageType,
     UnifiedPipelinePromptType,
@@ -40,11 +40,11 @@ from sdgrpcserver.pipeline.unified_pipeline import (
 
 DEFAULT_LIBRARIES = {
     "StableDiffusionPipeline": "stable_diffusion",
-    "UnifiedPipeline": "sdgrpcserver.pipeline.unified_pipeline",
-    "UpscalerPipeline": "sdgrpcserver.pipeline.upscaler_pipeline",
-    "DiffusersDepthPipeline": "sdgrpcserver.pipeline.depth.diffusers_depth_pipeline",
-    "MidasDepthPipeline": "sdgrpcserver.pipeline.depth.midas_depth_pipeline",
-    "MidasModelWrapper": "sdgrpcserver.pipeline.depth.midas_model_wrapper",
+    "UnifiedPipeline": "gyre.pipeline.unified_pipeline",
+    "UpscalerPipeline": "gyre.pipeline.upscaler_pipeline",
+    "DiffusersDepthPipeline": "gyre.pipeline.depth.diffusers_depth_pipeline",
+    "MidasDepthPipeline": "gyre.pipeline.depth.midas_depth_pipeline",
+    "MidasModelWrapper": "gyre.pipeline.depth.midas_model_wrapper",
 }
 
 TYPE_CLASSES = {
@@ -57,7 +57,7 @@ TYPE_CLASSES = {
     "clip_tokenizer": "transformers.CLIPTokenizer",
     "text_encoder": "transformers.CLIPTextModel",
     "inpaint_text_encoder": "transformers.CLIPTextModel",
-    "upscaler": "sdgrpcserver.pipeline.upscaler_pipeline.NoiseLevelAndTextConditionedUpscaler",
+    "upscaler": "gyre.pipeline.upscaler_pipeline.NoiseLevelAndTextConditionedUpscaler",
     "depth_estimator": "transformers.DPTForDepthEstimation",
     "midas_depth_estimator": "MidasModelWrapper",
 }
@@ -901,7 +901,7 @@ class EngineManager(object):
             if name == "safety_checker":
                 if self._nsfw == "flag":
                     fqclass_name = (
-                        "sdgrpcserver.pipeline.safety_checkers.FlagOnlySafetyChecker"
+                        "gyre.pipeline.safety_checkers.FlagOnlySafetyChecker"
                     )
                 elif self._nsfw == "ignore":
                     pipeline[name] = None

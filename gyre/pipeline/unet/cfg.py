@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 import torch
 
-from sdgrpcserver.pipeline.unet.types import (
+from gyre.pipeline.unet.types import (
     EpsTensor,
     NoisePredictionUNet,
     ScheduleTimestep,

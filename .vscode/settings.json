@@ -2,14 +2,14 @@
     "python.analysis.typeCheckingMode": "basic",
     "python.analysis.diagnosticMode": "workspace",
     "python.analysis.include": [
-        "sdgrpcserver/pipeline"
+        "gyre/pipeline"
     ],
     "python.analysis.exclude": [
-        "sdgrpcserver/pipeline/kschedulers",
-        "sdgrpcserver/pipeline/schedulers"
+        "gyre/pipeline/kschedulers",
+        "gyre/pipeline/schedulers"
     ],
     "python.analysis.extraPaths": [
-        "sdgrpcserver/generated"
+        "gyre/generated"
     ],
     "python.formatting.provider": "black",
     "python.linting.enabled": true,

@@ -17,11 +17,11 @@ basePath = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(basePath)
 
 # This line adds the various other module paths into the import searchpath
-from sdgrpcserver.server import main
+from gyre.server import main
 
-from sdgrpcserver.services.generate import GenerationServiceServicer
-from sdgrpcserver.manager import EngineMode, EngineManager
-from sdgrpcserver import images
+from gyre.services.generate import GenerationServiceServicer
+from gyre.manager import EngineMode, EngineManager
+from gyre import images
 
 import generation_pb2
 

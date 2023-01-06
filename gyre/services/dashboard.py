@@ -1,7 +1,7 @@
 import dashboard_pb2
 import dashboard_pb2_grpc
 
-from sdgrpcserver.services.exception_to_grpc import exception_to_grpc
+from gyre.services.exception_to_grpc import exception_to_grpc
 
 
 class DashboardServiceServicer(dashboard_pb2_grpc.DashboardServiceServicer):

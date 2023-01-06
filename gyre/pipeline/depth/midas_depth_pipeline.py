@@ -1,7 +1,7 @@
 import torch
 
-from sdgrpcserver import images
-from sdgrpcserver.pipeline.depth.midas_model_wrapper import MidasModelWrapper
+from gyre import images
+from gyre.pipeline.depth.midas_model_wrapper import MidasModelWrapper
 
 
 class MidasDepthPipeline:

@@ -4,8 +4,8 @@ import io
 import aiohttp
 import grpc.experimental.aio
 
-from sdgrpcserver.sonora import client
-from sdgrpcserver.sonora import protocol
+from gyre.sonora import client, protocol
+
 
 def insecure_web_channel(url):
     return WebChannel(url)

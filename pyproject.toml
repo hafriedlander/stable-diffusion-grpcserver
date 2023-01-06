@@ -54,10 +54,10 @@ dev = ["black ~= 22.10.0", "flake8 ~= 6.0.0", "flake8-pyproject ~= 1.2.1"]
 Home = "https://github.com/hafriedlander/stable-diffusion-grpcserver"
 
 [project.scripts]
-sdgrpcserver = "sdgrpcserver.server:main"
+gyre = "gyre.server:main"
 
 [tool.flit.module]
-name = "sdgrpcserver"
+name = "gyre"
 
 [tool.isort]
 profile = "black"

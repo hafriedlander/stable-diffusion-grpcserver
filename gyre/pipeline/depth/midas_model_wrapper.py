@@ -7,11 +7,11 @@ from copy import deepcopy
 import torch
 from transformers.modeling_utils import get_parameter_device, get_parameter_dtype
 
-sdgrpcserver_path = __file__
-while sdgrpcserver_path and os.path.split(sdgrpcserver_path)[1] != "sdgrpcserver":
-    sdgrpcserver_path = os.path.dirname(sdgrpcserver_path)
+gyre_path = __file__
+while gyre_path and os.path.split(gyre_path)[1] != "gyre":
+    gyre_path = os.path.dirname(gyre_path)
 
-sys.path.append(os.path.join(sdgrpcserver_path, "src", "midas"))
+sys.path.append(os.path.join(gyre_path, "src", "midas"))
 
 from midas.backbones.utils import activations
 from midas.model_loader import default_models, load_model

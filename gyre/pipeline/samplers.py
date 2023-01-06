@@ -4,16 +4,16 @@ import inspect
 import generation_pb2
 from diffusers import DPMSolverMultistepScheduler, LMSDiscreteScheduler, PNDMScheduler
 
-from sdgrpcserver.k_diffusion import sampling as k_sampling
-from sdgrpcserver.pipeline.kschedulers import (
+from gyre.k_diffusion import sampling as k_sampling
+from gyre.pipeline.kschedulers import (
     DPM2AncestralDiscreteScheduler,
     DPM2DiscreteScheduler,
     EulerAncestralDiscreteScheduler,
     EulerDiscreteScheduler,
     HeunDiscreteScheduler,
 )
-from sdgrpcserver.pipeline.schedulers.sample_dpmpp_2m import sample_dpmpp_2m
-from sdgrpcserver.pipeline.schedulers.scheduling_ddim import DDIMScheduler
+from gyre.pipeline.schedulers.sample_dpmpp_2m import sample_dpmpp_2m
+from gyre.pipeline.schedulers.scheduling_ddim import DDIMScheduler
 
 DIFFUSERS_SAMPLERS = {
     generation_pb2.SAMPLER_DDIM: (DDIMScheduler, {}),

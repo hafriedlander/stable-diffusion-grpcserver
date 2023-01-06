@@ -4,9 +4,9 @@ import engines_pb2
 import engines_pb2_grpc
 import generation_pb2
 
-from sdgrpcserver.manager import EngineManager, ModelSet
-from sdgrpcserver.pipeline.samplers import sampler_properties
-from sdgrpcserver.services.exception_to_grpc import exception_to_grpc
+from gyre.manager import EngineManager, ModelSet
+from gyre.pipeline.samplers import sampler_properties
+from gyre.services.exception_to_grpc import exception_to_grpc
 
 
 class EnginesServiceServicer(engines_pb2_grpc.EnginesServiceServicer):

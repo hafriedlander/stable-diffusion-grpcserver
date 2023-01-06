@@ -28,8 +28,8 @@ from twisted.web.error import Error as WebError
 from twisted.web.resource import ErrorPage, NoResource
 from twisted.web.server import NOT_DONE_YET
 
-from sdgrpcserver.http.grpc_gateway_controller import GRPCGatewayContext
-from sdgrpcserver.http.json_api_controller import (
+from gyre.http.grpc_gateway_controller import GRPCGatewayContext
+from gyre.http.json_api_controller import (
     JSONAPIController,
     UnsupportedMediaTypeResource,
 )

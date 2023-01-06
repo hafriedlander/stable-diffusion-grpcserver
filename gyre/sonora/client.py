@@ -1,14 +1,14 @@
 import functools
 import inspect
 import io
-from urllib.parse import urljoin
 import warnings
+from urllib.parse import urljoin
 
 import grpc
 import urllib3
 import urllib3.exceptions
 
-from sdgrpcserver.sonora import protocol
+from gyre.sonora import protocol
 
 
 def insecure_web_channel(url):

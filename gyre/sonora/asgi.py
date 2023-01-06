@@ -1,14 +1,14 @@
 import asyncio
 import base64
+import time
 from collections import namedtuple
 from collections.abc import AsyncIterator
-import time
 from urllib.parse import quote
 
-from async_timeout import timeout
 import grpc
+from async_timeout import timeout
 
-from sdgrpcserver.sonora import protocol
+from gyre.sonora import protocol
 
 _HandlerCallDetails = namedtuple(
     "_HandlerCallDetails", ("method", "invocation_metadata")

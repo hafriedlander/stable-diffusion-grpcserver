@@ -8,10 +8,10 @@ from typing import Optional, Tuple
 
 import torch as th
 from diffusers.models.attention import CrossAttention
-
-from sdgrpcserver.pipeline.text_embedding.structured_text_embedding import KeyValueTensors
-
 from einops.layers.torch import Reduce
+
+from gyre.pipeline.text_embedding.structured_text_embedding import KeyValueTensors
+
 
 class StructuredCrossAttention(CrossAttention):
     def __init__(

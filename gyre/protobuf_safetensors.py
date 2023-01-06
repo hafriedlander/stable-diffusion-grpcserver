@@ -1,9 +1,9 @@
-from sdgrpcserver.generated.generation_pb2 import (
+from gyre.generated.generation_pb2 import (
     Safetensors,
     SafetensorsMeta,
     SafetensorsTensor,
 )
-from sdgrpcserver.protobuf_tensors import deserialize_tensor, serialize_tensor
+from gyre.protobuf_tensors import deserialize_tensor, serialize_tensor
 
 
 def serialize_safetensor(safetensors):

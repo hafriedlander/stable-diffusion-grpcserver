@@ -1,24 +1,25 @@
-import os, glob
-from typing import Callable, List, Tuple, Optional, Union, Literal, NewType
+import glob
+import os
+from typing import Callable, List, Literal, NewType, Optional, Tuple, Union
 
 import numpy as np
+import PIL
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as T
-import sdgrpcserver.k_diffusion as K
-
-import PIL
-from transformers import CLIPTextModel, CLIPTokenizer
-
 from diffusers.models import AutoencoderKL
 from diffusers.pipeline_utils import DiffusionPipeline
 from diffusers.schedulers.scheduling_utils import SchedulerMixin
+from transformers import CLIPTextModel, CLIPTokenizer
 
-from sdgrpcserver.pipeline.kschedulers import *
-from sdgrpcserver.pipeline.text_embedding import *
-
-from sdgrpcserver.pipeline.unified_pipeline import UnifiedPipelinePrompt, UnifiedPipelinePromptType, UnifiedPipelineImageType
-
+import gyre.k_diffusion as K
+from gyre.pipeline.kschedulers import *
+from gyre.pipeline.text_embedding import *
+from gyre.pipeline.unified_pipeline import (
+    UnifiedPipelineImageType,
+    UnifiedPipelinePrompt,
+    UnifiedPipelinePromptType,
+)
 
 # Based on https://t.co/aNqKfn1Mxl - license for that code is below
 

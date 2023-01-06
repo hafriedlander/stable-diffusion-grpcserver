@@ -134,7 +134,7 @@
 
 # At the moment, the higher resolution 768x768 Stable Diffusion 2 model
 # is set up as a seperate engine, as the V2 inpaint model is still 512x512
-# and sdgrpcserver can't handle mixed resolutions like that.
+# and gyre can't handle mixed resolutions like that.
 - model_id: "stable-diffusion-v2-vpred"
   model: "stabilityai/stable-diffusion-2"
   local_model: "./stable-diffusion-v2"
