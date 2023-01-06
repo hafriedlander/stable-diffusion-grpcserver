@@ -3,7 +3,7 @@ requires = ["flit_core >=3.2,<4"]
 build-backend = "flit_core.buildapi"
 
 [project]
-name = "stable-diffusion-grpcserver"
+name = "gyre"
 authors = [{ name = "Hamish Friedlander", email = "hafriedlander@gmail.com" }]
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -51,7 +51,7 @@ dependencies = [
 dev = ["black ~= 22.10.0", "flake8 ~= 6.0.0", "flake8-pyproject ~= 1.2.1"]
 
 [project.urls]
-Home = "https://github.com/hafriedlander/stable-diffusion-grpcserver"
+Home = "https://github.com/hafriedlander/gyre"
 
 [project.scripts]
 gyre = "gyre.server:main"

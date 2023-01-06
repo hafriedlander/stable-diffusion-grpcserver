@@ -44,7 +44,7 @@ docker run --gpus all -it -p 50051:50051 \
   -e SD_LISTEN_TO_ALL=1 \
   -v $HOME/.cache/huggingface:/huggingface \
   -v `pwd`/weights:/weights \
-  hafriedlander/stable-diffusion-grpcserver:xformers-latest
+  hafriedlander/gyre:xformers-latest
 ```
 
 #### Localtunnel
@@ -113,8 +113,8 @@ docker build --target xformers .
 Install Miniconda, then in a Conda console:
 
 ```
-git clone https://github.com/hafriedlander/stable-diffusion-grpcserver.git
-cd stable-diffusion-grpcserver
+git clone https://github.com/hafriedlander/gyre.git
+cd gyre
 conda env create -f environment.yaml
 conda activate sd-grpc-server
 ```
@@ -137,11 +137,11 @@ HF_API_TOKEN={your huggingface token} python ./server.py
 
 ### Option 2:
 
-Create a directory and download https://raw.githubusercontent.com/hafriedlander/stable-diffusion-grpcserver/main/engines.yaml into it, then
+Create a directory and download https://raw.githubusercontent.com/hafriedlander/gyre/main/engines.yaml into it, then
 
 ```
 set PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu116 
-pip install stable-diffusion-grpcserver
+pip install gyre
 set HF_API_TOKEN={your huggingface token} 
 gyre
 ```

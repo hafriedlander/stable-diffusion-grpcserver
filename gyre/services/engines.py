@@ -33,7 +33,7 @@ class EnginesServiceServicer(engines_pb2_grpc.EnginesServiceServicer):
             info.id = engine["id"]
             info.name = engine["name"]
             info.description = engine["description"]
-            info.owner = "stable-diffusion-grpcserver"
+            info.owner = "gyre"
             info.ready = status.get(engine["id"], False)
             info.type = engines_pb2.EngineType.PICTURE
 
